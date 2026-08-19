@@ -1,0 +1,30 @@
+# ==================== 阈值配置文件 ====================
+
+popularity:
+  dwell_threshold_seconds: 30    # 超过30秒算"对该货架感兴趣"
+  min_track_hits: 3              # 轨迹稳定（被跟踪≥3帧）后才开始计数
+  time_window_minutes: 60        # 统计时间窗口（分钟）
+  min_zone_enter_frames: 5       # 至少进入zone 5帧才算有效停留（防误入）
+
+anomaly:
+  alert_threshold_watch: 50      # 评分 >= 50 → 需关注
+  alert_threshold_high: 70       # 评分 >= 70 → 高度可疑
+
+  # ---- L1 轨迹逻辑评分权重（高可靠性） ----
+  l1_weights:
+    skip_checkout: 30            # 去过货架区但未经过收银区直接去出口
+    no_shelf_visit: 20           # 未浏览货架但直接离开
+    avoid_checkout_path: 15      # 轨迹绕开收银台
+    exit_directly_after_shelf: 15 # 离开货架区后直接走向出口
+
+  # ---- L2 姿态/动作评分权重（中可靠性，需Pose模型） ----
+  l2_weights:
+    hand_inward: 20              # 手部向身体内侧移动（口袋/包方向）
+    rapid_arm_retract: 15        # 取物后手臂快速收缩
+    body_blocking: 10            # 身体刻意遮挡手部动作
+
+  # ---- L3 综合行为模式评分权重（低可靠性） ----
+  l3_weights:
+    fast_multi_shelf: 10         # 短时间内快速穿越多个货架
+    frequent_lookback: 5         # 频繁回头/环顾四周
+    avoid_camera: 10             # 刻意躲避摄像头视角
