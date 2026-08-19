@@ -1,0 +1,27 @@
+# 本地摄像头通用 ROI 布局
+# 基础坐标按 640x480，实际帧会自动按尺寸缩放
+zones:
+  shelf_A:
+    type: shelf
+    label: "1号货架 - 零食区"
+    polygon: [[10, 40], [200, 40], [200, 300], [10, 300]]
+
+  shelf_B:
+    type: shelf
+    label: "2号货架 - 饮料区"
+    polygon: [[220, 40], [420, 40], [420, 300], [220, 300]]
+
+  shelf_C:
+    type: shelf
+    label: "3号货架 - 日用品区"
+    polygon: [[430, 40], [630, 40], [630, 300], [430, 300]]
+
+  checkout:
+    type: checkout
+    label: "收银台"
+    polygon: [[10, 310], [630, 310], [630, 390], [10, 390]]
+
+  exit:
+    type: exit
+    label: "出口"
+    polygon: [[0, 400], [640, 400], [640, 480], [0, 480]]

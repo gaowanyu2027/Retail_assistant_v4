@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能零售分析系统</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%234da6ff'/></svg>">
+    <link rel="stylesheet" href="/css/dashboard.css?v=76">
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+    <!-- ===== 顶部导航栏 ===== -->
+    <header class="topbar">
+        <h1>智能零售分析系统</h1>
+        <div class="topbar-right">
+            <span id="status-indicator" class="status-dot offline"></span>
+            <span id="status-text">未连接</span>
+            <select id="camera-select" class="btn btn-secondary" style="display:none;padding:6px 10px">
+                <option value="">扫描中...</option>
+            </select>
+            <button id="btn-webcam" class="btn btn-primary" style="display:none" title="启动服务器摄像头">服务器摄像头</button>
+            <button id="btn-local-cam" class="btn btn-primary" style="display:none" title="使用本机浏览器摄像头">本机摄像头</button>
+            <div class="camera-menu-wrap">
+                <button id="btn-camera-menu" class="btn btn-primary" title="选择或切换摄像头">摄像头</button>
+                <div id="camera-menu" class="camera-menu" style="display:none">
+                    <button type="button" data-camera="webcam">服务器摄像头</button>
+                    <button type="button" data-camera="local">本机摄像头</button>
+                </div>
+            </div>
+            <button id="btn-upload" class="btn btn-secondary" title="上传视频文件">上传视频</button>
+            <input type="file" id="file-input" accept="video/*" style="display:none">
+            <button id="btn-stop" class="btn btn-danger" disabled>停止</button>
+            <button id="btn-voice" class="btn btn-success" title="点击开始/停止语音输入">🎤 语音输入</button>
+            <button id="btn-transcribe-test" class="btn btn-secondary" title="临时测试麦克风转文字">转文字测试</button>
+            <button id="btn-voice-reply" class="btn btn-secondary" title="开关AI语音回复">语音回复: 开</button>
+            <span class="fps-display">FPS: <strong id="fps-value">--</strong></span>
+        </div>
+    </header>
+
+    <!-- ===== 左侧会话记录抽屉 ===== -->
+    <button id="btn-open-sessions" class="session-toggle-btn" title="展开会话记录">会话记录</button>
+    <aside id="session-drawer" class="session-drawer collapsed">
+        <div class="session-drawer-header">
+            <h2>会话记录</h2>
+            <button id="btn-toggle-sessions" class="btn btn-outline">收起</button>
+        </div>
+        <div class="session-search-row">
+            <input id="session-search" type="text" placeholder="搜索问题、回答或标题" autocomplete="off">
+            <button id="btn-search-session" class="btn btn-primary">搜索</button>
+        </div>
+        <div class="session-drawer-actions">
+            <button id="btn-new-session" class="btn btn-primary">新建会话</button>
+            <button id="btn-save-session" class="btn btn-outline">保存会话</button>
+        </div>
+        <div id="session-list" class="session-list"></div>
+    </aside>
+
+    <!-- ===== 模式切换栏 ===== -->
+    <div class="mode-switcher">
+        <div class="mode-tab active" id="tab-retail" onclick="switchMode('retail')">
+            <span class="mode-icon">📊</span>
+            <span>零售视频分析（货架摄像头）</span>
+        </div>
+        <div class="mode-tab" id="tab-emotion" onclick="switchMode('emotion')">
+            <span class="mode-icon">😀</span>
+            <span>门店人脸表情分析（出入口摄像头）</span>
+        </div>
+    </div>
+
+    <!-- ===== 全局语音助手状态栏 ===== -->
+    <div class="voice-bar" id="voice-bar">
+        <span id="voice-status" class="voice-status">点击后说“小零 + 指令”，例如“小零打开摄像头”</span>
+        <span id="voice-heard" class="voice-heard"></span>
+        <span id="voice-result" class="voice-result"></span>
+    </div>
+
+    <!-- ===== 零售模式主内容区 ===== -->
+    <div class="main-container retail-mode" id="retail-container">
+        <!-- 左栏：实时视频 -->
+        <section class="panel video-panel">
+            <h2>实时监控画面 — 货架摄像头</h2>
+            <div class="video-container" id="video-container" title="点击放大画面">
+                <canvas id="video-canvas" width="1280" height="720"></canvas>
+                <div id="video-placeholder" class="video-placeholder" style="pointer-events:none">
+                    <p>📷</p>
+                    <p>点击「摄像头」启动实时画面<br>或「上传视频」播放文件</p>
+                </div>
+            </div>
+            <div class="video-info">
+                <span>帧号: <strong id="frame-id">--</strong></span>
+                <span>活跃轨迹: <strong id="active-tracks">0</strong></span>
+                <span>总访客: <strong id="total-visitors">0</strong></span>
+            </div>
+        </section>
+
+        <!-- 中栏：仪表盘 -->
+        <section class="panel dash-panel">
+            <h2>货架热度排行</h2>
+            <div id="chart-heat" class="chart-box"></div>
+            <div id="ranking-list" class="ranking-list">
+                <p class="placeholder-text">等待数据...</p>
+            </div>
+            <h2 style="margin-top:14px">热度 vs 销量 <span style="font-size:0.7em;color:var(--text-secondary)">(转化诊断)</span></h2>
+            <div id="sales-compare-box" style="font-size:0.78em;line-height:1.6">
+                <p class="placeholder-text">暂无比对数据 —— <button id="btn-sales-simulate" style="background:var(--accent-blue);color:#fff;border:none;border-radius:4px;padding:2px 10px;cursor:pointer">生成演示数据</button></p>
+            </div>
+        </section>
+
+        <!-- 右栏：告警 -->
+        <section class="panel alert-panel">
+            <h2>实时告警</h2>
+            <div id="emo-box" style="background:var(--bg-secondary);border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:0.8em;display:flex;justify-content:space-around;text-align:center">
+                <span>😊正向 <b id="emo-pos" style="color:#4caf84">--</b></span>
+                <span>😟负向 <b id="emo-neg" style="color:#f05050">--</b></span>
+                <span>📊总计 <b id="emo-tot" style="color:#8899aa">--</b></span>
+            </div>
+            <div id="chart-emotion" style="width:100%;height:160px;margin-bottom:8px"></div>
+            <div id="heat-report-bar" style="display:none;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px;font-size:0.8em;line-height:1.5">
+                📋 <span id="heat-report-text"></span>
+            </div>
+            <div id="alert-status" class="alert-status safe">
+                🟢 无异常告警
+            </div>
+            <div id="alert-list" class="alert-list">
+                <p class="placeholder-text">监控正常运行中</p>
+            </div>
+            <div id="suspicious-tracks" class="suspicious-list"></div>
+        </section>
+    </div>
+
+    <!-- ===== 表情模式主内容区 ===== -->
+    <div class="main-container emotion-mode" id="emotion-container" style="display:none">
+        <!-- 左栏：视频+控制 -->
+        <section class="panel">
+            <h2>实时监控画面 — 出入口摄像头</h2>
+            <div class="camera-control">
+                <div id="emo-status-dot" class="status-dot offline"></div>
+                <span>状态：<strong id="emo-status-text">已关闭</strong></span>
+                <span style="margin-left:auto;color:var(--text-secondary);font-size:0.85em">
+                    检测到 <strong id="emo-face-count" style="color:var(--accent-blue)">0</strong> 张人脸
+                </span>
+            </div>
+            <div class="video-container" id="video-container-emo" title="点击放大画面">
+                <canvas id="video-canvas-emo" width="1280" height="720"></canvas>
+                <div id="video-placeholder-emo" class="video-placeholder" style="pointer-events:none">
+                    <p>📷</p>
+                    <p>选择上方摄像头/上传视频开始表情分析<br>系统将自动检测人脸并识别7种表情</p>
+                </div>
+            </div>
+            <div class="video-info">
+                <span>帧号: <strong id="emo-frame-id">--</strong></span>
+                <span>人脸数: <strong id="emo-active-faces">0</strong></span>
+                <span>数据库记录: <strong id="emo-db-count">0</strong></span>
+            </div>
+        </section>
+
+        <!-- 右栏：统计分析 -->
+        <section class="panel">
+            <h2>表情统计分析</h2>
+            <div class="emotion-stats-grid">
+                <div class="stat-card total">
+                    <div class="stat-value" id="stat-total">0</div>
+                    <div class="stat-label">识别记录</div>
+                </div>
+                <div class="stat-card positive">
+                    <div class="stat-value" id="stat-positive">0</div>
+                    <div class="stat-label">正面情绪</div>
+                </div>
+                <div class="stat-card negative">
+                    <div class="stat-value" id="stat-negative">0</div>
+                    <div class="stat-label">负面情绪</div>
+                </div>
+            </div>
+            <div id="emotion-pie-chart" style="width:100%;height:180px;margin-bottom:12px"></div>
+            <div class="emotion-bar-chart" id="emotion-bar-chart">
+                <p class="placeholder-text">暂无识别数据</p>
+            </div>
+
+            <!-- 最近识别记录 -->
+            <h2 style="margin-top:16px">最近识别记录</h2>
+            <table class="records-table">
+                <thead>
+                    <tr><th>时间</th><th>表情</th><th>置信度</th></tr>
+                </thead>
+                <tbody id="emo-records-body">
+                    <tr><td colspan="3" style="color:var(--text-secondary)">暂无数据</td></tr>
+                </tbody>
+            </table>
+
+            <!-- 分段分析报告 -->
+            <div class="analysis-report" id="analysis-report">
+                <h3>📋 本次采集表情分段分析报告</h3>
+                <div id="analysis-content"></div>
+            </div>
+        </section>
+    </div>
+
+    <!-- ===== 底部：自然语言查询区（仅零售模式显示） ===== -->
+    <section class="query-section" id="query-section">
+        <h2>自然语言查询</h2>
+        <div id="query-result" class="query-result">
+            <div class="result-header">
+                <span class="result-label">🤖 AI 分析结果</span>
+                <span id="result-intent" class="badge"></span>
+                <span id="result-confidence" class="confidence"></span>
+            </div>
+            <div id="answer-text" class="answer-text">
+                <p class="placeholder-text">在下方输入问题或点击快捷按钮开始查询</p>
+            </div>
+            <div id="suggestions" class="suggestions"></div>
+        </div>
+        <div class="query-input-row" id="query-input-row">
+            <input type="text" id="query-input"
+                   placeholder="例如：哪个货架最受欢迎？有没有异常行为？今天整体情况怎么样？"
+                   autocomplete="off">
+            <button id="btn-query" class="btn btn-primary">查询</button>
+            <button id="btn-quick-overview" class="btn btn-outline">整体概况</button>
+            <button id="btn-quick-heat" class="btn btn-outline">热度排行</button>
+            <button id="btn-quick-alert" class="btn btn-outline">异常检查</button>
+        </div>
+    </section>
+
+    <!-- ===== 脚本 ===== -->
+    <script src="/js/stream.js?v=76"></script>
+    <script src="/js/chart.js?v=76"></script>
+    <script src="/js/sessions.js?v=76"></script>
+    <script src="/js/app.js?v=76"></script>
+    <script src="/js/voice.js?v=76"></script>
+</body>
+</html>

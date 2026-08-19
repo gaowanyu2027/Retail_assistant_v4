@@ -1,0 +1,63 @@
+# ===== 敏感 / 运行时数据（含对话历史、表情记录，勿推送） =====
+data/
+qdrant_data/
+
+# ===== 模型权重与语音模型（大文件，README 已提供下载方式） =====
+*.pt
+*.pth
+*.onnx
+*.bin
+*.tiktoken
+all_models/
+sherpa-onnx-kws-*/
+Ultralytics/
+
+# ===== 第三方仓库（独立 git 仓库，不应混入本项目） =====
+modlens-main/
+mmpose/
+yaid-hackathon-main/
+
+# ===== 缓存 / 构建产物 =====
+.pnpm-store/
+node_modules/
+frontend/node_modules/
+frontend-vue/node_modules/
+frontend-vue/dist/
+data/_corepack/
+data/_pnpm_store/
+
+# ===== Python / 工具 =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# ===== 日志 / 临时 / 个人文件 =====
+*.log
+data/_*_tmp/
+*.tmp
+测试图片.png
+Docker截图.png
+Thumbs.db
+Desktop.ini
+evals/reports/
+
+# ===== 个人 / 求职材料（勿推送） =====
+项目经历_STAR.md
+JD匹配度评估.md
+
+# ===== 测试截图（含真实对话内容） =====
+ScreenShot_*.png
+
+# ===== 数据库文件（保险） =====
+*.db
+*.sqlite
+*.sqlite3
+
+# ===== 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo

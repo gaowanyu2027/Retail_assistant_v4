@@ -1,0 +1,30 @@
+# ==================== ROI 区域定义 ====================
+# 坐标系：以视频帧左上角为 (0,0)，x向右，y向下
+# type: shelf（货架）、checkout（收银台）、exit（出口）
+# polygon: 顺时针或逆时针多边形顶点 [[x1,y1], [x2,y2], ...]
+
+zones:
+  shelf_A:
+    type: shelf
+    label: "1号货架 - 零食区"
+    polygon: [[10, 40], [200, 40], [200, 280], [10, 280]]
+
+  shelf_B:
+    type: shelf
+    label: "2号货架 - 饮料区"
+    polygon: [[225, 40], [415, 40], [415, 280], [225, 280]]
+
+  shelf_C:
+    type: shelf
+    label: "3号货架 - 日用品区"
+    polygon: [[440, 40], [630, 40], [630, 280], [440, 280]]
+
+  checkout:
+    type: checkout
+    label: "收银台"
+    polygon: [[10, 290], [630, 290], [630, 360], [10, 360]]
+
+  exit:
+    type: exit
+    label: "出口"
+    polygon: [[0, 370], [640, 370], [640, 480], [0, 480]]
