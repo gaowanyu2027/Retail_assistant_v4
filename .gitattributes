@@ -1,0 +1,47 @@
+# ============================================================
+# 换行符策略（防止 Docker 构建在 Windows 上直接报错）
+#
+# 背景：本仓库 git 配置为 core.autocrlf=true。在 Windows 上 checkout/clone 时，
+# git 会把文本文件转成 CRLF。而 BuildKit **不认 "\<CR><LF>" 这种行连接**：
+#   Dockerfile 里写
+#       RUN apt-get update \
+#           && apt-get install -y ...
+#   转成 CRLF 后会被解析成两条指令，直接失败：
+#       dockerfile parse error: unknown instruction: &&
+#
+# 实测证据（同内容的 A/B 对比）：
+#   LF  版本 → 构建成功，RUN 里三行都执行
+#   CRLF 版本 → dockerfile parse error on line 3: unknown instruction: &&
+#
+# 因此这几个文件必须钉死为 LF，无视宿主平台的 autocrlf 设置。
+# 注：.dockerignore 实测对 CRLF 是**容错**的（不会导致 .env 排除失效），
+#     这里一并钉 LF 只是为了干净一致。
+# ============================================================
+
+# Docker 相关文件
+.gitattributes        text eol=lf
+Dockerfile            text eol=lf
+*.Dockerfile          text eol=lf
+.dockerignore         text eol=lf
+docker-compose.yml    text eol=lf
+docker-compose.*.yml  text eol=lf
+
+# 其它脚本类文件（同理：CRLF 会导致 shell 解析问题）
+*.sh                  text eol=lf
+*.bash                text eol=lf
+
+# 二进制文件不做换行转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.pt   binary
+*.pth  binary
+*.onnx binary
+*.db   binary
+*.wav  binary
+*.mp4  binary
+*.zip  binary
+*.gz   binary
