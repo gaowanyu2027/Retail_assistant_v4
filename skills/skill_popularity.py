@@ -142,7 +142,13 @@ class PopularitySkill:
                     record = track.visited_zones[zone_id]
 
                 # 真实时间差优先：dwell_sec = 当前时间 - 进入时间
+                # 兼容 video_processor 预置的 record（只含 enter_frame/dwell_frames/counted，
+                # 缺 enter_ts/last_ts）：首次初始化，否则 (record.get("enter_ts") or timestamp)
+                # 恒为当前值 → dwell_sec 恒 0 → 深度兴趣/店员判定失效。
                 if timestamp is not None:
+                    if "enter_ts" not in record:
+                        record["enter_ts"] = timestamp
+                        record["last_ts"] = timestamp
                     dwell_sec = max(timestamp - (record.get("enter_ts") or timestamp), 0.0)
                 else:
                     record["dwell_frames"] += 1

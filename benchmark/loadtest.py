@@ -55,12 +55,18 @@ AGENT_QUESTIONS = [
 ]
 
 
-def percentile(sorted_lat: list[float], p: float) -> float:
-    """纯 Python 分位（不依赖 numpy）。"""
+def percentile_ms(sorted_lat: list[float], p: float) -> float:
+    """纯 Python 分位（不依赖 numpy），返回**毫秒**。
+
+    注意：入参 sorted_lat 是秒（perf_counter 差值），此处统一 ×1000 换算为毫秒，
+    与 avg_ms / min_ms / max_ms 保持同一单位。
+    （历史 bug：分位曾漏乘 1000 却仍被报告标为 ms，导致出现
+    "P99(0.55ms) < 平均值(576ms)" 这类自相矛盾的错标。）
+    """
     if not sorted_lat:
         return 0.0
     idx = min(len(sorted_lat) - 1, int(p / 100 * len(sorted_lat)))
-    return round(sorted_lat[idx], 3)
+    return round(sorted_lat[idx] * 1000, 2)
 
 
 def summarize(lats: list[float], total_elapsed: float) -> dict:
@@ -73,10 +79,10 @@ def summarize(lats: list[float], total_elapsed: float) -> dict:
         "avg_ms": round(sum(s) / n * 1000, 2) if n else 0,
         "min_ms": round(s[0] * 1000, 2) if s else 0,
         "max_ms": round(s[-1] * 1000, 2) if s else 0,
-        "p50_ms": percentile(s, 50),
-        "p90_ms": percentile(s, 90),
-        "p95_ms": percentile(s, 95),
-        "p99_ms": percentile(s, 99),
+        "p50_ms": percentile_ms(s, 50),
+        "p90_ms": percentile_ms(s, 90),
+        "p95_ms": percentile_ms(s, 95),
+        "p99_ms": percentile_ms(s, 99),
         "errors": 0,
     }
 

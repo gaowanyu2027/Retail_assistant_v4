@@ -99,4 +99,29 @@ class FaceEmotionDetector:
                 "conf": round(conf, 3),
             })
 
+    @staticmethod
+    def mask_faces(frame, faces: list[dict]) -> "np.ndarray":
+        """人脸脱敏：对原始帧中检测到的人脸区域做高斯模糊（合规——展示/推帧不泄露人脸）。
+
+        表情识别在内存完成用于统计，但**推帧/展示时**调用本方法把脸打码，
+        满足个人信息保护合规（人脸是该场景最高敏信息）。返回脱敏后的帧（不修改原帧）。
+        """
+        if frame is None or not faces:
+            return frame
+        out = frame.copy()
+        for f in faces:
+            bbox = f.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            x1, y1, x2, y2 = bbox
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(out.shape[1], x2), min(out.shape[0], y2)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            roi = out[y1:y2, x1:x2]
+            # 高强度高斯模糊（人脸区域），使其不可辨
+            blurred = _cv2.GaussianBlur(roi, (0, 0), 25)
+            out[y1:y2, x1:x2] = blurred
+        return out
+
         return faces

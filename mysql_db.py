@@ -224,11 +224,13 @@ def init_schema():
             period_key VARCHAR(64) NOT NULL DEFAULT '',
             sold_count INT UNSIGNED NOT NULL DEFAULT 0,
             sales_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+            source VARCHAR(16) NOT NULL DEFAULT 'pos',
             period_start DATETIME NOT NULL,
             period_end DATETIME NOT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY uq_sales_period_zone (period_key, zone_id),
-            INDEX idx_sales_zone_time (zone_id, period_start, period_end)
+            INDEX idx_sales_zone_time (zone_id, period_start, period_end),
+            INDEX idx_sales_source (source)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
 
@@ -259,6 +261,25 @@ def init_schema():
             INDEX idx_tool_name (tool_name)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
+
+        # product_sales.source：显式记录数据来源（pos=真实接入 / simulated=演示 / test=验证测试）。
+        # 此前只能靠 period_key 是否以 demo 开头来「猜」来源——真实格式的测试数据会被误当真实数据，
+        # 因此改为显式字段（对齐 track_visit_paths.source 的既有约定）。
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema=%s AND table_name='product_sales' AND column_name='source'",
+            (MYSQL_DB,),
+        )
+        if int(cur.fetchone()[0]) == 0:
+            cur.execute(
+                "ALTER TABLE product_sales "
+                "ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'pos' AFTER sales_amount, "
+                "ADD INDEX idx_sales_source (source)"
+            )
+            # 回填历史数据：period_key 以 demo 开头的一律标为演示数据
+            cur.execute(
+                "UPDATE product_sales SET source='simulated' WHERE period_key LIKE 'demo%%'"
+            )
 
         cur.execute(
             "SELECT COUNT(*) FROM information_schema.columns "
@@ -825,11 +846,15 @@ def save_product_sales(
     sales_amount: float,
     period_start: str | None = None,
     period_end: str | None = None,
+    source: str = "pos",
 ):
     """保存区域商品销量（同一时段同一区域 UPSERT 为最新值）。
 
     销量来源：真实 POS 接入或演示数据录入。用于与视频热度（retail_stats）比对，
     识别"高热度低销量"（货架吸客但商品品质/匹配度问题）等业务信号。
+
+    source：数据来源标记——`pos`=真实接入 / `simulated`=演示数据 / `test`=验证测试数据。
+    显式记录来源（而非从 period_key 猜），避免演示或测试数据被当成真实经营数据。
     """
     now = datetime.now()
     period_start = period_start or now.strftime("%Y-%m-%d %H:%M:%S")
@@ -840,16 +865,17 @@ def save_product_sales(
             cur.execute(
                 """
                 INSERT INTO product_sales
-                (zone_id, period_key, sold_count, sales_amount, period_start, period_end)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                (zone_id, period_key, sold_count, sales_amount, source, period_start, period_end)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     sold_count=VALUES(sold_count),
                     sales_amount=VALUES(sales_amount),
+                    source=VALUES(source),
                     period_start=VALUES(period_start),
                     period_end=VALUES(period_end)
                 """,
                 (zone_id, period_key, int(sold_count or 0),
-                 float(sales_amount or 0), period_start, period_end),
+                 float(sales_amount or 0), source or "pos", period_start, period_end),
             )
     finally:
         conn.close()
@@ -880,6 +906,57 @@ def get_product_sales(period_key: str | None = None, hours: int = 1) -> list[dic
         {"zone_id": r[0], "sold_count": int(r[1] or 0), "sales_amount": float(r[2] or 0)}
         for r in rows
     ]
+
+
+def get_sales_sources(period_key: str | None = None, hours: int = 1) -> list[str]:
+    """返回该时间窗内出现的销量**来源标记**（pos / simulated / test）。
+
+    这是判定数据来源的**权威依据**（显式字段），不再依赖 period_key 前缀猜测。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            if period_key:
+                cur.execute(
+                    "SELECT DISTINCT source FROM product_sales WHERE period_key=%s",
+                    (period_key,),
+                )
+            else:
+                cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+                cur.execute(
+                    "SELECT DISTINCT source FROM product_sales WHERE period_end >= %s",
+                    (cutoff,),
+                )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows if r[0]]
+
+
+def get_sales_period_keys(period_key: str | None = None, hours: int = 1) -> list[str]:
+    """返回该时间窗内出现过的销量 period_key 列表。
+
+    用于判定销量数据来源（演示 vs 真实）：period_key 以 'demo' 开头为演示数据。
+    只取 DISTINCT，不改变既有聚合查询行为。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            if period_key:
+                cur.execute(
+                    "SELECT DISTINCT period_key FROM product_sales WHERE period_key=%s",
+                    (period_key,),
+                )
+            else:
+                cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+                cur.execute(
+                    "SELECT DISTINCT period_key FROM product_sales WHERE period_end >= %s",
+                    (cutoff,),
+                )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows if r[0]]
 
 
 def save_track_visit_path(
