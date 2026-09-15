@@ -332,10 +332,23 @@ def main():
     out.write_text(report, encoding="utf-8")
     print(f"\n报告已保存: {out}")
 
+    # ===== CI 门禁：任一用例失败 → 非零退出码（供流水线拦截回归） =====
+    passed = sum(1 for r in results if r["pass"])
+    failed = [r for r in results if not r["pass"]]
+    if failed:
+        print(f"\n[CI-GATE] 评测失败 {len(failed)}/{len(results)} 条，退出码 1（回归拦截）")
+        sys.exit(1)
+    print(f"[CI-GATE] 评测全部通过 {passed}/{len(results)}，退出码 0")
+
 
 if __name__ == "__main__":
     try:
         main()
+    except SystemExit as e:
+        exit_code = e.code or 0
+    except Exception as e:
+        print(f"[CI-GATE] 评测异常: {e}")
+        exit_code = 2
     finally:
         # 清理评测会话的工具日志与检查点（检查点残留会让下次跑不是冷启动，评测不可重复）
         import mysql_db
@@ -352,3 +365,4 @@ if __name__ == "__main__":
             print("[cleanup] 评测工具日志/检查点已清理")
         except Exception as e:
             print(f"[cleanup] 清理失败(可忽略): {e}")
+    sys.exit(exit_code)
