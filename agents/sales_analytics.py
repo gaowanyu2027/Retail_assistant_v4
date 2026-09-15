@@ -33,6 +33,23 @@ def compare_hotness_vs_sales(period_key: str | None = None, hours: int = 1) -> d
     hot = {z["zone_id"]: z for z in mysql_db.get_retail_stats_by_zone(period_key, hours)}
     sales = {s["zone_id"]: s for s in mysql_db.get_product_sales(period_key, hours)}
 
+    # 数据来源判定：四象限依赖销量，必须让使用者知道结论是建立在真实数据还是演示/测试数据上。
+    # 优先用**显式 source 字段**（权威口径）；旧库缺该字段时退回 period_key 前缀推测。
+    try:
+        from agents.sales_ingest import classify_period_keys, classify_sources, source_caveat
+        try:
+            sources = mysql_db.get_sales_sources(period_key, hours)
+        except Exception:
+            sources = []
+        if sources:
+            sales_source = classify_sources(sources)
+        else:
+            sales_source = classify_period_keys(
+                mysql_db.get_sales_period_keys(period_key, hours))
+        caveat = source_caveat(sales_source)
+    except Exception:
+        sales_source, caveat = "unknown", ""
+
     all_zones = sorted(set(hot) | set(sales))
     zones_out = []
     for zid in all_zones:
@@ -65,6 +82,8 @@ def compare_hotness_vs_sales(period_key: str | None = None, hours: int = 1) -> d
         "period": period_key or f"最近 {hours} 小时",
         "zones": zones_out,
         "summary": summary,
+        "sales_source": sales_source,     # pos=真实接入 / simulated=演示 / mixed / none
+        "data_caveat": caveat,            # 真实数据时为空串；演示数据时明确提示
     }
 
 
@@ -164,7 +183,9 @@ def simulate_demo_sales():
     ]
     mysql_db.save_retail_stats(period_key, demo_zones, start, end)
     for zone_id, sold, amount in demo_sales:
-        mysql_db.save_product_sales(zone_id, period_key, sold, amount, start, end)
+        # 显式标记为演示数据（不依赖 period_key 前缀被猜出来）
+        mysql_db.save_product_sales(zone_id, period_key, sold, amount, start, end,
+                                    source="simulated")
     return len(demo_sales)
 
 

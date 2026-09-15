@@ -231,11 +231,12 @@ def seed_traffic_demo() -> int:
         mysql_db.save_retail_stats(period_key, zones, start, end)
         count += 3
 
-    # 最近时段销量（与深度特征对照）
+    # 最近时段销量（与深度特征对照）—— 显式标记为演示数据
     now_key = f"demo_traffic_{now.strftime('%Y%m%d%H')}"
-    mysql_db.save_product_sales("shelf_A", now_key, 9, 88.0, now.strftime("%Y-%m-%d %H:%M:00"), now.strftime("%Y-%m-%d %H:%M:59"))
-    mysql_db.save_product_sales("shelf_B", now_key, 40, 520.0, now.strftime("%Y-%m-%d %H:%M:00"), now.strftime("%Y-%m-%d %H:%M:59"))
-    mysql_db.save_product_sales("shelf_C", now_key, 22, 260.0, now.strftime("%Y-%m-%d %H:%M:00"), now.strftime("%Y-%m-%d %H:%M:59"))
+    _s, _e = now.strftime("%Y-%m-%d %H:%M:00"), now.strftime("%Y-%m-%d %H:%M:59")
+    mysql_db.save_product_sales("shelf_A", now_key, 9, 88.0, _s, _e, source="simulated")
+    mysql_db.save_product_sales("shelf_B", now_key, 40, 520.0, _s, _e, source="simulated")
+    mysql_db.save_product_sales("shelf_C", now_key, 22, 260.0, _s, _e, source="simulated")
     count += 3
 
     # 告警时段分布：集中在晚间

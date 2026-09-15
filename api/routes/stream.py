@@ -109,6 +109,12 @@ def inject_client_frame_bytes(frame_bytes: bytes):
                 )
             with _client_frame_lock:
                 _client_frames.append(frame)
+            # 数据可信度：客户端推帧成功解码即视为本机摄像头有数据
+            try:
+                from agents.data_quality import SOURCE_CLIENT, mark_frame
+                mark_frame(SOURCE_CLIENT)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -247,6 +253,7 @@ def _processing_thread_emotion(cap_source, face_emotion, run_token):
         LOCAL_BATCH_SAVE,
         VIDEO_OUTPUT_WIDTH,
         EMOTION_JPEG_QUALITY,
+        SANITIZE_FACES,
     )
 
     frame_id = 0
@@ -288,6 +295,13 @@ def _processing_thread_emotion(cap_source, face_emotion, run_token):
             print(f"[WS] 表情源帧尺寸: {frame.shape[1]}x{frame.shape[0]}")
         with _lock:
             _active["current_frame"] = frame_id
+
+        # 数据可信度：表情分析有帧产出 → 上报新鲜度
+        try:
+            from agents.data_quality import SOURCE_EMOTION, mark_frame
+            mark_frame(SOURCE_EMOTION)
+        except Exception:
+            pass
 
         annotated = frame.copy()
         emotion_pairs = []
@@ -337,6 +351,9 @@ def _processing_thread_emotion(cap_source, face_emotion, run_token):
         if w != VIDEO_OUTPUT_WIDTH:
             scale = VIDEO_OUTPUT_WIDTH / w
             annotated = cv2.resize(annotated, (VIDEO_OUTPUT_WIDTH, max(1, int(h * scale))))
+        # 人脸脱敏合规（SANITIZE_FACES=1 时对检测到的人脸区域打码，推帧/展示不泄露人脸）
+        if SANITIZE_FACES and faces:
+            annotated = face_emotion.mask_faces(annotated, faces)
         _, buffer = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, EMOTION_JPEG_QUALITY])
         _latest_frame_b64 = base64.b64encode(buffer).decode()
 
@@ -402,6 +419,12 @@ def _processing_thread_retail(cap_source, processor, pop_skill, anom_skill, emo_
         result = processor.process_frame(frame)
         with _lock:
             _active["current_frame"] = result.frame_id
+        # 数据可信度：零售分析有帧产出 → 上报新鲜度
+        try:
+            from agents.data_quality import SOURCE_RETAIL, mark_frame
+            mark_frame(SOURCE_RETAIL)
+        except Exception:
+            pass
 
         pop_skill.process(
             result.tracks, result.frame_id, processor.fps,
@@ -410,6 +433,17 @@ def _processing_thread_retail(cap_source, processor, pop_skill, anom_skill, emo_
         )
         anom_result = anom_skill.process(result.tracks, result.frame_id, processor.fps)
         emo_skill.process(result.tracks, result.timestamp)
+
+        # 数据隔离：同步喂给 module_registry 当前绑定的摄像头模块（独立 skill 实例）
+        try:
+            from agents.module_registry import get_registry
+            get_registry().feed_current_frame(
+                result.tracks, result.frame_id, processor.fps,
+                timestamp=result.timestamp,
+                current_hour=datetime.now().strftime("%Y%m%d%H"),
+            )
+        except Exception as e:
+            print(f"[ModuleRegistry] 喂帧到模块失败: {e}")
 
         # 顾客动线持久化：处理线程把"被清理的轨迹"（离开画面/丢失超限）的访问序列落库，
         # 供购物动线分析（A→B 关联规则）使用。CV 层零 DB 依赖，由本层 drain 后写入。

@@ -2,6 +2,9 @@
 热度 vs 销量比对分析 API
 
 - GET  /api/analytics/hot-vs-sales        区域热度与销量比对（转化率 + 四象限诊断）
+- GET  /api/analytics/period-compare      同期对比（当前 vs 昨天/上周同期）
+- POST /api/analytics/sales/import        导入真实销量（POS/人工，整点口径）
+- POST /api/analytics/sales/scan-inbox    立即扫描销量投递目录（自动同步）
 - POST /api/analytics/sales-records       录入/更新区域销量（POS 接入或人工录入）
 - POST /api/analytics/sales-simulate      生成演示销量数据（体现四象限业务场景）
 """
@@ -27,6 +30,16 @@ class SalesBatchRequest(BaseModel):
     records: list[dict] = Field(..., description="[{zone_id, sold_count, sales_amount}]")
 
 
+@router.get("/analytics/period-compare")
+async def period_compare():
+    """同期对比：当前时段 vs 昨天同期 / 上周同期（到访、停留、销量、销售额）。"""
+    try:
+        from agents.period_compare import compare_periods
+        return await asyncio.to_thread(compare_periods)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"同期对比失败: {str(e)}")
+
+
 @router.get("/analytics/hot-vs-sales")
 async def hot_vs_sales(period_key: str | None = None, hours: int = 1):
     """区域热度 vs 销量比对：转化率、四象限诊断、归因结论。"""
@@ -37,6 +50,65 @@ async def hot_vs_sales(period_key: str | None = None, hours: int = 1):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"热度销量比对失败: {str(e)}")
+
+
+class SalesImportRequest(BaseModel):
+    """真实销量批量导入（POS 导出 / 人工盘点）"""
+    period_key: str | None = Field(
+        None, description="时段标识（YYYYMMDDHH）；缺省取当前整点。不得使用 demo* 命名空间")
+    records: list[dict] | None = Field(
+        None, description="[{zone_id, sold_count, sales_amount}]，与 csv 二选一")
+    csv: str | None = Field(
+        None, description="CSV 文本：zone_id,sold_count,sales_amount（可带表头）")
+
+
+@router.post("/analytics/sales/import")
+async def import_sales(req: SalesImportRequest):
+    """导入**真实**销量（POS / 人工录入）。
+
+    与 /analytics/sales-simulate 的区别：本接口写入整点时段标识（YYYYMMDDHH），
+    会被判定为真实数据（source=pos），可参与同期对比；
+    演示数据固定使用 demo* 命名空间，归因结果会明确标注「演示数据」。
+    """
+    try:
+        from agents.sales_ingest import import_sales as _import, parse_sales_csv
+
+        if req.csv and req.records:
+            raise HTTPException(status_code=400, detail="records 与 csv 只能提供一个")
+        if req.csv:
+            try:
+                records = parse_sales_csv(req.csv)
+            except ValueError as ve:
+                raise HTTPException(status_code=400, detail=f"CSV 解析失败: {ve}")
+        elif req.records:
+            records = req.records
+        else:
+            raise HTTPException(status_code=400, detail="需提供 records 或 csv")
+
+        try:
+            return await asyncio.to_thread(_import, records, req.period_key)
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"销量导入失败: {str(e)}")
+
+
+@router.post("/analytics/sales/scan-inbox")
+async def scan_sales_inbox():
+    """立即扫描销量投递目录（POST POS/ERP 导出的 CSV 到该目录后调用）。
+
+    与后台定时扫描是同一逻辑：解析 → 导入（来源标记 pos）→ 归档；
+    失败文件移到 failed/ 且不影响其他文件。
+    """
+    try:
+        from agents.sales_inbox import inbox_dir, scan_once
+        result = await asyncio.to_thread(scan_once)
+        result["inbox_dir"] = str(inbox_dir())
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"扫描投递目录失败: {str(e)}")
 
 
 @router.post("/analytics/sales-records")
