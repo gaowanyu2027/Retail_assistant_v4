@@ -1,14 +1,31 @@
 """
-主动汇报 Agent — 定期生成自然语言运营汇报 + 异常突增检测与主动推送
+主动汇报 Agent — 由 LangGraph StateGraph 编排的汇报工作流
 
-- 常规汇报：每 HEAT_REPORT_INTERVAL_SECONDS 用 LLM 生成运营摘要（失败回退模板），
-  写入 heat_report 表并通过 WebSocket 广播
+图结构（显式节点 + 条件分支 + 降级）：
+
+    START → collect → generate ──LLM 成功──→ sanitize → finalize → END
+                             └──LLM 失败──→ template ↗
+
+- collect   ：采集热度/告警/表情实时快照
+- generate  ：调用 LLM 生成自然语言汇报
+- template  ：降级分支（LLM 不可用/异常时用模板拼接，保证链路不断）
+- sanitize  ：合规过滤（法律定性词 → "可疑行为"）
+- finalize  ：组装结构化数据（payload 与旧版逐字段一致）
+
+业务行为：
+- 常规汇报：每 HEAT_REPORT_INTERVAL_SECONDS 生成运营摘要，写入 heat_report 表并经 WebSocket 广播
 - 突增检测：周期性对比告警水位，高风险/总告警突增时立即生成"异常突增"汇报并推送
+
+对外接口与旧版保持一致（generate_regular_report / generate_surge_report /
+detect_surge / update_baseline / reset_baseline），调用方（scheduled_tasks）无需改动。
 """
 import threading
-import time
 from datetime import datetime
-from typing import Any
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+from agents import data_quality
 
 # 进程内基线：上次观测到的告警水位
 _baseline = {"total_alerts": 0, "high_risk_count": 0, "total_visits": 0}
@@ -23,6 +40,24 @@ CHECK_INTERVAL = 60
 # 汇报文案中禁止使用的法律定性词
 _FORBIDDEN = ("偷窃", "盗窃", "小偷", "盗")
 
+
+# ==================== 工作流状态 ====================
+
+class ReportState(TypedDict, total=False):
+    """汇报工作流共享状态（节点间传递）。"""
+    report_type: str    # "regular" | "surge"
+    surge: dict         # 突增信息（report_type="surge" 时使用）
+    pop: dict           # 货架热度快照
+    anom: dict          # 告警快照
+    emo: dict           # 表情快照
+    trend: dict         # 表情趋势
+    llm_failed: bool    # LLM 是否失败（决定走模板降级分支）
+    quality: dict       # 数据可信度快照（门禁：区分「无数据」与「无客流」）
+    summary: str        # 最终文案
+    data: dict          # 最终结构化数据
+
+
+# ==================== 基础工具 ====================
 
 def _sanitize(text: str) -> str:
     for w in _FORBIDDEN:
@@ -41,9 +76,23 @@ def _collect_snapshot() -> tuple:
     return pop, anom, emo, trend
 
 
-def _template_text(pop: dict, anom: dict, emo: dict, trend: dict, report_type: str = "regular") -> str:
-    """模板汇报（LLM 不可用时的降级）。"""
+def _template_text(pop: dict, anom: dict, emo: dict, trend: dict,
+                   report_type: str = "regular", quality: dict | None = None) -> str:
+    """模板汇报（LLM 不可用时的降级）。
+
+    数据不可信（视频源未启动/断流）时**不输出「到访 0 人次」这类会误导的结论**，
+    而是明确说明当前无有效数据——避免把设备故障报成「今天没生意」。
+    """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if quality is not None and not quality.get("reliable", True):
+        reason = quality.get("reason", "当前无有效视频数据")
+        if report_type == "surge":
+            return (
+                f"【异常突增·数据不可信】{now}：{reason}，"
+                "告警增量无法确认，请先检查摄像头再判断是否需人工复核。"
+            )
+        return f"【数据不可信】{now}：{reason}。本次不出运营结论，请检查摄像头/视频源后重试。"
+
     zones = pop.get("zones", {})
     top = pop.get("top_zone")
     top_label = (zones.get(top, {}) or {}).get("zone_label", top or "无") if top else "无"
@@ -65,8 +114,9 @@ def _template_text(pop: dict, anom: dict, emo: dict, trend: dict, report_type: s
     )
 
 
-def _llm_text(pop: dict, anom: dict, emo: dict, trend: dict, report_type: str) -> str:
-    """用 LLM 生成自然语言运营汇报；失败回退模板。"""
+def _try_llm_text(pop: dict, anom: dict, emo: dict, trend: dict, report_type: str,
+                  quality: dict | None = None) -> str | None:
+    """用 LLM 生成自然语言运营汇报；失败返回 None（由条件边转模板降级分支）。"""
     try:
         from agents.base_agent import create_llm
 
@@ -78,6 +128,19 @@ def _llm_text(pop: dict, anom: dict, emo: dict, trend: dict, report_type: str) -
                 f"停留{z.get('total_dwell_seconds', 0)}秒, 热度{z.get('heat_score', 0)}"
             )
         focus = "检测到高风险告警突增，请重点说明异常情况并强调需人工复核。" if report_type == "surge" else "请客观汇报整体运营情况。"
+
+        # 数据可信度门禁：数据不可信时必须说明「无有效数据」，禁止把 0 解读成业务结论
+        if quality is not None and not quality.get("reliable", True):
+            quality_note = (
+                "\n【数据可信度】当前实时数据**不可信**"
+                f"（{quality.get('reason', '无有效视频数据')}）。"
+                "上述各项 0 值是「没有采集到数据」而非「真的没有客流/告警」。"
+                "请明确告知店长：本次无法给出运营结论，并提示检查摄像头/视频源是否正常，"
+                "**不要**基于这些 0 值分析客流量、顾客情绪或经营好坏。\n"
+            )
+        else:
+            quality_note = "\n【数据可信度】实时数据正常。\n"
+
         prompt = (
             "你是超市零售运营分析助手。请根据以下实时监控数据生成一段简短的运营汇报"
             f"（3~5句话，中文，面向店长）：\n"
@@ -85,25 +148,90 @@ def _llm_text(pop: dict, anom: dict, emo: dict, trend: dict, report_type: str) -
             f"【告警】总 {anom.get('total_alerts', 0)} 起，高风险 {anom.get('high_risk_count', 0)} 起\n"
             f"【表情】识别 {emo.get('total_faces', 0)} 人次，正面 {emo.get('positive_count', 0)}，"
             f"负面 {emo.get('negative_count', 0)}，趋势：{trend.get('conclusion', '')}\n"
+            f"{quality_note}"
             f"要求：{focus} 使用中性措辞，禁止使用偷窃、盗窃等法律定性词汇；"
             "若存在高风险告警必须注明\"建议人工复核\"。"
         )
         resp = create_llm(temperature=0.3).invoke(prompt)
         text = (resp.content or "").strip() if isinstance(resp.content, str) else str(resp.content or "").strip()
         if text:
-            return _sanitize(text)
+            return text
     except Exception as e:
-        print(f"[ReportAgent] LLM 生成失败，回退模板: {e}")
-    return _template_text(pop, anom, emo, trend, report_type)
+        print(f"[ReportAgent] LLM 生成失败，走模板降级分支: {e}")
+    return None
 
 
-def generate_regular_report() -> dict:
-    """生成一轮常规运营汇报。返回 {"summary": str, "data": dict}。"""
+# ==================== 图节点 ====================
+
+def _node_collect(state: ReportState) -> dict:
+    """节点 1：采集实时数据快照 + 数据可信度快照。"""
     pop, anom, emo, trend = _collect_snapshot()
-    summary = _llm_text(pop, anom, emo, trend, "regular")
+    return {"pop": pop, "anom": anom, "emo": emo, "trend": trend,
+            "quality": data_quality.snapshot()}
+
+
+def _node_generate(state: ReportState) -> dict:
+    """节点 2：LLM 生成汇报文案；失败置 llm_failed，由条件边转模板分支。"""
+    text = _try_llm_text(
+        state.get("pop") or {},
+        state.get("anom") or {},
+        state.get("emo") or {},
+        state.get("trend") or {},
+        state.get("report_type", "regular"),
+        state.get("quality"),
+    )
+    if text:
+        return {"summary": text, "llm_failed": False}
+    return {"llm_failed": True}
+
+
+def _route_after_generate(state: ReportState) -> str:
+    """条件边：LLM 成功 → 合规过滤；失败 → 模板降级。"""
+    return "fallback" if state.get("llm_failed") else "llm"
+
+
+def _node_template(state: ReportState) -> dict:
+    """节点 3b（降级分支）：模板拼接汇报。"""
     return {
-        "summary": summary,
-        "data": {
+        "summary": _template_text(
+            state.get("pop") or {},
+            state.get("anom") or {},
+            state.get("emo") or {},
+            state.get("trend") or {},
+            state.get("report_type", "regular"),
+            state.get("quality"),
+        ),
+        "llm_failed": True,
+    }
+
+
+def _node_sanitize(state: ReportState) -> dict:
+    """节点 4：合规过滤（法律定性词 → 可疑行为）。"""
+    return {"summary": _sanitize(state.get("summary", "") or "")}
+
+
+def _node_finalize(state: ReportState) -> dict:
+    """节点 5：组装结构化数据（字段与旧版逐一对齐）。"""
+    rtype = state.get("report_type", "regular")
+    pop = state.get("pop") or {}
+    anom = state.get("anom") or {}
+    surge = state.get("surge") or {}
+
+    if rtype == "surge":
+        data = {
+            "type": "surge",
+            "generator": "agent",
+            "top_zone": pop.get("top_zone"),
+            "total_visits": pop.get("total_visits", 0),
+            "total_alerts": surge.get("total_alerts", 0),
+            "high_risk_count": surge.get("high_risk_count", 0),
+            "delta_total": surge.get("delta_total", 0),
+            "delta_high": surge.get("delta_high", 0),
+            "data_quality": state.get("quality") or {},
+            "timestamp": datetime.now().isoformat(),
+        }
+    else:
+        data = {
             "type": "regular",
             "generator": "agent",
             "top_zone": pop.get("top_zone"),
@@ -111,9 +239,49 @@ def generate_regular_report() -> dict:
             "total_alerts": anom.get("total_alerts", 0),
             "high_risk_count": anom.get("high_risk_count", 0),
             "stats": pop,
+            "data_quality": state.get("quality") or {},
             "timestamp": datetime.now().isoformat(),
-        },
-    }
+        }
+    return {"data": data}
+
+
+def _build_graph():
+    """构建汇报工作流图（编译一次，进程内复用）。"""
+    builder = StateGraph(ReportState)
+    builder.add_node("collect", _node_collect)
+    builder.add_node("generate", _node_generate)
+    builder.add_node("template", _node_template)
+    builder.add_node("sanitize", _node_sanitize)
+    builder.add_node("finalize", _node_finalize)
+
+    builder.add_edge(START, "collect")
+    builder.add_edge("collect", "generate")
+    builder.add_conditional_edges(
+        "generate",
+        _route_after_generate,
+        {"llm": "sanitize", "fallback": "template"},
+    )
+    builder.add_edge("template", "sanitize")
+    builder.add_edge("sanitize", "finalize")
+    builder.add_edge("finalize", END)
+    return builder.compile()
+
+
+_report_graph = _build_graph()
+
+
+# ==================== 对外接口（与旧版签名/返回结构一致） ====================
+
+def generate_regular_report() -> dict:
+    """生成一轮常规运营汇报（走 StateGraph 工作流）。返回 {"summary": str, "data": dict}。"""
+    out = _report_graph.invoke({"report_type": "regular"})
+    return {"summary": out.get("summary", ""), "data": out.get("data", {})}
+
+
+def generate_surge_report(surge: dict) -> dict:
+    """生成"异常突增"汇报（走 StateGraph 工作流）。"""
+    out = _report_graph.invoke({"report_type": "surge", "surge": surge or {}})
+    return {"summary": out.get("summary", ""), "data": out.get("data", {})}
 
 
 def detect_surge() -> dict | None:
@@ -134,26 +302,6 @@ def detect_surge() -> dict | None:
             "delta_high": d_high,
         }
     return None
-
-
-def generate_surge_report(surge: dict) -> dict:
-    """生成"异常突增"汇报。"""
-    pop, anom, emo, trend = _collect_snapshot()
-    summary = _llm_text(pop, anom, emo, trend, "surge")
-    return {
-        "summary": summary,
-        "data": {
-            "type": "surge",
-            "generator": "agent",
-            "top_zone": pop.get("top_zone"),
-            "total_visits": pop.get("total_visits", 0),
-            "total_alerts": surge.get("total_alerts", 0),
-            "high_risk_count": surge.get("high_risk_count", 0),
-            "delta_total": surge.get("delta_total", 0),
-            "delta_high": surge.get("delta_high", 0),
-            "timestamp": datetime.now().isoformat(),
-        },
-    }
 
 
 def update_baseline(anom_summary: dict):
