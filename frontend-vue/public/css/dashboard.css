@@ -57,6 +57,16 @@ body {
 .fps-display { font-size: 0.85em; color: var(--text-secondary); }
 .fps-display strong { color: var(--accent-blue); }
 
+/* 当前登录用户标识（顶栏） */
+.user-chip {
+    font-size: 0.8em;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 10px;
+    white-space: nowrap;
+}
+
 /* ===== 模式切换栏 ===== */
 .session-toggle-btn {
     position: fixed;
