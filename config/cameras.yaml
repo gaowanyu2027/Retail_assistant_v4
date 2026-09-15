@@ -1,0 +1,21 @@
+# 摄像头配置 — 按标签(type)分配候选模块，按 modules 加载实际模块
+# type（标签）: indoor_shelf / entrance / checkout
+# modules: 该摄像头实际加载的分析模块（必须在标签候选池内，否则注册表校验警告）
+cameras:
+  cam_in_01:
+    name: "1号店内货架摄像头"
+    type: indoor_shelf
+    source: "mmpose/demo/resources/demo.mp4"
+    modules: [shelf_heat, anomaly_detect, empty_shelf]
+
+  cam_door_02:
+    name: "2号店门口摄像头"
+    type: entrance
+    source: "rtsp://192.168.10.20:554/stream"
+    modules: [footfall]
+
+  cam_check_03:
+    name: "3号收银台摄像头"
+    type: checkout
+    source: "webcam"
+    modules: [emotion_experience]

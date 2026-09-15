@@ -1,0 +1,152 @@
+"""
+摄像头管理接口 — 标识/添加摄像头 + 按需配置模块（前端"显性按钮"入口）
+
+提供 REST 端点：
+- GET  /api/cameras                   列出所有摄像头（含已装模块 + 候选池）
+- GET  /api/cameras/scan              扫描/识别可用摄像头
+- GET  /api/cameras/modules           列出所有已注册模块 + 候选类型
+- POST /api/cameras                   添加摄像头（name/type/source/modules）
+- PUT  /api/cameras/{id}              编辑摄像头
+- DELETE /api/cameras/{id}            删除摄像头
+- POST /api/cameras/{id}/modules      运行时加载模块（校验标签候选池）
+- DELETE /api/cameras/{id}/modules/{mod}  卸载模块
+- PUT  /api/cameras/{id}/modules/{mod}/enabled  开关模块
+- GET  /api/cameras/{id}/modules/{mod}/stats    查询某模块统计（Agent 工具同源）
+
+所有操作走 ModuleRegistry，运行时生效（改配置持久化，不重启、不改代码）。
+"""
+import asyncio
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from agents.module_registry import get_registry
+from agents.analytics_module import candidates_for_type
+
+router = APIRouter(prefix="/cameras", tags=["cameras"])
+
+
+class CameraCreate(BaseModel):
+    name: str = Field(..., description="摄像头名称")
+    type: str = Field(..., description="标签: indoor_shelf / entrance / checkout")
+    source: str = Field("webcam", description="视频源：webcam / rtsp:// / file")
+    modules: list[str] = Field(default_factory=list, description="实际加载的模块列表")
+
+
+class ModuleAdd(BaseModel):
+    module: str = Field(..., description="模块名（shelf_heat/anomaly_detect/emotion_experience）")
+
+
+class ModuleEnabled(BaseModel):
+    enabled: bool = Field(..., description="开关")
+
+
+def _reg():
+    return get_registry()
+
+
+@router.get("")
+async def list_cameras():
+    """列出所有摄像头（含已加载模块 + 标签候选池）。"""
+    return {"cameras": _reg().list_cameras()}
+
+
+@router.get("/scan")
+async def scan_cameras():
+    """识别/扫描可用摄像头（阶段一返回配置列表，阶段二实际探测）。"""
+    return {"cameras": _reg().scan_cameras()}
+
+
+@router.get("/modules")
+async def list_modules():
+    """列出所有已注册模块 + 候选类型。"""
+    return {
+        "modules": _reg().list_available_modules(),
+        "type_candidates": {
+            t: candidates_for_type(t) for t in ("indoor_shelf", "entrance", "checkout")
+        },
+    }
+
+
+@router.post("")
+async def add_camera(req: CameraCreate):
+    """添加一个摄像头（写入运行时注册表，需在候选池内校验）。"""
+    reg = _reg()
+    from agents.analytics_module import candidates_for_type as _c, list_registered_modules
+    _TYPE_VALID = ("indoor_shelf", "entrance", "checkout")
+    if req.type not in _TYPE_VALID:
+        raise HTTPException(status_code=422, detail=f"未知摄像头类型: {req.type}（可选: {list(_TYPE_VALID)}）")
+    valid = [m for m in req.modules if m in _c(req.type) and m in list_registered_modules()]
+    invalid = [m for m in req.modules if m not in valid]
+    # 构造并挂到注册表（新增摄像头）—— id 用最大数字后缀递增，避免删除后碰撞覆盖
+    import re as _re
+    max_n = 0
+    for c in reg.list_cameras():
+        m = _re.search(r"cam_(\d+)$", c["id"])
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    cam_id = "cam_" + str(max_n + 1).zfill(2)
+    from agents.module_registry import Camera
+    new_cam = Camera(cam_id, req.name, req.type, req.source, valid)
+    reg._cameras[cam_id] = new_cam
+    return {
+        "ok": True, "camera_id": cam_id,
+        "ignored_invalid_modules": invalid, "camera": new_cam.to_dict(),
+    }
+
+
+@router.delete("/{cam_id}")
+async def delete_camera(cam_id: str):
+    reg = _reg()
+    if reg.get_camera(cam_id) is None:
+        raise HTTPException(status_code=404, detail=f"摄像头 {cam_id} 不存在")
+    reg._cameras.pop(cam_id, None)
+    return {"ok": True, "removed": cam_id}
+
+
+@router.post("/{cam_id}/modules")
+async def add_module(cam_id: str, req: ModuleAdd):
+    """运行时给某摄像头加载一个模块（校验标签候选池），并持久化到 cameras.yaml。"""
+    res = _reg().add_module(cam_id, req.module)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "加载失败"))
+    _reg().save_to_yaml()  # 持久化，重启不丢
+    return res
+
+
+@router.delete("/{cam_id}/modules/{mod}")
+async def remove_module(cam_id: str, mod: str):
+    res = _reg().remove_module(cam_id, mod)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "卸载失败"))
+    _reg().save_to_yaml()
+    return res
+
+
+@router.put("/{cam_id}/modules/{mod}/enabled")
+async def set_module_enabled(cam_id: str, mod: str, req: ModuleEnabled):
+    res = _reg().set_module_enabled(cam_id, mod, req.enabled)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "设置失败"))
+    _reg().save_to_yaml()
+    return res
+
+
+@router.get("/{cam_id}/modules/{mod}/stats")
+async def module_stats(cam_id: str, mod: str):
+    """查询某摄像头某模块统计（Agent 工具同源，供前端看板/调试）。"""
+    res = _reg().get_module_stats(cam_id, mod)
+    return res
+
+
+class ActiveBody(BaseModel):
+    cam_id: str = Field(..., description="要绑定的摄像头ID")
+
+
+@router.post("/active")
+async def set_active(req: ActiveBody):
+    """把当前视频输出绑定到某逻辑摄像头（多路视频/切换时用）。"""
+    if _reg().get_camera(req.cam_id) is None:
+        raise HTTPException(status_code=404, detail=f"摄像头 {req.cam_id} 不存在")
+    _reg().set_active_camera(req.cam_id)
+    return {"ok": True, "active_camera": req.cam_id}
