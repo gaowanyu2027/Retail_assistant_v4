@@ -12,6 +12,36 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 # 数据目录：SQLite、日志、视频、快照等
 DATA_DIR = PROJECT_ROOT / "data"
 
+
+def _load_dotenv(path: Path) -> None:
+    """极简 .env 加载（零依赖）。
+
+    支持：`KEY=VALUE`、`#` 注释、空行、值两侧的单/双引号。
+    **已存在的真实环境变量优先**（不覆盖），便于临时用 `$env:` 覆盖 .env。
+    """
+    try:
+        if not path.is_file():
+            return
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            if key.startswith("export "):
+                key = key[7:].strip()
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                val = val[1:-1]
+            if key and key not in os.environ:      # 真实环境变量优先
+                os.environ[key] = val
+    except Exception as e:                          # .env 有问题不应阻断启动
+        print(f"[Config] .env 加载失败（已忽略）: {e}")
+
+
+# 在任何 os.environ.get(...) 读取之前加载 .env（否则配置项读不到）
+_load_dotenv(PROJECT_ROOT / ".env")
+
 # ==================== 设备配置 ====================
 try:
     import torch
@@ -183,6 +213,12 @@ VECTOR_EMBED_MAX_CHARS = 500
 VECTOR_SEARCH_DEFAULT_LIMIT = 10
 # 人脸检测置信度阈值
 FACE_DETECT_CONF = 0.4
+# 人脸脱敏合规开关：开启（SANITIZE_FACES=1）后推帧/展示时对人脸区域打码
+# （个人信息保护法：人脸为最高敏信息，识别用于统计但展示不泄露身份）
+SANITIZE_FACES = os.environ.get("SANITIZE_FACES", "0") == "1"
+# 数据可信度门禁：超过该秒数没有任何新帧，视为视频源断流/未启动。
+# 此时各统计的 0 应理解为「无数据」而不是「无客流」（区分设备故障与真实业务）
+DATA_STALE_SECONDS = int(os.environ.get("DATA_STALE_SECONDS", "90"))
 # 人脸最小检测尺寸
 FACE_MIN_SIZE = 20
 # 活跃可疑轨迹评分阈值
@@ -282,6 +318,11 @@ LLM_BASE_URL = "https://api.deepseek.com"
 # LLM 生成温度（0.1：更稳定、方差更小，适合业务数据场景；过高会产生随机行为）
 LLM_TEMPERATURE = 0.1
 
+# ==================== 百度地图（POI 竞品/商圈/地理编码/距离测算） ====================
+# 服务端 AK（Web 服务 API 要求服务端类型）+ SK（sn 签名，地点检索/距离矩阵强制要求）
+BAIDU_MAP_AK = os.environ.get("baidu_map_ak", "")
+BAIDU_MAP_SK = os.environ.get("baidu_map_sk", "")
+
 # ==================== 表情分析数据库配置（来自 final_work） ====================
 # SQLite 表情数据库路径
 EMOTION_DB_PATH = str(DATA_DIR / "shop_emotion.db")
@@ -357,6 +398,78 @@ CACHE_CLEAN_INTERVAL_SECONDS = 600
 CACHE_MAX_AGE_HOURS = 24
 # 数据库记录保留天数
 DB_RECORD_KEEP_DAYS = 30
+
+# ==================== 销量自动同步（POS 目录投递） ====================
+# 真实零售常见形态：POS/ERP 定时把导出的 CSV 投递到共享目录。
+# 开启后后台线程定时扫描该目录并自动导入销量，取代「人手调接口」。
+# 处理成功归档到 processed/，失败移到 failed/（便于排查），同一文件不会重复导入。
+SALES_INBOX_ENABLED = os.environ.get("SALES_INBOX_ENABLED", "1") == "1"
+# 投递目录（POS 导出放这里）
+SALES_INBOX_DIR = os.environ.get("SALES_INBOX_DIR") or str(DATA_DIR / "sales_inbox")
+# 扫描周期（秒）
+SALES_INBOX_INTERVAL_SECONDS = int(os.environ.get("SALES_INBOX_INTERVAL_SECONDS", "60"))
+
+# ==================== 登录鉴权 ====================
+# 总开关：关闭后所有接口不再校验登录（仅本地调试/自动化测试用）
+AUTH_ENABLED = os.environ.get("AUTH_ENABLED", "1") == "1"
+# 会话有效期（小时）
+AUTH_SESSION_HOURS = int(os.environ.get("AUTH_SESSION_HOURS", "12"))
+# 首次启动自动创建的 root 账号名
+AUTH_ROOT_USERNAME = os.environ.get("AUTH_ROOT_USERNAME", "root")
+# 初始 root 密码；不设则随机生成并在终端打印一次
+AUTH_ROOT_PASSWORD = os.environ.get("AUTH_ROOT_PASSWORD", "")
+# 鉴权数据库：独立于业务库（鉴权不应因 MySQL 不可用而把所有人锁在门外）
+AUTH_DB_PATH = os.environ.get("AUTH_DB_PATH") or str(DATA_DIR / "auth.db")
+
+# ---- 登录限流（防暴力破解）----
+# 同一「用户名 + IP」在窗口内失败达到该次数即锁定
+AUTH_MAX_FAILED_ATTEMPTS = int(os.environ.get("AUTH_MAX_FAILED_ATTEMPTS", "5"))
+# 失败计数窗口（秒）：窗口内累计，超出则重新计数
+AUTH_FAILED_WINDOW_SECONDS = int(os.environ.get("AUTH_FAILED_WINDOW_SECONDS", "900"))
+# 锁定时长（秒）：首次锁定；重复触发按倍数递增（上限见 AUTH_LOCKOUT_MAX_SECONDS）
+AUTH_LOCKOUT_SECONDS = int(os.environ.get("AUTH_LOCKOUT_SECONDS", "300"))
+# 锁定时长上限（秒）
+AUTH_LOCKOUT_MAX_SECONDS = int(os.environ.get("AUTH_LOCKOUT_MAX_SECONDS", "3600"))
+# 同一 IP 的总失败上限（= 用户名上限 × 该倍数）：防「撞库式」换用户名试探
+AUTH_IP_ATTEMPT_MULTIPLIER = int(os.environ.get("AUTH_IP_ATTEMPT_MULTIPLIER", "5"))
+
+# ---- 口令哈希强度 ----
+# PBKDF2-HMAC-SHA256 迭代轮数（慢哈希；OWASP 对 SHA256 的建议值为 60 万）
+AUTH_PBKDF2_ITERATIONS = int(os.environ.get("AUTH_PBKDF2_ITERATIONS", "600000"))
+# 口令最小长度
+AUTH_MIN_PASSWORD_LEN = int(os.environ.get("AUTH_MIN_PASSWORD_LEN", "8"))
+
+# ---- Cookie 传输安全 ----
+# 是否给会话 Cookie 加 Secure 标志（仅 https 传输）。
+# 默认 auto：按请求协议自动判定（https 加、http 不加），避免本地 http 调试时登录失败。
+# 可显式设 1/0 强制开关。
+_auth_cookie_secure = os.environ.get("AUTH_COOKIE_SECURE", "auto").strip().lower()
+AUTH_COOKIE_SECURE = {"1": True, "true": True, "0": False, "false": False}.get(_auth_cookie_secure)
+
+# ---- 跨域（CORS）----
+# 允许跨域访问的来源，逗号分隔。**留空 = 不开启跨域**（前端与后端同源，本就不需要 CORS）。
+# 仅当跨域前端确实存在时才配置，例：AUTH_CORS_ORIGINS=http://localhost:5173
+#
+# 为什么默认关闭：此前是 allow_origins=["*"] + allow_credentials=True，
+# 实测会被反射成「Access-Control-Allow-Origin: <任意站点> + 允许凭据」——
+# 等于把登录态暴露给任意网站（当前仅靠 Cookie 的 SameSite=Lax 兜底，
+# 一旦为跨站嵌入改成 SameSite=None 就会立刻变成可利用漏洞）。
+AUTH_CORS_ORIGINS = [
+    o.strip() for o in os.environ.get("AUTH_CORS_ORIGINS", "").split(",") if o.strip()
+]
+
+# 接口文档（/docs、/redoc、/openapi.json）是否公开。
+# 默认 0（需登录）：对已上鉴权的系统，公开完整接口清单等于给攻击者一张地图。
+# 登录用户可正常访问文档（同源 Cookie 自动携带），因此本地开发无需开启。
+AUTH_PUBLIC_DOCS = os.environ.get("AUTH_PUBLIC_DOCS", "0") == "1"
+
+# ---- 一次性票据（给 WS / 音频等『无法自定义请求头』的场景）----
+# 有效期（秒）：票据短时效，用后即焚；即便出现在访问日志里也已失效。
+AUTH_TICKET_TTL_SECONDS = int(os.environ.get("AUTH_TICKET_TTL_SECONDS", "60"))
+# 是否允许把「主会话令牌」放在 URL query（?token=）。
+# **默认 0 = 拒绝**：会话令牌进 URL 会落到访问日志/反代日志（CWE-598），
+# 需要 URL 传凭据的场景请改用 /api/auth/ws-ticket 换取一次性票据（?ticket=）。
+AUTH_ALLOW_QUERY_TOKEN = os.environ.get("AUTH_ALLOW_QUERY_TOKEN", "0") == "1"
 
 
 def ensure_dirs():

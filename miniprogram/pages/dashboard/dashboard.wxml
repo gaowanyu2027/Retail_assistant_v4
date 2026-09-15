@@ -1,0 +1,67 @@
+<view class="page">
+  <view class="error-tip" wx:if="{{error}}">{{error}}</view>
+  <view class="loading-tip" wx:if="{{loading && !error}}">数据加载中…</view>
+
+  <block wx:if="{{!loading && !error}}">
+    <!-- 告警汇总 -->
+    <view class="card">
+      <view class="card-title">安全状况</view>
+      <view class="alert-row">
+        <view class="alert-item">
+          <text class="alert-num">{{anomaly.total_alerts}}</text>
+          <text class="alert-label">总告警</text>
+        </view>
+        <view class="alert-item">
+          <text class="alert-num danger">{{anomaly.high_risk_count}}</text>
+          <text class="alert-label">高风险</text>
+        </view>
+        <view class="alert-item">
+          <text class="alert-num warn">{{anomaly.watch_count}}</text>
+          <text class="alert-label">关注</text>
+        </view>
+      </view>
+    </view>
+
+    <!-- 热度排行 -->
+    <view class="card">
+      <view class="card-title">货架热度排行（总到访 {{totalVisitors}}）</view>
+      <view class="rank-row" wx:for="{{ranking}}" wx:key="zone_id">
+        <text class="rank-no">{{index + 1}}</text>
+        <text class="rank-name">{{item.label || item.zone_id}}</text>
+        <text class="rank-dwell">停留 {{item.avg_dwell}}s</text>
+        <text class="rank-visit">{{item.visit_count}} 人</text>
+      </view>
+      <view class="empty" wx:if="{{!ranking.length}}">暂无热度数据（摄像头未运行）</view>
+    </view>
+
+    <!-- 转化率四象限 -->
+    <view class="card">
+      <view class="card-title">热度 × 销量转化</view>
+      <view class="zone-item" wx:for="{{zones}}" wx:key="zone_id">
+        <view class="zone-head">
+          <text class="zone-name">{{item.zone_label}}</text>
+          <text class="zone-quadrant" style="color:{{item.quadrantColor}}">{{item.quadrantCN}}</text>
+        </view>
+        <view class="zone-metrics">
+          <text>到访 {{item.visit_count}}</text>
+          <text>销量 {{item.sold_count}}</text>
+          <text>转化 {{item.conversion_rate}}%</text>
+        </view>
+        <view class="zone-diagnosis">{{item.diagnosis}}</view>
+        <view class="zone-suggestion">{{item.suggestion}}</view>
+      </view>
+      <view class="summary-text" wx:if="{{summary}}">{{summary}}</view>
+      <view class="empty" wx:if="{{!zones.length}}">暂无转化数据（未录入销量）</view>
+    </view>
+
+    <!-- 定期汇报 -->
+    <view class="card">
+      <view class="card-title">定期热度汇报</view>
+      <view class="report-item" wx:for="{{reports}}" wx:key="id">
+        <view class="report-summary">{{item.summary || item.content || ''}}</view>
+        <view class="report-time">{{item.created_at || ''}}</view>
+      </view>
+      <view class="empty" wx:if="{{!reports.length}}">暂无汇报记录</view>
+    </view>
+  </block>
+</view>

@@ -1,0 +1,11 @@
+.page { padding: 40rpx 20rpx; }
+.mic-area { display: flex; flex-direction: column; align-items: center; padding: 60rpx 0; }
+.mic-btn { width: 200rpx; height: 200rpx; border-radius: 50%; background: #eef3fb; color: #3b82f6; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.mic-btn.recording { background: #fdecea; color: #d64545; box-shadow: 0 0 0 12rpx rgba(214,69,69,.12); }
+.mic-icon { font-size: 64rpx; }
+.mic-tip { font-size: 24rpx; margin-top: 8rpx; }
+.interim { margin-top: 20rpx; color: #5a6b7d; font-size: 26rpx; }
+
+.answer-card { margin-top: 20rpx; }
+.card-title { font-size: 26rpx; font-weight: 600; margin-bottom: 12rpx; }
+.answer-text { font-size: 28rpx; line-height: 1.7; white-space: pre-wrap; }

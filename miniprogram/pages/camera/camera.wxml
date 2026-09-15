@@ -1,0 +1,51 @@
+<view class="page">
+  <view class="error-tip" wx:if="{{error}}">{{error}}</view>
+  <view class="loading-tip" wx:if="{{loading && !error}}">加载中…</view>
+
+  <view class="toolbar">
+    <button class="btn-add" size="mini" type="primary" bindtap="onAddTap">+ 添加摄像头</button>
+    <text class="toolbar-tip">识别/添加后按标签勾选模块，绑定视频</text>
+  </view>
+
+  <block wx:for="{{cameras}}" wx:key="id" wx:for-item="cam">
+    <view class="cam-card card">
+      <view class="cam-head">
+        <view class="cam-title">
+          <text class="cam-name">{{cam.name}}</text>
+          <text class="cam-id">{{cam.id}}</text>
+        </view>
+        <text class="cam-type">{{typeCN[cam.id] || cam.type}}</text>
+      </view>
+
+      <!-- 已装模块 -->
+      <view class="mod-section">
+        <text class="mod-label">已加载模块</text>
+        <view class="mod-chips">
+          <view class="mod-chip on" wx:for="{{cam.enabled_modules}}" wx:key="*this" wx:for-item="m"
+            data-cam="{{cam.id}}" data-mod="{{m}}" bindtap="onToggleModule">
+            {{m}} ✕
+          </view>
+          <text class="empty" wx:if="{{!cam.enabled_modules.length}}">暂无</text>
+        </view>
+      </view>
+
+      <!-- 候选池（标签允许） -->
+      <view class="mod-section">
+        <text class="mod-label">候选模块（标签 {{typeCN[cam.id]}} 允许）</text>
+        <view class="mod-chips">
+          <view class="mod-chip off" wx:for="{{typeCandidates[cam.type]}}" wx:key="*this" wx:for-item="m"
+            data-cam="{{cam.id}}" data-mod="{{m}}" bindtap="onToggleModule">
+            {{m}} +
+          </view>
+        </view>
+      </view>
+
+      <view class="cam-actions">
+        <button class="btn-mini" size="mini" data-cam="{{cam.id}}" bindtap="onBind">绑定视频</button>
+        <button class="btn-mini danger" size="mini" data-cam="{{cam.id}}" bindtap="onDelete">删除</button>
+      </view>
+    </view>
+  </block>
+
+  <view class="empty" wx:if="{{!loading && !cameras.length && !error}}">暂无摄像头</view>
+</view>
