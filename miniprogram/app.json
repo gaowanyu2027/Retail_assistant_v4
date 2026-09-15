@@ -1,0 +1,31 @@
+{
+  "pages": [
+    "pages/login/login",
+    "pages/index/index",
+    "pages/dashboard/dashboard",
+    "pages/video/video",
+    "pages/camera/camera",
+    "pages/voiceask/voiceask",
+    "pages/sessions/sessions"
+  ],
+  "window": {
+    "navigationBarTitleText": "智能零售分析",
+    "navigationBarBackgroundColor": "#1f2d3d",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f5f6fa",
+    "backgroundTextStyle": "dark"
+  },
+  "tabBar": {
+    "color": "#8a94a6",
+    "selectedColor": "#3b82f6",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "black",
+    "list": [
+      { "pagePath": "pages/index/index", "text": "问答" },
+      { "pagePath": "pages/dashboard/dashboard", "text": "看板" },
+      { "pagePath": "pages/video/video", "text": "监控" }
+    ]
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

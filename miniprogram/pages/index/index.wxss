@@ -1,0 +1,100 @@
+.page {
+  padding-bottom: 40rpx;
+}
+
+.query-card {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  margin-top: 20rpx;
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+}
+
+.query-input {
+  flex: 1;
+  height: 72rpx;
+  background: #f2f4f8;
+  border-radius: 12rpx;
+  padding: 0 20rpx;
+  font-size: 28rpx;
+}
+
+.send-btn {
+  margin-left: 16rpx;
+}
+
+.quick-row {
+  margin-top: 16rpx;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.quick-item {
+  display: inline-block;
+  background: #eef3fb;
+  color: #3b82f6;
+  border-radius: 28rpx;
+  padding: 10rpx 24rpx;
+  margin-right: 14rpx;
+  font-size: 24rpx;
+}
+
+.answer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12rpx;
+}
+
+.intent-badge {
+  background: #3b82f6;
+  color: #fff;
+  font-size: 20rpx;
+  border-radius: 8rpx;
+  padding: 4rpx 14rpx;
+}
+
+.answer-time {
+  color: #9aa5b5;
+  font-size: 22rpx;
+}
+
+.answer-text {
+  font-size: 30rpx;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.data-list {
+  margin-top: 16rpx;
+  border-top: 1rpx solid #eef0f4;
+  padding-top: 12rpx;
+}
+
+.data-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8rpx 0;
+  font-size: 26rpx;
+}
+
+.data-label {
+  color: #9aa5b5;
+}
+
+.data-value {
+  font-weight: 600;
+}
+
+.empty-tip,
+.loading-tip {
+  text-align: center;
+  color: #9aa5b5;
+  padding: 60rpx 0;
+  font-size: 26rpx;
+}

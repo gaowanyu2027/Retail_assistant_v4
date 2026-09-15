@@ -1,0 +1,14 @@
+<view class="page">
+  <view class="mic-area">
+    <view class="mic-btn {{recording ? 'recording' : ''}}" bindtap="onRecordTap">
+      <text class="mic-icon">🎤</text>
+      <text class="mic-tip">{{status}}</text>
+    </view>
+    <view class="interim" wx:if="{{interim}}">{{interim}}</view>
+  </view>
+
+  <view class="card answer-card" wx:if="{{answer}}">
+    <view class="card-title">AI 回答{{playing ? '（播放中）' : ''}}</view>
+    <view class="answer-text">{{answer}}</view>
+  </view>
+</view>

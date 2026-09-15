@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File as FastAPIFile, HTTPException
+from fastapi import FastAPI, UploadFile, File as FastAPIFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import API_HOST, API_PORT, ensure_dirs
+from config.settings import API_HOST, API_PORT, AUTH_CORS_ORIGINS, ensure_dirs
 
 
 # ==================== 缓存清理线程 ====================
@@ -130,6 +130,36 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[WARN] 定期热度汇报启动失败: {e}")
 
+    # 登录鉴权：初始化鉴权库；无任何账号时自动引导创建 root
+    # 注意顺序：必须先 init_auth_db()（建表），否则首次启动 purge/bootstrap 会因缺表失败
+    try:
+        from api.security import (bootstrap_root, init_auth_db, purge_expired_sessions,
+                                  purge_login_attempts, purge_expired_tickets)
+        init_auth_db()
+        boot = bootstrap_root()
+        purge_expired_sessions()
+        purge_login_attempts()
+        purge_expired_tickets()
+        if boot:
+            print("=" * 60)
+            print("  [首次启动] 已创建平台管理员账号（请立即登录并修改密码）")
+            print(f"    用户名: {boot['user']['username']}")
+            print(f"    密码  : {boot['password']}")
+            if boot.get("generated"):
+                print("    （随机生成；可用环境变量 AUTH_ROOT_PASSWORD 指定初始密码）")
+            print("=" * 60)
+        else:
+            print("[OK] 登录鉴权已启用")
+    except Exception as e:
+        print(f"[WARN] 登录鉴权初始化失败: {e}")
+
+    # 启动销量自动同步（POS 目录投递 → 定时扫描导入）
+    try:
+        from agents.sales_inbox import start_inbox_worker
+        start_inbox_worker()
+    except Exception as e:
+        print(f"[WARN] 销量自动同步启动失败: {e}")
+
     print(f"[OK] API地址: http://{API_HOST}:{API_PORT}")
     print(f"[OK] 仪表盘: http://localhost:{API_PORT}")
     print(f"[OK] API文档: http://localhost:{API_PORT}/docs")
@@ -157,13 +187,31 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 鉴权中间件：默认封启（/api/* 一律需登录，白名单除外）。
+# 纯 ASGI 实现，同时覆盖 HTTP 与 WebSocket，避免视频/推送通道绕过鉴权。
+# 注意注册顺序：先加 Auth、后加 CORS → CORS 位于外层，
+# 这样中间件直接返回的 401/429 也会带上 CORS 头，跨域客户端才能读到状态码。
+from api.security import AuthMiddleware  # noqa: E402
+
+app.add_middleware(AuthMiddleware)
+
+# CORS：**默认不开启跨域**（浏览器前端由本服务同源提供，不需要 CORS）。
+# 此前是 allow_origins=["*"] + allow_credentials=True，实测会被反射为
+# 「Access-Control-Allow-Origin: <任意站点> + Allow-Credentials: true」，
+# 等于把登录态暴露给任意网站（仅靠 SameSite=Lax 兜底，属潜伏风险）。
+# 确需跨域（如 Vite dev server 在别的端口）时，用环境变量显式白名单：
+#   AUTH_CORS_ORIGINS=http://localhost:5173,https://your-domain.com
+if AUTH_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=AUTH_CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    print(f"[CORS] 已开启跨域白名单: {AUTH_CORS_ORIGINS}")
+else:
+    print("[CORS] 未开启跨域（同源访问；如需跨域请设 AUTH_CORS_ORIGINS）")
 
 
 @app.middleware("http")
@@ -185,6 +233,10 @@ from api.routes.asr import router as asr_router
 from api.routes.tts import router as tts_router
 from api.routes.chat import router as chat_router
 from api.routes.analytics import router as analytics_router
+from api.routes.maps import router as maps_router
+from api.routes.cameras import router as cameras_router
+from api.routes.multi_stream import router as multi_stream_router
+from api.routes.auth import router as auth_router
 
 app.include_router(query_router, prefix="/api")
 app.include_router(report_router, prefix="/api")
@@ -195,10 +247,13 @@ app.include_router(asr_router, prefix="/api")
 app.include_router(tts_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
+app.include_router(maps_router, prefix="/api")
+app.include_router(cameras_router, prefix="/api")
+app.include_router(multi_stream_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
 
-# ==================== 前端入口选择（Vue 版优先，异常时自动回退原生 JS 版） ====================
+# ==================== 前端入口（Vue 版为唯一浏览器前端，原生 JS 版已移除） ====================
 
-NATIVE_FRONTEND_DIR = PROJECT_ROOT / "frontend"
 VUE_DIST_DIR = PROJECT_ROOT / "frontend-vue" / "dist"
 
 NO_CACHE_HEADERS = {
@@ -207,33 +262,33 @@ NO_CACHE_HEADERS = {
     "Expires": "0",
 }
 
-# Vue 页面加载失败时注入的回退脚本：资源加载失败 / 挂载超时 / 未处理异常
-# → 上报后端（终端打印日志）→ 跳转到 /?vue=0 的原生 JS 版
+# Vue 页面加载失败时的提示脚本（资源失败/挂载超时 → 提示刷新，不再回退原生版）
 VUE_FALLBACK_SCRIPT = """
 <script>
 (function () {
-  var done = false;
-  function fallback(reason) {
-    if (done) return;
-    done = true;
+  function notify(reason) {
+    if (window.__dshVueFallback) return;
+    window.__dshVueFallback = true;
     try {
       fetch('/api/frontend/fallback?reason=' + encodeURIComponent(reason), { method: 'POST' });
     } catch (e) {}
-    location.replace('/?vue=0');
+    var box = document.createElement('div');
+    box.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;color:#333;padding:24px;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.2);z-index:9999;text-align:center;font-family:sans-serif';
+    box.innerHTML = '<div style="font-size:20px;margin-bottom:8px">前端资源加载异常</div>' +
+      '<div style="font-size:14px;color:#666">请刷新页面重试，或检查后端控制台日志</div>';
+    document.body.appendChild(box);
   }
   window.addEventListener('error', function (e) {
     var src = (e.target && (e.target.src || e.target.href)) || '';
-    if (src && src.indexOf('/assets/') !== -1) {
-      fallback('资源加载失败: ' + src);
-    }
+    if (src && src.indexOf('/assets/') !== -1) notify('资源加载失败: ' + src);
   }, true);
   window.addEventListener('unhandledrejection', function () {
     var app = document.getElementById('app');
-    if (!app || app.childElementCount === 0) fallback('未处理的Promise异常');
+    if (!app || app.childElementCount === 0) notify('未处理的Promise异常');
   });
   setTimeout(function () {
     var app = document.getElementById('app');
-    if (!app || app.childElementCount === 0) fallback('Vue 挂载超时');
+    if (!app || app.childElementCount === 0) notify('Vue 挂载超时');
   }, 8000);
 })();
 </script>
@@ -272,31 +327,32 @@ def _vue_dist_available() -> tuple[bool, list[str]]:
     return (len(missing) == 0), missing
 
 
-def _serve_native():
-    """返回原生 JS 版前端页面。"""
-    index_path = NATIVE_FRONTEND_DIR / "index.html"
-    if index_path.exists():
-        return FileResponse(str(index_path), headers=dict(NO_CACHE_HEADERS))
-    return {"message": "前端文件未找到，请访问 /docs 查看API文档"}
+def _serve_unbuilt():
+    """Vue 构建产物缺失时的提示页（不再回退原生 JS 版——该版已移除）。"""
+    return HTMLResponse(
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>智能零售分析系统</title></head>"
+        "<body style='display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#333'>"
+        "<div style='text-align:center'><h2>前端未构建</h2>"
+        "<p style='color:#666'>Vue 构建产物缺失/不完整，请执行构建后重启服务。</p>"
+        "<p style='font-size:13px;color:#999'>frontend-vue/dist/index.html</p></div>"
+        "</body></html>",
+        headers=dict(NO_CACHE_HEADERS),
+    )
 
 
-# 启动时检查 Vue 构建产物，决定默认前端并打印日志
+# 启动时检查 Vue 构建产物，决定默认前端并打印日志（Vue 是唯一浏览器前端，无回退）
 _vue_ok, _vue_missing = _vue_dist_available()
 if _vue_ok:
-    print("[Frontend] Vue 版构建产物完整，默认使用 Vue 版 (frontend-vue/dist)")
+    print("[Frontend] Vue 版构建产物完整 (frontend-vue/dist)")
 else:
-    print("[Frontend][WARN] Vue 版构建产物不完整，自动回退为原生 JS 版 (frontend/)")
+    print("[Frontend][WARN] Vue 版构建产物不完整，将显示提示页:")
     for _f in _vue_missing:
         print(f"[Frontend][WARN]   缺失: frontend-vue/dist/{_f}")
 
-# 静态文件挂载：Vue 版可用时挂载 dist（含 /assets），否则挂载原生目录
-_static_base = VUE_DIST_DIR if _vue_ok else NATIVE_FRONTEND_DIR
+# 静态文件挂载：仅 Vue 版（原生 JS 版已移除）
+_static_base = VUE_DIST_DIR
 _css_dir = _static_base / "css"
-if not _css_dir.exists():
-    _css_dir = NATIVE_FRONTEND_DIR / "css"
 _js_dir = _static_base / "js"
-if not _js_dir.exists():
-    _js_dir = NATIVE_FRONTEND_DIR / "js"
 if _css_dir.exists():
     app.mount("/css", StaticFiles(directory=str(_css_dir)), name="css")
 if _js_dir.exists():
@@ -307,26 +363,16 @@ print(f"[OK] 前端静态文件: {_static_base}")
 
 
 @app.get("/")
-async def serve_index(vue: str = ""):
-    """根路径返回前端页面。
-
-    - 默认: Vue 构建版（frontend-vue/dist），并在页面注入加载失败回退脚本
-    - ?vue=0: 强制原生 JS 版（frontend/）
-    - Vue 构建产物在运行期缺失时，自动回退原生版并在终端打印日志
-    """
+async def serve_index():
+    """根路径返回 Vue 前端页面；Vue 构建产物缺失时显示提示页。"""
     global _vue_ok
 
-    if vue == "0":
-        if _vue_ok:
-            print("[Frontend] 客户端请求回退，返回原生 JS 版页面")
-        return _serve_native()
-
-    # 每请求轻量复查：构建产物在运行期被破坏时自动回退
+    # 每请求轻量复查：构建产物在运行期被破坏时切换为提示页
     if _vue_ok:
         _ok, _missing = _vue_dist_available()
         if not _ok:
             _vue_ok = False
-            print("[Frontend][WARN] Vue 构建产物在运行期缺失，自动回退为原生 JS 版:")
+            print("[Frontend][WARN] Vue 构建产物在运行期缺失:")
             for _f in _missing:
                 print(f"[Frontend][WARN]   缺失: frontend-vue/dist/{_f}")
 
@@ -337,9 +383,9 @@ async def serve_index(vue: str = ""):
             return HTMLResponse(html, headers=dict(NO_CACHE_HEADERS))
         except Exception as e:
             _vue_ok = False
-            print(f"[Frontend][WARN] Vue index 读取失败，自动回退为原生 JS 版: {e}")
+            print(f"[Frontend][WARN] Vue index 读取失败: {e}")
 
-    return _serve_native()
+    return _serve_unbuilt()
 
 
 @app.post("/api/frontend/fallback")
@@ -350,15 +396,27 @@ async def frontend_fallback(reason: str = "未知原因"):
 
 
 @app.get("/api/health")
-async def health():
-    """健康检查"""
-    import torch
+async def health(request: Request):
+    """健康检查。
+
+    匿名访问只返回最小信息（避免设备型号 / GPU 可用性 / 运行时长等指纹外泄）；
+    已登录用户返回完整信息。监控探活只需判断 status 字段。
+    """
     from api.dependencies import get_uptime_seconds
+    from api.security import get_optional_user
+
+    user = await get_optional_user(request)
+    if not user:
+        return {"status": "ok"}
+
+    import torch
     return {
         "status": "ok",
         "gpu_available": torch.cuda.is_available(),
         "device": "cuda:0" if torch.cuda.is_available() else "cpu",
         "uptime_seconds": get_uptime_seconds(),
+        "user": user.get("username"),
+        "role": user.get("role"),
     }
 
 
@@ -545,9 +603,9 @@ async def emotion_recent_legacy(limit: int = 20):
     return await emotion_recent(limit)
 
 
-@app.get("/api/cameras")
+@app.get("/api/cameras/hardware", include_in_schema=False)
 async def scan_cameras():
-    """扫描服务器上可用的摄像头设备"""
+    """扫描服务器上可用的摄像头设备（与 /api/cameras 注册表列表区分，避免路由遮蔽）"""
     import cv2
     cameras = []
     for i in range(8):

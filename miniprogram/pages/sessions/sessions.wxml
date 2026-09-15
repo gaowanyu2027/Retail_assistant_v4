@@ -1,0 +1,49 @@
+<view class="page">
+  <view class="toolbar">
+    <button class="btn-new" size="mini" type="primary" bindtap="onCreate">+ 新建会话</button>
+    <view class="search-row">
+      <input class="search-input" placeholder="搜索历史问答" value="{{keyword}}" bindinput="onSearchInput" bindconfirm="onSearch" />
+      <button class="btn-search" size="mini" bindtap="onSearch">搜索</button>
+    </view>
+  </view>
+
+  <view class="error-tip" wx:if="{{error}}">{{error}}</view>
+  <view class="loading-tip" wx:if="{{loading && !error}}">加载中…</view>
+
+  <!-- 搜索结果 -->
+  <view class="card" wx:if="{{searchResults}}">
+    <view class="card-title">搜索结果（{{searchResults.length}}）</view>
+    <view class="search-item" wx:for="{{searchResults}}" wx:key="index" wx:for-item="it">
+      <view class="s-q">{{it.question}}</view>
+      <view class="s-a">{{it.answer}}</view>
+    </view>
+    <view class="empty" wx:if="{{!searchResults.length}}">无结果</view>
+  </view>
+
+  <!-- 历史消息查看 -->
+  <view class="card history-card" wx:if="{{history.length}}">
+    <view class="card-title">历史消息{{historySession ? '（' + historySession + '）' : ''}}
+      <text class="h-close" bindtap="onCloseHistory">关闭</text>
+    </view>
+    <view class="history-item" wx:for="{{history}}" wx:key="seq_no" wx:for-item="h">
+      <view class="h-row"><text class="h-tag">问</text><text class="h-body">{{h.question}}</text></view>
+      <view class="h-row"><text class="h-tag ans">答</text><text class="h-body">{{h.answer}}</text></view>
+      <view class="h-meta">{{h.created_at}} · {{h.intent}}</view>
+    </view>
+    <view class="empty" wx:if="{{!history.length}}">该会话暂无消息</view>
+  </view>
+
+  <!-- 会话列表 -->
+  <view class="card" wx:if="{{!searchResults}}">
+    <view class="card-title">会话（{{sessions.length}}）</view>
+    <view class="session-item" wx:for="{{sessions}}" wx:key="session_id" wx:for-item="s">
+      <view class="s-main" data-id="{{s.session_id}}" data-title="{{s.title}}" bindtap="onUse">
+        <view class="s-title {{s.session_id==currentSession ? 'cur' : ''}}">{{s.title || '（未命名）'}}</view>
+        <view class="s-meta">{{s.session_id}} · {{s.updated_at || ''}}</view>
+      </view>
+      <view class="s-act" data-id="{{s.session_id}}" bindtap="onViewHistory">历史</view>
+      <view class="s-del" data-id="{{s.session_id}}" bindtap="onDelete">删除</view>
+    </view>
+    <view class="empty" wx:if="{{!sessions.length}}">暂无会话</view>
+  </view>
+</view>

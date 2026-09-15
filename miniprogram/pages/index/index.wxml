@@ -1,0 +1,37 @@
+<view class="page">
+  <!-- 输入区 -->
+  <view class="query-card card">
+    <view class="input-row">
+      <input
+        class="query-input"
+        placeholder="问点什么，比如：1号货架现在客流怎么样"
+        value="{{question}}"
+        bindinput="onInput"
+        confirm-type="send"
+        bindconfirm="send"
+      />
+      <button class="send-btn" size="mini" type="primary" loading="{{loading}}" disabled="{{loading}}" bindtap="send">发送</button>
+    </view>
+    <scroll-view class="quick-row" scroll-x enhanced show-scrollbar="{{false}}">
+      <view class="quick-item" wx:for="{{quickQuestions}}" wx:key="*this" data-item="{{item}}" bindtap="onQuick">{{item}}</view>
+    </scroll-view>
+  </view>
+
+  <!-- 回答区 -->
+  <view class="answer-card card" wx:if="{{answer}}">
+    <view class="answer-head">
+      <text class="intent-badge">{{intent}}</text>
+      <text class="answer-time">{{time}} {{confidence}}</text>
+    </view>
+    <view class="answer-text">{{answer}}</view>
+    <view class="data-list" wx:if="{{structured.length}}">
+      <view class="data-row" wx:for="{{structured}}" wx:key="label">
+        <text class="data-label">{{item.label}}</text>
+        <text class="data-value">{{item.value}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="loading-tip" wx:if="{{loading}}">AI 思考中…</view>
+  <view class="empty-tip" wx:if="{{!answer && !loading}}">模板查询毫秒返回，复杂分析由 AI 完成</view>
+</view>

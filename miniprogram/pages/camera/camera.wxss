@@ -1,0 +1,25 @@
+.page { padding-bottom: 40rpx; }
+
+.error-tip { background: #fdecea; color: #d64545; border-radius: 12rpx; margin: 20rpx; padding: 20rpx; font-size: 26rpx; }
+.loading-tip { text-align: center; color: #9aa5b5; padding: 80rpx 0; font-size: 26rpx; }
+.empty { color: #9aa5b5; font-size: 24rpx; text-align: center; padding: 40rpx 0; }
+
+.toolbar { display: flex; flex-direction: column; align-items: center; padding: 20rpx; }
+.toolbar-tip { color: #9aa5b5; font-size: 22rpx; margin-top: 8rpx; }
+
+.cam-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12rpx; }
+.cam-title { display: flex; flex-direction: column; }
+.cam-name { font-size: 28rpx; font-weight: 600; }
+.cam-id { font-size: 20rpx; color: #9aa5b5; }
+.cam-type { background: #eef3fb; color: #3b82f6; font-size: 22rpx; border-radius: 8rpx; padding: 4rpx 14rpx; }
+
+.mod-section { margin: 12rpx 0; }
+.mod-label { font-size: 22rpx; color: #9aa5b5; }
+.mod-chips { display: flex; flex-wrap: wrap; margin-top: 8rpx; }
+.mod-chip { font-size: 22rpx; border-radius: 24rpx; padding: 8rpx 20rpx; margin: 6rpx; }
+.mod-chip.on { background: #3b82f6; color: #fff; }
+.mod-chip.off { background: #f2f4f8; color: #5a6b7d; border: 1rpx solid #dde3ec; }
+
+.cam-actions { display: flex; gap: 16rpx; margin-top: 12rpx; }
+.btn-mini { background: #eef3fb; color: #3b82f6; }
+.btn-mini.danger { background: #fdecea; color: #d64545; }
