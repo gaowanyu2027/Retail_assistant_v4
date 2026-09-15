@@ -124,7 +124,7 @@ story.append(bullets([
     "语音：sherpa-onnx KWS 唤醒词（小零 等）+ 流式中文 ASR + edge-tts 服务端中文语音合成",
     "AI/Agent：LangChain + DeepSeek（OpenAI 兼容接口）构建 tool-calling Agent",
     "存储：MySQL 优先、SQLite 自动回退；Qdrant + Ollama(bge-small-zh-v1.5) 向量召回",
-    "前端：Vue 构建版（frontend-vue/dist）优先，缺失时回退原生 JS 版（frontend/）；另含微信小程序端",
+    "前端：Vue3 + Vite 构建版（frontend-vue/dist）为唯一浏览器前端；另含微信小程序端",
 ]))
 
 # ==================== 2 业务区域配置 ====================
@@ -326,7 +326,10 @@ story.append(kv_table(
          "手机浏览器可能需要先点击一次“语音输入”解锁 AudioContext。"],
         ["向量搜索失败？", "确认 Ollama 已启动并已安装 qllama/bge-small-zh-v1.5；若本地 Qdrant 被其他进程占用，"
          "需先停止旧服务再启动。"],
-        ["如何强制使用原生前端？", "访问 http://localhost:8000/?vue=0，或在构建产物缺失时系统自动回退原生版。"],
+        ["如何登录系统？", "首次启动时终端会打印自动创建的 root 账号与随机密码；也可用环境变量 "
+         "AUTH_ROOT_PASSWORD 预先指定初始密码（需 ≥8 位且非弱口令）。"],
+        ["前端页面打不开 / 提示未构建？", "执行 cd frontend-vue && npx vite build 重新构建前端产物。"
+         "v4 起 Vue 为唯一浏览器前端，原原生 JS 版已移除。"],
     ],
     [50 * mm, 114 * mm],
 ))

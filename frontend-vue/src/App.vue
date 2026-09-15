@@ -190,7 +190,7 @@
 </template>
 
 <script>
-// 与原生 frontend/js/app.js + sessions.js 行为对齐的 Vue3 实现
+// Vue3 实现（v4 起为唯一浏览器前端；交互约定沿用早期原生版）
 const EMO_CN = { happy: '开心', neutral: '平静', surprise: '惊讶',
                  sad: '悲伤', angry: '愤怒', fear: '害怕', disgust: '厌恶' }
 const EMO_COLORS = { happy: '#f0c040', neutral: '#8899aa', surprise: '#c084fc',
