@@ -122,7 +122,8 @@ class VideoProcessor:
                 and self._frame_id % (self.frame_skip * self.face_emotion_interval) == 0
             ):
                 faces = self.face_emotion.detect(frame)
-                # 将表情关联到最近的行人（根据 bbox 重叠）
+                # 表情关联到最近的行人（根据 bbox 重叠）
+                faces = faces or []
                 for face in faces:
                     fx1, fy1, fx2, fy2 = face["bbox"]
                     matched = False
