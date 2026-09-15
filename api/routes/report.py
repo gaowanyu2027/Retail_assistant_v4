@@ -164,6 +164,19 @@ async def get_heat_reports(limit: int = Query(default=20, ge=1, le=100)):
         raise HTTPException(status_code=500, detail=f"获取热度汇报失败: {str(e)}")
 
 
+@router.get("/reports/data-quality")
+async def get_data_quality():
+    """数据可信度门禁结果：区分「真的没生意」与「设备/视频源异常」。
+
+    reliable=False 时，各统计里的 0 应理解为「无数据」而非「无客流」。
+    """
+    try:
+        from agents import data_quality
+        return data_quality.snapshot()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取数据可信度失败: {str(e)}")
+
+
 @router.get("/reports/health")
 async def health_check():
     """健康检查"""
