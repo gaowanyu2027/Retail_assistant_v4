@@ -1,8 +1,15 @@
-# ==================== 零售视频分析系统 依赖清单 ====================
+# ==================== 智能零售分析系统 依赖清单 ====================
 # 安装: pip install -r requirements.txt
+#
+# 说明：
+#   - 本文件是**人工维护的精选清单**（只列项目真正直接依赖的包，带用途注释），
+#     不是 pip freeze 全量冻结——避免混入与本项目无关的包。
+#   - 标 [可选] 的包缺失时，对应功能会优雅降级，不影响主链路。
+#   - 请务必用 UTF-8（无 BOM）保存：曾因 PowerShell 的 `pip freeze > requirements.txt`
+#     默认写 UTF-16+BOM，导致 git 把本文件识别为二进制、无法 diff。
 
 # --- 深度学习 & 计算机视觉 ---
-ultralytics>=8.0.0          # YOLO检测器
+ultralytics>=8.0.0          # YOLO检测器（行人 / 人脸）
 torch>=2.0.0                # PyTorch
 torchvision>=0.15.0         # 视觉模型（ResNet50等）
 opencv-python>=4.8.0        # 图像处理
@@ -10,28 +17,41 @@ numpy>=1.24.0               # 数值计算
 scipy>=1.10.0               # 科学计算（马氏距离等）
 filterpy>=1.4.5             # 卡尔曼滤波
 
-# --- Web框架 ---
-fastapi>=0.100.0            # FastAPI后端
-uvicorn>=0.23.0             # ASGI服务器
-websockets>=11.0            # WebSocket支持
+# --- Web 框架 ---
+fastapi>=0.100.0            # FastAPI 后端
+uvicorn>=0.23.0             # ASGI 服务器
+websockets>=11.0            # WebSocket（视频流 / 语音 / 汇报推送）
 pydantic>=2.0.0             # 数据验证
 
-# --- 配置 & 数据 ---
-pyyaml>=6.0                 # YAML配置文件解析
+# --- 配置 ---
+pyyaml>=6.0                 # YAML 配置解析（cameras.yaml / roi_zones.yaml）
 
-# --- AI/LLM客户端（Agent层，通过DeepSeek调用） ---
-openai>=1.0.0               # DeepSeek走OpenAI兼容接口（必须）
-langchain>=1.0              # LangChain框架（Agent编排，与travel_agent对齐）
-langchain-openai>=1.0       # LangChain OpenAI兼容适配器
-sherpa-onnx>=1.10.0         # 本地KWS唤醒词模型
-edge-tts>=7.2.8             # 服务端中文语音合成
-PyMySQL>=1.0.0              # MySQL连接驱动
-qdrant-client>=1.19.0       # 本地向量检索
+# --- 数据存储 ---
+PyMySQL>=1.0.0              # MySQL 连接驱动（业务数据持久化）
+SQLAlchemy>=2.0             # [可选] MySQL 连接池；缺失时 db_engine 降级为裸连接
+qdrant-client>=1.19.0       # 向量检索（支持嵌入式与 Server 模式）
+
+# --- Agent / LLM 编排 ---
+openai>=1.0.0               # DeepSeek 走 OpenAI 兼容接口（必须）
+langchain>=1.0              # LangChain 框架（create_agent 编排）
+langchain-core>=1.0         # @tool 装饰器与消息类型（被多处直接 import）
+langgraph>=1.0              # 状态图工作流（主动汇报链路 StateGraph + checkpointer）
+langchain-openai>=1.0       # LangChain 的 OpenAI 兼容适配器
+langchain-mcp-adapters>=0.1 # [可选] 百度地图官方 MCP（BAIDU_MCP_ENABLED=1 时启用）
+langfuse>=2.0               # [可选] LLM 全链路可观测；缺失时自动跳过打点
+
+# --- 语音（唤醒 / 识别 / 合成） ---
+sherpa-onnx>=1.10.0         # 本地 KWS 唤醒词 + 流式中文 ASR
+edge-tts>=7.2.8             # 服务端中文语音合成（TTS）
+
+# --- 文档生成 ---
+reportlab>=4.0              # [可选] gen_kb_pdf.py 生成《业务知识库》PDF
 
 # --- 工具库 ---
-loguru>=0.7                 # 结构化日志（替代print）
-httpx>=0.27                 # 异步HTTP客户端
-python-multipart>=0.0.9     # 文件上传支持
+loguru>=0.7                 # 结构化日志（替代 print）
+httpx>=0.27                 # 异步 HTTP 客户端（Agent 工具外部调用 / 压测脚本）
+python-multipart>=0.0.9     # 文件上传支持（视频上传）
 
-# --- 前端（通过CDN加载，无需本地安装） ---
-# ECharts — CDN引入 (index.html 中已包含)
+# --- 前端 ---
+# Vue 版前端由 Vite 构建（frontend-vue/），其依赖见 frontend-vue/package.json
+# ECharts 随前端打包，无需 Python 侧安装

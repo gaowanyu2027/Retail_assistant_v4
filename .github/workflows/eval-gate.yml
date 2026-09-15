@@ -1,0 +1,30 @@
+# CI 门禁：push/PR 时跑 Agent 评测集，失败则拦截（回归保护）
+# run_evals.py 已按"任一失败→退出码1"实现门禁。
+name: eval-gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run evaluation gate
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}   # 你的 DeepSeek key
+        run: |
+          python evals/run_evals.py
+        # 退出码 0=通过，1=有失败用例（门禁拦截），2=异常

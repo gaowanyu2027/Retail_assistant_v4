@@ -47,6 +47,22 @@ evals/reports/
 # ===== 个人 / 求职材料（勿推送） =====
 项目经历_STAR.md
 JD匹配度评估.md
+# PDF 提取出的面试题集（agent.md 实为 17000 行面试题库，非项目文档）
+agent.md
+Agent*.pdf
+# PDF 文本提取的中间产物
+.pdf_text_*.txt
+
+# ===== 临时安装 / 测试残留 =====
+# pip 的临时工作目录（用 --temp .pip_tmp 就地安装留下的解包/构建目录）
+.pip_tmp/
+.pylibs/
+__wtest/
+
+# ===== 生成物 / 杂图 =====
+# 由 gen_kb_pdf.py 生成，可随时重新生成
+业务知识库_*.pdf
+微信图片_*.jpg
 
 # ===== 测试截图（含真实对话内容） =====
 ScreenShot_*.png
@@ -61,3 +77,18 @@ ScreenShot_*.png
 .vscode/
 *.swp
 *.swo
+
+# ===== 环境变量（密钥/密码，务必忽略；只提交占位模板 .env.example） =====
+.env
+.env.*
+!.env.example
+
+# ===== 微信开发者工具「个人配置」=====
+# 微信官方定位该文件为个人本地设置（每个开发者不同），不加入版本控制；
+# 团队共享的配置是 project.config.json（那个要提交）。
+miniprogram/project.private.config.json
+
+# ===== 高负载环境下重跑的压测报告 =====
+# 该次重跑时机器同时跑着多个容器，QPS/延迟受负载影响明显（QPS 62 vs 历史 167），
+# 数据不具可比性，暂不入库，避免与历史报告对比时产生误导。
+benchmark/reports/loadtest_20260910_134134.md

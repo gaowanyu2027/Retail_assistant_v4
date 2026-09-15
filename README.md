@@ -34,13 +34,14 @@
 
 ```text
 .
-├── agents/                  # LangChain Agent
+├── agents/                  # LangChain Agent + 模块注册表 + 百度地图工具
 ├── api/                     # FastAPI 路由
-├── config/                  # 全局配置与 ROI
+├── config/                  # 全局配置与 ROI + cameras.yaml
 ├── cv_engine/               # YOLO、跟踪、表情、ROI
-├── skills/                  # 热度、告警、表情技能
+├── skills/                  # 热度、告警、表情 + 客流/空货架模块
 ├── frontend/                # 前端页面
 ├── data/                    # SQLite、视频、日志
+├── miniprogram/             # 微信小程序端（问答/看板/摄像头管理）
 ├── all_models/              # sherpa-onnx 语音模型
 ├── sherpa-onnx-kws-*        # KWS 唤醒词模型
 ├── yolo26n.pt               # YOLO 小模型
@@ -79,26 +80,77 @@ pip install PyMySQL qdrant-client edge-tts
 
 ### 3. 配置环境变量
 
-#### DeepSeek API Key
+系统从环境变量读取密钥与配置（**所有值均不在代码/仓库中硬编码**）。下面是完整清单，标注了**必选 / 可选**。
+
+> 提示：可用 Windows 用户环境变量（`$env:xxx`）或 `.env` 文件。若用 `.env`，请在项目根目录创建且**不要提交**（`gitignore` 已忽略 `.env`）；模板见下方 `.env.example`。
+
+#### 必选（核心功能启动需要）
+
+| 变量 | 用途 | 示例 |
+|---|---|---|
+| `dazuoye_api` | **DeepSeek API Key**（Agent 问答、LLM 调用） | `sk-xxxx` |
+| `mysql_root` | **MySQL root 密码**（会话/表情/问答持久化） | `你的密码` |
+| `baidu_map_ak` | 百度地图**服务端 AK**（竞品/商圈/地理编码/距离） | `百度AK` |
+| `baidu_map_sk` | 百度地图**服务端 SK**（sn 签名，检索/矩阵必需） | `百度SK` |
 
 ```powershell
-$env:dazuoye_api = "你的DeepSeek API Key"
+$env:dazuoye_api    = "你的DeepSeek API Key"
+$env:mysql_root     = "你的MySQL密码"
+$env:baidu_map_ak   = "你的百度地图AK"
+$env:baidu_map_sk   = "你的百度地图SK"
 ```
 
-#### MySQL
+> **没有配置 `mysql_root` 时**：系统自动回退到 SQLite（`data/agent_checkpoints.db`），不会写 MySQL，启动日志会提示。
 
-系统会自动创建 `Retail_assistant` 数据库，需要提供可建库的 MySQL 账号：
+#### 可选（增强/切换功能）
+
+| 变量 | 用途 | 默认值 | 说明 |
+|---|---|---|---|
+| `MYSQL_HOST` | MySQL 主机 | `127.0.0.1` | 远程 MySQL 时改 |
+| `MYSQL_PORT` | MySQL 端口 | `3306` | |
+| `MYSQL_USER` | MySQL 用户 | `root` | |
+| `SANITIZE_FACES` | 人脸脱敏开关 | `0`（关） | 设 `1` 启用推帧/展示时对人脸打码（合规） |
+| `QDRANT_URL` | Qdrant Server 地址 | 空（嵌入式） | 设置后启用 **Server 模式**（Docker/多进程/多机） |
+| `QDRANT_API_KEY` | Qdrant Server 密钥 | 空 | 云托管/带认证时填 |
+| `QDRANT_PATH` | 本地嵌入向量库目录 | `qdrant_data/` | 仅嵌入式模式用 |
+| `SHERPA_ONNX_PROVIDER` | 本地语音推理设备 | `cpu` | 有 CUDA 可设 `cuda` |
+| `BAIDU_MCP_ENABLED` | 百度官方 MCP 叠加 | 空 | 设 `1` 启用 14 个通用地图工具 |
+| `LANGFUSE_PUBLIC_KEY` | Langfuse 可观测 Public Key | 空 | 两个 key 齐了才启用 Trace |
+| `LANGFUSE_SECRET_KEY` | Langfuse 可观测 Secret Key | 空 | 同上 |
 
 ```powershell
-$env:mysql_root = "你的MySQL密码"
-$env:MYSQL_HOST = "127.0.0.1"
-$env:MYSQL_PORT = "3306"
-$env:MYSQL_USER = "root"
+# 可选：启用功能时再设（不设则用默认值）
+$env:SANITIZE_FACES         = "1"     # 人脸脱敏
+$env:SHERPA_ONNX_PROVIDER   = "cuda"  # 本地语音用 GPU
+$env:BAIDU_MCP_ENABLED      = "1"     # 百度 MCP
 ```
 
-如果没有配置 `mysql_root`，系统会回退到 SQLite，不会自动写 MySQL。
+#### `.env.example` 模板（可复制使用）
 
-#### Ollama（向量召回可选）
+> 复制为 `.env` 并填入真实值，**不要提交 `.env`**。
+
+```ini
+# ===== 必选 =====
+dazuoye_api=你的DeepSeek API Key
+mysql_root=你的MySQL密码
+baidu_map_ak=你的百度地图AK
+baidu_map_sk=你的百度地图SK
+
+# ===== 可选 =====
+# MYSQL_HOST=127.0.0.1
+# MYSQL_PORT=3306
+# MYSQL_USER=root
+# SANITIZE_FACES=1
+# QDRANT_URL=http://localhost:6333
+# QDRANT_API_KEY=
+# QDRANT_PATH=qdrant_data/
+# SHERPA_ONNX_PROVIDER=cpu
+# BAIDU_MCP_ENABLED=1
+# LANGFUSE_PUBLIC_KEY=
+# LANGFUSE_SECRET_KEY=
+```
+
+#### Ollama（可选，向量召回用）
 
 启动 Ollama，并安装中文向量模型：
 
@@ -306,3 +358,30 @@ ollama pull qllama/bge-small-zh-v1.5
 ## 备注
 
 本项目默认使用单进程运行。本地 Qdrant 模式不支持多个 Python 进程同时打开同一个向量库目录；如果后续使用多进程或多机部署，需要切换为 Qdrant Server 模式。
+
+## 摄像头模块化（按需加载）
+
+多摄像头按"标签 + 配置"加载分析模块，每镜头独立数据隔离：
+
+- `config/cameras.yaml`：每个摄像头的 `type`(标签) 决定**候选模块池**，`modules` 决定**实际加载**
+- `agents/analytics_module.py`：模块抽象 + 工厂注册表 + 标签候选池
+- `agents/module_registry.py`：`ModuleRegistry`——按配置实例化模块、运行时增删/开关、喂数据(数据隔离)
+- `config/cameras.yaml` 示例：店内镜头装 `[shelf_heat, anomaly_detect, empty_shelf]`，门口装 `[footfall]`，收银装 `[emotion_experience]`
+
+**接口**（`/api/cameras`）：
+- `GET /cameras` 列表 | `GET /cameras/scan` 识别 | `GET /cameras/modules` 候选池
+- `POST /cameras/{id}/modules` 运行时加载模块 | `DELETE .../{mod}` 卸载 | `PUT .../{mod}/enabled` 开关
+- `POST /cameras/active` 视频绑定 | `GET /cameras/{id}/modules/{mod}/stats` 模块统计
+
+前端小程序"摄像头管理"设置页可**识别/添加摄像头 + 勾选模块 + 绑定视频**（显性按钮，不改代码、不重启）。
+
+## 百度地图接入
+
+竞品/商圈/地理编码/距离测算，WebAPI 定制 + MCP 可选：
+
+- `agents/map_tools.py`：4 个业务工具（`check_competitors` / `analyze_surrounding` / `batch_geocode` / `calc_distances`），服务端 AK + SW 签名
+- `agents/mcp_maps.py`：百度官方 MCP（14 个通用地图工具），设 `BAIDU_MCP_ENABLED=1` 叠加
+- 环境变量：`baidu_map_ak` / `baidu_map_sk`
+- 接口：`/api/maps/geocode` / `competitors` / `surrounding` / `distance`
+
+Agent 可回答："我门店周边竞争如何"→ 返回竞品数量/分布/商圈潜力 + 业务建议。
