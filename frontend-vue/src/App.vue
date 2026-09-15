@@ -24,6 +24,10 @@
         <button id="btn-transcribe-test" class="btn btn-secondary">转文字测试</button>
         <button id="btn-voice-reply" class="btn btn-secondary">语音回复: 开</button>
         <span class="fps-display">FPS: <strong id="fps-value">--</strong></span>
+        <span class="user-chip" :title="'当前登录：' + userLabel">
+          {{ userLabel }}
+        </span>
+        <button id="btn-logout" class="btn btn-secondary" @click="logout">退出</button>
       </div>
     </header>
 
@@ -214,6 +218,20 @@ export default {
       localPreviewRaf: null,
       pollTimer: null,
       reportTimer: null,
+      // 主动汇报 WS 订阅（实时推送；REST 轮询作为兜底保留）
+      reportWs: null,
+      reportWsReconnectTimer: null,
+      reportWsKeepaliveTimer: null,
+      reportWsAttempts: 0,
+      reportWsClosed: false,
+      // 当前登录用户（由 Root.vue 登录门禁写入；App 挂载时已就绪）
+      currentUser: (typeof window !== 'undefined' && window.__currentUser) || null,
+      userLabel: (() => {
+        const w = (typeof window !== 'undefined' && window.__currentUser) || null
+        if (!w) return ''
+        const role = w.role === 'root' ? '管理员' : '平台账户'
+        return (w.display_name || w.username) + ' · ' + role
+      })(),
       emoPieChart: null,
       retailEmoChart: null,
     }
@@ -270,8 +288,10 @@ export default {
     }, 5000)
 
     // 最新运营汇报（主动汇报 Agent 生成）
+    // 双通道：WS 订阅实时推送（优先），REST 轮询兜底（WS 未连上/断线期间仍有数据）
     this.fetchLatestReport()
     this.reportTimer = setInterval(() => this.fetchLatestReport(), 15000)
+    this.connectReportWs()
 
     // 服务端帧到达后停止本地预览；同时处理实时告警/热度事件（对齐原生版行为）
     StreamManager.onFrame((msg) => {
@@ -324,6 +344,17 @@ export default {
   beforeUnmount() {
     clearInterval(this.pollTimer)
     clearInterval(this.reportTimer)
+    // 主动汇报 WS：置关闭标记（阻止重连）+ 清定时器 + 断连
+    this.reportWsClosed = true
+    this._stopReportKeepalive()
+    if (this.reportWsReconnectTimer) {
+      clearTimeout(this.reportWsReconnectTimer)
+      this.reportWsReconnectTimer = null
+    }
+    if (this.reportWs) {
+      try { this.reportWs.close() } catch (e) {}
+      this.reportWs = null
+    }
     clearTimeout(this.localCaptureTimer)
     if (this.localPreviewRaf) cancelAnimationFrame(this.localPreviewRaf)
     if (this._docClickHandler) document.removeEventListener('click', this._docClickHandler)
@@ -341,6 +372,18 @@ export default {
     }
   },
   methods: {
+    // 退出登录：吊销服务端会话并回登录页（整页重载以彻底清掉仪表盘状态/WS 连接）
+    async logout() {
+      if (!window.confirm('确认退出登录？')) return
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' })
+      } catch (e) { /* 网络异常也继续本地清理 */ }
+      try {
+        window.__currentUser = null
+        window.__currentPerms = []
+      } catch (e) { /* ignore */ }
+      location.reload()
+    },
     escapeHtml(value) {
       return String(value || '')
         .replace(/&/g, '&amp;')
@@ -496,11 +539,13 @@ export default {
           this.updateEmoStatus(true)
         }
 
-        // 640x480 中心裁剪后发送（与原生一致，服务端会缩放到输出尺寸）
+        // 低延迟：降分辨率(320x240) + 降JPEG质量(0.4) + 固定帧率(~15fps)，不锁步
+        // （原实现锁步"等上一帧发完才发下一帧"，toBlob/网络慢会卡到秒级；改连续推，卡则丢帧保流畅）
         const vw = videoEl.videoWidth || 480
         const vh = videoEl.videoHeight || 360
-        const outW = 640
-        const outH = 480
+        const outW = 320
+        const outH = 240
+        const FRAME_INTERVAL = 66   // ~15fps
         const canvas = document.createElement('canvas')
         canvas.width = outW
         canvas.height = outH
@@ -518,17 +563,11 @@ export default {
           srcY = (vh - srcH) / 2
         }
 
-        let sending = false
         const captureAndSend = () => {
           if (!this.cameraActive) {
             stream.getTracks().forEach(t => t.stop())
             return
           }
-          if (sending) {
-            this.localCaptureTimer = setTimeout(captureAndSend, 33)
-            return
-          }
-          sending = true
           try {
             // 与预览一致的镜像翻转：发送帧也水平翻转，标注方向一致
             ctx.save()
@@ -536,19 +575,18 @@ export default {
             ctx.scale(-1, 1)
             ctx.drawImage(videoEl, srcX, srcY, srcW, srcH, 0, 0, outW, outH)
             ctx.restore()
+            // 始终按固定帧率连续推（不再锁步等待），toBlob 完成后立即发（卡则丢帧保流畅）
             canvas.toBlob((blob) => {
               try {
                 if (blob) {
                   StreamManager.sendClientFrame(blob)
                 }
               } catch (e) {}
-              sending = false
-              this.localCaptureTimer = setTimeout(captureAndSend, 33)
-            }, 'image/jpeg', 0.5)
+            }, 'image/jpeg', 0.4)
           } catch (e) {
-            sending = false
-            this.localCaptureTimer = setTimeout(captureAndSend, 33)
+            console.error('[Camera] 截图错误:', e)
           }
+          this.localCaptureTimer = setTimeout(captureAndSend, FRAME_INTERVAL)
         }
         captureAndSend()
       } catch (e) {
@@ -919,22 +957,91 @@ export default {
         }
       } catch (e) {}
     },
-    // 最新运营汇报（主动汇报 Agent 生成）
+    // 汇报栏渲染（REST 轮询与 WS 推送共用，避免两处逻辑漂移）
+    updateReportBar(summary, type, timeStr) {
+      const bar = document.getElementById('heat-report-bar')
+      const text = document.getElementById('heat-report-text')
+      if (!bar || !text || !summary) return
+      text.textContent = (timeStr ? '[' + timeStr + '] ' : '') + summary
+      bar.style.borderColor = type === 'surge' ? 'var(--accent-red)' : 'var(--border)'
+      bar.style.display = 'block'
+    },
+    // 最新运营汇报（主动汇报 Agent 生成）— REST 兜底通道
     async fetchLatestReport() {
       try {
         const resp = await fetch('/api/reports/heat-reports?limit=1')
         if (!resp.ok) return
         const data = await resp.json()
         const reports = data.reports || []
-        const bar = document.getElementById('heat-report-bar')
-        const text = document.getElementById('heat-report-text')
-        if (!bar || !text || !reports.length) return
+        if (!reports.length) return
         const r = reports[0]
         const type = (r.data && typeof r.data === 'object') ? r.data.type : null
-        text.textContent = (r.report_time ? '[' + r.report_time + '] ' : '') + r.summary
-        bar.style.borderColor = type === 'surge' ? 'var(--accent-red)' : 'var(--border)'
-        bar.style.display = 'block'
+        this.updateReportBar(r.summary, type, r.report_time)
       } catch (e) {}
+    },
+    // 主动汇报 WS 订阅 — 实时推送通道（后台汇报 Agent 广播 /api/ws/reports）
+    // 断线自动退避重连；失败不影响主链路（REST 轮询仍在跑）
+    connectReportWs() {
+      if (this.reportWsClosed) return
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const url = `${protocol}//${location.host}/api/ws/reports`
+      let ws
+      try {
+        ws = new WebSocket(url)
+      } catch (e) {
+        this.scheduleReportWsReconnect()
+        return
+      }
+      this.reportWs = ws
+
+      ws.onopen = () => {
+        this.reportWsAttempts = 0
+        this._startReportKeepalive()
+      }
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data)
+          if (!msg || msg.type !== 'report' || !msg.summary) return
+          const inner = (msg.data && typeof msg.data === 'object') ? msg.data : {}
+          const rawTs = msg.ts || inner.timestamp || ''
+          const timeStr = rawTs ? String(rawTs).replace('T', ' ').slice(0, 19) : ''
+          this.updateReportBar(msg.summary, inner.type, timeStr)
+        } catch (e) {}
+      }
+      ws.onclose = () => {
+        this._stopReportKeepalive()
+        if (this.reportWs === ws) this.reportWs = null
+        this.scheduleReportWsReconnect()
+      }
+      ws.onerror = () => {
+        // 交给 onclose 统一处理重连，这里只确保连接被关闭
+        try { ws.close() } catch (e) {}
+      }
+    },
+    scheduleReportWsReconnect() {
+      if (this.reportWsClosed || this.reportWsReconnectTimer) return
+      this.reportWsAttempts = Math.min(this.reportWsAttempts + 1, 10)
+      const delay = Math.min(3000 * this.reportWsAttempts, 30000)  // 3s 起，最长 30s
+      this.reportWsReconnectTimer = setTimeout(() => {
+        this.reportWsReconnectTimer = null
+        this.connectReportWs()
+      }, delay)
+    },
+    // 保活：汇报间隔 10 分钟，长时间空闲可能被中间代理（如内网穿透/反代）断开
+    _startReportKeepalive() {
+      this._stopReportKeepalive()
+      this.reportWsKeepaliveTimer = setInterval(() => {
+        const ws = this.reportWs
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'ping' })) } catch (e) {}
+        }
+      }, 60000)
+    },
+    _stopReportKeepalive() {
+      if (this.reportWsKeepaliveTimer) {
+        clearInterval(this.reportWsKeepaliveTimer)
+        this.reportWsKeepaliveTimer = null
+      }
     },
     updateAlertsFromQuery(alerts) {
       const status = document.getElementById('alert-status')

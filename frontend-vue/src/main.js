@@ -1,5 +1,5 @@
 import { createApp } from 'vue'
-import App from './App.vue'
+import Root from './Root.vue'
 import * as echarts from 'echarts'
 
 window.echarts = echarts
@@ -17,8 +17,8 @@ function loadScript(src) {
 async function bootstrap() {
   await loadScript('/js/stream.js')
   await loadScript('/js/chart.js')
-  createApp(App).mount('#app')
-  await loadScript('/js/voice.js')
+  // 挂 Root：由它做登录门禁，未登录不挂载仪表盘（voice.js 在进入仪表盘前加载）
+  createApp(Root).mount('#app')
 }
 
 bootstrap()
