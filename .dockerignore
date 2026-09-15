@@ -1,0 +1,64 @@
+# ============================================================
+# Docker 构建上下文忽略清单
+# 目的：让构建上下文尽量小（模型/数据/依赖不参与 COPY），
+#       同时保证构建所需文件不被误排除。
+# ============================================================
+
+# --- 版本控制与文档 ---
+.git
+.gitignore
+.github
+*.md
+!README.md
+
+# --- 密钥文件（关键！`COPY . .` 会把上下文里的一切烤进镜像层）---
+# 若把 .env 打进镜像，任何人 `docker run --rm -it <镜像> cat /app/.env`
+# 就能拿到 API Key 与数据库口令，且该层永久留在镜像历史里。
+# 环境变量请用 docker compose 的 env_file / environment 在**运行时**注入。
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- 运行时数据（容器内用挂载提供，不打包）---
+data/
+qdrant_data/
+
+# --- 模型权重（体积大，用挂载提供，不进镜像）---
+*.pt
+*.pth
+*.onnx
+*.bin
+*.tiktoken
+all_models/
+sherpa-onnx-kws-*/
+
+# --- 前端依赖与产物（在 Dockerfile 的 node 阶段重新构建）---
+frontend-vue/node_modules/
+frontend-vue/dist/
+
+# --- Python 缓存与虚拟环境 ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# --- 第三方仓库（独立 git 仓库，与本项目无关）---
+mmpose/
+Ultralytics/
+yaid-hackathon-main/
+node_modules/
+
+# --- 临时与缓存 ---
+.pip_tmp/
+.pylibs/
+.pnpm-store/
+*.log
+*.tmp
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/

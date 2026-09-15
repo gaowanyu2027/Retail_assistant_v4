@@ -312,6 +312,90 @@ python run.py --port 8000
 [OK] 查询历史向量索引完成: N 条
 ```
 
+## 容器化运行（Docker Compose）
+
+除上面的本地直跑方式外，也可用 Docker 一键拉起**业务侧**全套服务。
+
+### 前置
+
+```powershell
+copy .env.example .env      # 填入 dazuoye_api / mysql_root 等（.env 已被 gitignore）
+```
+
+### 启动
+
+```powershell
+docker compose up -d --build
+docker compose logs -f backend     # 观察启动日志（首次会打印 root 账号与随机密码）
+```
+
+访问 **http://localhost:8000**。停止：`docker compose down`（数据在命名卷里，不会丢）。
+
+### 编排内容
+
+| 服务 | 镜像 | 宿主端口 | 说明 |
+|---|---|---|---|
+| `backend` | 本项目（多阶段构建） | **8000** | FastAPI + Agent + 前端静态资源 |
+| `mysql` | mysql:8.0 | 不发布 | 业务数据（`depends_on` + healthcheck 确保就绪后再起后端） |
+| `qdrant` | qdrant/qdrant | 不发布 | 向量检索（Server 模式，支持多进程） |
+| `redis` | redis:7-alpine | 不发布 | **可选**，默认不启动；项目当前未使用 Redis（`--profile full` 才起） |
+
+> 只有 `backend` 对外发布端口。MySQL/Qdrant/Redis 仅在 compose 网络内被 backend 通过
+> 服务名访问，**不暴露到宿主机**——既避免端口冲突，也少一个攻击面。
+> 需要用 GUI 客户端连库时，取消 `docker-compose.yml` 里对应 `ports` 的注释即可（已限 `127.0.0.1`）。
+
+### 四个设计说明
+
+**① 前端在镜像内构建（多阶段）**
+`frontend-vue/dist` 被 `.gitignore` 忽略，别人 clone 后没有前端产物。因此 Dockerfile 用
+node 阶段执行 `npm ci && npm run build`，再 COPY 进 Python 运行阶段——
+**使用者在宿主机无需安装 Node**，`docker build` 一步到位。
+
+**② 模型与数据用挂载，不打进镜像**
+`yolo26n.pt` / `best.pt` / `mobilenetv3_fer_best.pth` / `all_models/` / KWS 模型
+以只读卷挂载，`data/`（含鉴权库、销量投递目录）为可写挂载。这样镜像更小，也符合
+"模型权重不进镜像"的做法。
+
+**③ 摄像头与 GPU 留在边缘（本地）**
+本编排覆盖的是"**云端/业务侧**"——业务 API、Agent 问答、数据存储。
+容器内直通摄像头/GPU 在 Windows 上尤其别扭，且原始视频流不该走公网，因此建议：
+
+```
+边缘（本地/店内）:  摄像头 → YOLO 推理 → 结构化结果
+                                    ↓（只传几 KB 的 JSON）
+云端（本编排）:    业务 API + Agent + MySQL/Qdrant + 多端展示
+```
+
+容器内没有视频源时，**数据可信度门禁**会明确提示"视频源未启动，数据不可信"，
+而不会把 0 当作业务结论——这正好可以通过 `GET /api/reports/data-quality` 观察到。
+
+**④ 密钥不进镜像（`.dockerignore` 挡住 `.env`）**
+Dockerfile 有 `COPY . .`，会把它能看到的**一切**烤进镜像层。若 `.env` 被拷进去，
+任何人 `docker run --rm -it <镜像> cat /app/.env` 就能拿到 API Key 与数据库口令，
+而且该层会**永久留在镜像历史里**（即使后续删除文件也仍可挖出）。
+因此 `.dockerignore` 显式排除 `.env` / `.env.*` / `*.pem` / `*.key`——
+环境变量一律由 `env_file` 在**运行时**注入。这与 `.gitignore` 的规则是两套独立机制，
+**只加 `.gitignore` 并不防 Docker**，容易漏。
+
+### 从 `docker run` 迁移过来（重要）
+
+若宿主机上已有以 `docker run` 启动的 MySQL/Qdrant，**必须先停掉再 `docker compose up`**：
+
+```powershell
+docker ps                       # 确认容器名，例如 mysql-main / qdrant
+docker stop mysql-main qdrant
+```
+
+原因是**共享卷**：本编排复用同名卷（`mysql8_volume` / `qdrant-docker`），
+而**同一个卷被两个 MySQL 同时挂载会损坏数据文件**。
+（本编排不发布 3306/6333，所以这里不是端口冲突问题。）
+
+复用卷的好处是**数据完整保留**，不用重新导。谨慎起见先备份：
+
+```powershell
+docker exec mysql-main mysqldump -uroot -p retail_assistant > backup.sql
+```
+
 ## 功能使用
 
 ### 视频分析

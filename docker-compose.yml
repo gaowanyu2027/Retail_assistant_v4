@@ -1,0 +1,133 @@
+# ============================================================
+# 智能零售分析系统 v4 — docker compose 编排
+#
+# 用法：
+#   1) 准备环境变量：cp .env.example .env  （填入 dazuoye_api / mysql_root 等）
+#   2) 启动：        docker compose up -d --build
+#   3) 查看日志：    docker compose logs -f backend
+#   4) 访问：        http://localhost:8000   （首次启动终端会打印 root 账号与随机密码）
+#   5) 停止：        docker compose down
+#
+# ⚠ 从「docker run」迁移过来必读：
+#   本编排复用既有的具名卷（mysql8_volume / qdrant-docker），数据不会丢，
+#   但**同一个卷不能被两个容器同时挂载**——否则 MySQL 数据文件会损坏。
+#   因此首次切换前必须先停掉旧的独立容器：
+#       docker stop mysql-main qdrant
+#   （注：本编排不发布 3306/6333，所以不是端口冲突问题，纯粹是共享卷的约束。）
+#   保险起见可先备份：docker exec mysql-main mysqldump -uroot -p retail_assistant > backup.sql
+#
+# 架构说明（边缘 + 云端）：
+#   本编排覆盖「云端/业务侧」——业务 API、Agent 问答、数据存储。
+#   摄像头采集与 GPU 推理建议留在**边缘（本地）**：容器内直通摄像头/GPU
+#   在 Windows 上尤其别扭，且原始视频流不该走公网。
+#   因此容器内没有视频源时，系统会由「数据可信度门禁」明确提示
+#   "视频源未启动，数据不可信"，而不会把 0 当成业务结论。
+# ============================================================
+
+name: retail-assistant
+
+services:
+  # ---------------- 业务后端（本项目） ----------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: retail-assistant:v4
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    env_file:
+      # 可选：从 .env.example 复制而来。没建 .env 时也不报错
+      # （此时依赖 shell 里已有的环境变量或下面的 environment 默认值）
+      - path: .env
+        required: false
+    environment:
+      # 容器内用服务名做 DNS（compose 自动建网络），无需关心 IP
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      # ⚠ 数据库口令必须**在这里显式传给 backend**。
+      # 常见误解：mysql 服务里写了 ${mysql_root}，backend 就自动有了——不会。
+      # compose 的 ${...} 只是**宿主机侧的字符串替换**（用于 mysql 的
+      # MYSQL_ROOT_PASSWORD），而变量要进容器，只能靠 environment: 或 env_file:。
+      # 漏了这一行，后端会静默回退 SQLite：/api/health 依然 healthy、
+      # 页面照常打开，但 MySQL 里的业务数据一条都读不到——属于"不报错的错配"。
+      # 用 :? 让缺失时**直接报错**而不是悄悄降级。
+      mysql_root: "${mysql_root:?请在 .env 或 shell 中设置 mysql_root}"
+      # LLM Key 同理。用 :- 允许为空（无 Key 时问答降级，但服务仍可用）
+      dazuoye_api: "${dazuoye_api:-}"
+      QDRANT_URL: http://qdrant:6333
+      # 容器内没有摄像头 → 保持鉴权与销量投递目录默认开
+      AUTH_ENABLED: "${AUTH_ENABLED:-1}"
+      SALES_INBOX_ENABLED: "${SALES_INBOX_ENABLED:-1}"
+    volumes:
+      # 运行时数据：SQLite 回退库、鉴权库 auth.db、销量投递目录、日志
+      - ./data:/app/data
+      # 模型权重以只读方式挂载（不打进镜像）
+      - ./yolo26n.pt:/app/yolo26n.pt:ro
+      - ./best.pt:/app/best.pt:ro
+      - ./mobilenetv3_fer_best.pth:/app/mobilenetv3_fer_best.pth:ro
+      - ./all_models:/app/all_models:ro
+      - ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01:/app/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01:ro
+
+  # ---------------- MySQL（业务数据持久化） ----------------
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: "${mysql_root:?请在 .env 中设置 mysql_root}"
+      MYSQL_DATABASE: retail_assistant
+    # 不对外发布端口：backend 通过 compose 网络用服务名 `mysql` 直连，
+    # 数据库本就无需暴露到宿主机（少一个攻击面）。需要 GUI 客户端连入时
+    # 再取消下面两行注释。
+    # ports:
+    #   - "127.0.0.1:3306:3306"
+    volumes:
+      - mysql8_volume:/var/lib/mysql
+    healthcheck:
+      # 后端要等 MySQL 真正可用再启动，否则首启会因连不上库而降级到 SQLite
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  # ---------------- Qdrant（向量检索，Server 模式） ----------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    # 同上：向量库仅在 compose 网络内被 backend 访问。
+    # 想在宿主机看 Qdrant 面板时取消注释（注意端口冲突）。
+    # ports:
+    #   - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant-docker:/qdrant/storage
+
+  # ---------------- Redis（可选） ----------------
+  # 说明：项目当前**未使用** Redis（缓存/限流均为进程内实现）。
+  # 保留该服务以便将来多进程化时承接共享缓存与分布式限流；
+  # 默认不启动，需要时：docker compose --profile full up -d
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["full"]
+    volumes:
+      - redis_data:/data
+
+volumes:
+  # 用 name: 固定真实卷名（不套用 compose 项目前缀）：
+  # 既能在已有环境的卷上复用（数据保留），也能在全新环境自动创建
+  mysql8_volume:
+    name: mysql8_volume
+  qdrant-docker:
+    name: qdrant-docker
+  redis_data:
+    name: redis_data
