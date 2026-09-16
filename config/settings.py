@@ -412,14 +412,39 @@ SALES_INBOX_INTERVAL_SECONDS = int(os.environ.get("SALES_INBOX_INTERVAL_SECONDS"
 # ==================== 登录鉴权 ====================
 # 总开关：关闭后所有接口不再校验登录（仅本地调试/自动化测试用）
 AUTH_ENABLED = os.environ.get("AUTH_ENABLED", "1") == "1"
-# 会话有效期（小时）
+# 会话有效期（小时）—— 空闲超时：有活动会滑动续期，最长不超过下面的绝对上限
 AUTH_SESSION_HOURS = int(os.environ.get("AUTH_SESSION_HOURS", "12"))
+# 会话**绝对上限**（小时，从创建算起）：滑动续期不会越过它。
+# 没有这条，会话可以无限续命（滑动窗口的经典漏洞）。
+AUTH_SESSION_MAX_HOURS = int(os.environ.get("AUTH_SESSION_MAX_HOURS", "24"))
+# 剩余时间不足该小时数时才考虑续期（避免每次请求都写库）
+AUTH_SESSION_RENEW_THRESHOLD_HOURS = int(
+    os.environ.get("AUTH_SESSION_RENEW_THRESHOLD_HOURS", "2")
+)
+# 同一会话两次续期写库的最小间隔（秒）——get_session 跑在每个请求上，必须节流
+AUTH_SESSION_TOUCH_SECONDS = int(os.environ.get("AUTH_SESSION_TOUCH_SECONDS", "60"))
+# 会话来源 IP：默认记录**直连对端** IP。若部署在反向代理后面（此时对端是代理 IP），
+# 可置 1 改为信任 `X-Forwarded-For` 的第一跳 —— ⚠ 该头可被客户端伪造，
+# 所以默认关闭；它只用于审计展示，不参与任何安全判定。
+AUTH_TRUST_FORWARDED_FOR = os.environ.get("AUTH_TRUST_FORWARDED_FOR", "0") == "1"
 # 首次启动自动创建的 root 账号名
 AUTH_ROOT_USERNAME = os.environ.get("AUTH_ROOT_USERNAME", "root")
 # 初始 root 密码；不设则随机生成并在终端打印一次
 AUTH_ROOT_PASSWORD = os.environ.get("AUTH_ROOT_PASSWORD", "")
 # 鉴权数据库：独立于业务库（鉴权不应因 MySQL 不可用而把所有人锁在门外）
 AUTH_DB_PATH = os.environ.get("AUTH_DB_PATH") or str(DATA_DIR / "auth.db")
+# 鉴权库的 SQLite journal 模式。
+#
+# ⚠ 默认 **DELETE 而不是 WAL**：`data/auth.db` 位于 Windows 宿主目录的 bind mount
+# （Docker Desktop 走 9p/drvfs），而 **WAL 需要 mmap 共享内存文件（`-shm`）**，
+# 9p 对 mmap 支持不完整 —— 实测在**容器重建后**该库直接打不开：
+#     sqlite3.OperationalError: disk I/O error（连 PRAGMA table_info 都读不了）
+# 后果是登录接口 500（鉴权链路全挂），而 MySQL/业务链路看着还正常，很难联想到"换了个容器"。
+#
+# 鉴权是**单进程 + 低频写入**，DELETE（回滚日志）模式完全够用，且不依赖 mmap；
+# 若把 auth.db 放到 Linux 原生卷（named volume）或非 9p 文件系统，
+# 可设 `AUTH_SQLITE_JOURNAL_MODE=WAL` 拿回读写并发。
+AUTH_SQLITE_JOURNAL_MODE = os.environ.get("AUTH_SQLITE_JOURNAL_MODE", "DELETE").upper()
 
 # ---- 登录限流（防暴力破解）----
 # 同一「用户名 + IP」在窗口内失败达到该次数即锁定

@@ -39,6 +39,11 @@ from config.settings import (
     AUTH_ROOT_PASSWORD,
     AUTH_ROOT_USERNAME,
     AUTH_SESSION_HOURS,
+    AUTH_SESSION_MAX_HOURS,
+    AUTH_SESSION_RENEW_THRESHOLD_HOURS,
+    AUTH_SESSION_TOUCH_SECONDS,
+    AUTH_SQLITE_JOURNAL_MODE,
+    AUTH_TRUST_FORWARDED_FOR,
 )
 
 # ==================== 角色与权限 ====================
@@ -99,6 +104,10 @@ _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 
 
+# 允许的 journal 模式白名单（值来自环境变量，必须校验，避免拼进 PRAGMA 造成注入）
+_JOURNAL_MODES = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
+
+
 def _connect() -> sqlite3.Connection:
     global _conn
     if _conn is None:
@@ -107,9 +116,21 @@ def _connect() -> sqlite3.Connection:
             os.makedirs(d, exist_ok=True)
         _conn = sqlite3.connect(AUTH_DB_PATH, check_same_thread=False, timeout=10.0)
         _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA synchronous=NORMAL")
         _conn.execute("PRAGMA busy_timeout=5000")
+        # journal 模式见 config/settings.py 的说明：
+        # 默认 DELETE —— WAL 需要 mmap `-shm`，在 Windows bind mount（9p）上
+        # **容器重建后**会直接 disk I/O error，把登录整条链路带崩。
+        mode = AUTH_SQLITE_JOURNAL_MODE if AUTH_SQLITE_JOURNAL_MODE in _JOURNAL_MODES else "DELETE"
+        try:
+            _conn.execute(f"PRAGMA journal_mode={mode}")
+        except sqlite3.Error as e:
+            # 设不上也不能让鉴权起不来：退回默认回滚日志模式
+            print(f"[Auth][WARN] 设置 journal_mode={mode} 失败（{e}），改用 DELETE")
+            try:
+                _conn.execute("PRAGMA journal_mode=DELETE")
+            except sqlite3.Error as e2:
+                print(f"[Auth][ERROR] 连 DELETE 模式都设不上: {e2}")
+        _conn.execute("PRAGMA synchronous=NORMAL")
     return _conn
 
 
@@ -135,9 +156,24 @@ def init_auth_db() -> None:
             username TEXT NOT NULL,
             role TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL
+            expires_at TEXT NOT NULL,
+            ip TEXT NOT NULL DEFAULT '',
+            user_agent TEXT NOT NULL DEFAULT '',
+            last_seen_at TEXT
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_session_user ON auth_session(user_id)")
+        # ---- 迁移：给已有的 auth_session 补 ip / user_agent / last_seen_at ----
+        # 为什么需要：修复前会话表**不记录来源**，管理员无法回答
+        # 「这条登录态是哪台机器/哪个浏览器」，也不能做"登出其他设备"。
+        # SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS，用 PRAGMA 判断（同 long_term_memory 的做法）。
+        _cols = {r[1] for r in conn.execute("PRAGMA table_info(auth_session)")}
+        for _name, _ddl in (
+            ("ip", "ALTER TABLE auth_session ADD COLUMN ip TEXT NOT NULL DEFAULT ''"),
+            ("user_agent", "ALTER TABLE auth_session ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''"),
+            ("last_seen_at", "ALTER TABLE auth_session ADD COLUMN last_seen_at TEXT"),
+        ):
+            if _name not in _cols:
+                conn.execute(_ddl)
         # 登录失败计数（防暴力破解）：scope 形如 "u:用户名|ip:1.2.3.4" 或 "ip:1.2.3.4"
         conn.execute("""
         CREATE TABLE IF NOT EXISTS auth_login_attempt (
@@ -364,26 +400,94 @@ def delete_user(user_id: int) -> None:
 
 # ==================== 会话 ====================
 
-def create_session(user_id: int, username: str, role: str) -> dict:
+def create_session(user_id: int, username: str, role: str,
+                   ip: str = "", user_agent: str = "") -> dict:
+    """创建登录会话。
+
+    `ip` / `user_agent`（2026-09 新增）：记录来源，便于回答
+    「这条登录态是哪台机器/哪个浏览器」并支持登出其他设备。
+    只做**审计展示**用，不参与任何安全判定（IP 可伪造、UA 可伪造）。
+    """
     token = secrets.token_urlsafe(32)
     now = datetime.now()
     expires = now + timedelta(hours=AUTH_SESSION_HOURS)
     with _lock:
         conn = _connect()
         conn.execute(
-            "INSERT INTO auth_session (token, user_id, username, role, created_at, expires_at)"
-            " VALUES (?,?,?,?,?,?)",
+            "INSERT INTO auth_session"
+            " (token, user_id, username, role, created_at, expires_at, ip, user_agent, last_seen_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
             (token, int(user_id), username, role,
-             now.strftime("%Y-%m-%d %H:%M:%S"), expires.strftime("%Y-%m-%d %H:%M:%S")),
+             now.strftime("%Y-%m-%d %H:%M:%S"), expires.strftime("%Y-%m-%d %H:%M:%S"),
+             (ip or "")[:64], (user_agent or "")[:300], now.strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
     return {"token": token, "expires_at": expires.strftime("%Y-%m-%d %H:%M:%S")}
 
 
+def _parse_ts(value: str | None) -> datetime | None:
+    try:
+        return datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _maybe_extend_session(conn, row, now: datetime) -> None:
+    """滑动续期（空闲超时 + **绝对上限** + 写限流）。
+
+    三条规则（都可配，见 config/settings.py）：
+
+    1. **空闲超时** `AUTH_SESSION_HOURS`（默认 12h）：有活动就把到期时间往后推；
+    2. **绝对上限** `AUTH_SESSION_MAX_HOURS`（默认 24h，从 `created_at` 起算）：
+       续期永远不越过它。没有这条，会话可以无限续命 —— 滑动窗口的经典漏洞；
+    3. **写限流** `AUTH_SESSION_TOUCH_SECONDS`（默认 60s）+ 仅当剩余时间不足
+       `AUTH_SESSION_RENEW_THRESHOLD_HOURS` 时才动。这一步是必须的：
+       `get_session` 跑在**每个请求**上（前端 5 秒轮询、WS 握手、心跳），
+       不加限流就等于每次请求都写一次 SQLite。
+    """
+    created = _parse_ts(row["created_at"])
+    expires = _parse_ts(row["expires_at"])
+    if not created or not expires:
+        return
+    hard_cap = created + timedelta(hours=AUTH_SESSION_MAX_HOURS)
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    last_seen = _parse_ts(row["last_seen_at"])
+    throttled = bool(last_seen) and (now - last_seen).total_seconds() < AUTH_SESSION_TOUCH_SECONDS
+
+    # 1) 续期（**不受节流限制**）
+    #    节流只该约束"无害的 last_seen 刷新"，绝不能挡住"再不续期就要掉线"的续期 ——
+    #    第一版把两者混在一个节流里，结果是刚创建的会话（last_seen=刚刚）即使只剩
+    #    30 分钟也不会被续期（实测踩到）。这里按"剩余不足阈值 + 未到绝对上限"判断，
+    #    天然就把续期写限制在**每个会话每（空闲-阈值）小时一次**（默认 10 小时一次），
+    #    不需要额外节流。
+    if now < hard_cap and \
+            (expires - now).total_seconds() <= AUTH_SESSION_RENEW_THRESHOLD_HOURS * 3600:
+        new_expires = min(now + timedelta(hours=AUTH_SESSION_HOURS), hard_cap)
+        if new_expires > expires:
+            conn.execute(
+                "UPDATE auth_session SET expires_at=?, last_seen_at=? WHERE token=?",
+                (new_expires.strftime("%Y-%m-%d %H:%M:%S"), stamp, row["token"]),
+            )
+            conn.commit()
+            return
+
+    # 2) 不需要续期（或已到绝对上限）：只按节流刷新"最后活跃时间"，
+    #    否则每个请求（前端 5 秒轮询、WS 握手）都会变成一次 SQLite 写。
+    if not throttled:
+        conn.execute(
+            "UPDATE auth_session SET last_seen_at=? WHERE token=?", (stamp, row["token"])
+        )
+        conn.commit()
+
+
 def get_session(token: str | None) -> dict | None:
-    """按令牌取会话（含用户最新状态）；过期/失效/账号停用返回 None。"""
+    """按令牌取会话（含用户最新状态）；过期/失效/账号停用返回 None。
+
+    额外做滑动续期：见 `_maybe_extend_session`（有时间上限，不会无限续命）。
+    """
     if not token:
         return None
+    now = datetime.now()
     with _lock:
         conn = _connect()
         row = conn.execute("SELECT * FROM auth_session WHERE token=?", (token,)).fetchone()
@@ -393,14 +497,86 @@ def get_session(token: str | None) -> dict | None:
             conn.execute("DELETE FROM auth_session WHERE token=?", (token,))
             conn.commit()
             return None
+        try:
+            _maybe_extend_session(conn, row, now)
+        except Exception as e:                  # 续期失败绝不能影响鉴权主流程
+            print(f"[Auth][WARN] 会话滑动续期失败（本次请求不受影响）: {e}")
+        expires_at = row["expires_at"]
     user = get_user(row["user_id"])
     if not user or not user["enabled"]:
         return None
     # 角色以用户表为准（改角色会吊销会话，这里再兜一层）
     user = dict(user)
     user["token"] = token
-    user["session_expires_at"] = row["expires_at"]
+    user["session_expires_at"] = expires_at
     return user
+
+
+def session_public_id(token: str | None) -> str:
+    """会话的对外短标识（不可逆）：会话列表里用它代替 token。
+
+    token 等价于密码，**任何列表接口都不该把它吐出来**；这里给 12 位 sha256 前缀，
+    足够在 UI 里区分与定位（含 Logout 该设备），又无法反推原 token。
+    """
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
+
+def list_active_sessions(username: str | None = None) -> list[dict]:
+    """列出**未过期**会话（`username=None` = 全部账号，审计视角）。
+
+    返回**不含 token**（用 `session_public_id` 替代）。
+    """
+    now_s = _now()
+    out = []
+    with _lock:                                 # 共享连接：读也要持锁（其余函数同约定）
+        conn = _connect()
+        if username:
+            rows = conn.execute(
+                "SELECT * FROM auth_session WHERE username=? AND expires_at>? "
+                "ORDER BY created_at DESC",
+                (username, now_s),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM auth_session WHERE expires_at>? ORDER BY created_at DESC",
+                (now_s,),
+            ).fetchall()
+    for r in rows:
+        out.append({
+            "id": session_public_id(r["token"]),
+            "username": r["username"],
+            "role": r["role"],
+            "ip": r["ip"] or "",
+            "user_agent": r["user_agent"] or "",
+            "created_at": r["created_at"],
+            "last_seen_at": r["last_seen_at"] or "",
+            "expires_at": r["expires_at"],
+        })
+    return out
+
+
+def revoke_session_by_public_id(public_id: str, username: str | None = None) -> bool:
+    """按对外短标识吊销会话（`username` 非空时限定归属）。
+
+    实现上是全表比对 sha256 前缀 —— 会话表规模很小（个位数~几十行），
+    这样比额外存一列 id 更简单，也不会因为多一列而需要再迁移一次。
+    """
+    if not public_id:
+        return False
+    with _lock:
+        conn = _connect()
+        rows = conn.execute("SELECT token, username FROM auth_session").fetchall()
+        for r in rows:
+            if session_public_id(r["token"]) != public_id:
+                continue
+            if username is not None and (r["username"] or "") != username:
+                return False
+            conn.execute("DELETE FROM auth_session WHERE token=?", (r["token"],))
+            conn.commit()
+            return True
+    return False
 
 
 def revoke_session(token: str | None) -> bool:
@@ -765,6 +941,28 @@ def cookie_secure(request: Request | None) -> bool:
         return proto == "https"
     except Exception:
         return False
+
+
+def client_ip_from_request(request: Request | None) -> str:
+    """取**审计展示**用的来源 IP。
+
+    默认取直连对端（`request.client.host`）；只有显式打开
+    `AUTH_TRUST_FORWARDED_FOR=1` 时才采信 `X-Forwarded-For` 的第一跳
+    （反向代理场景，此时对端是代理 IP，没意义）。
+
+    ⚠ 这个值可以伪造（XFF 头由客户端随意填），因此**只用于会话列表展示**：
+    登录限流仍使用直连对端 IP（见 `api/routes/auth.py` 的 login）。
+    """
+    if request is None:
+        return ""
+    try:
+        if AUTH_TRUST_FORWARDED_FOR:
+            xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+            if xff:
+                return xff
+        return (request.client.host if request.client else "") or ""
+    except Exception:
+        return ""
 
 
 async def get_current_user(request: Request) -> dict:
