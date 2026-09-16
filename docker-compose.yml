@@ -108,6 +108,11 @@ services:
       - ./data:/app/data
       # 模型权重以只读方式挂载（不打进镜像）
       - ./yolo26n.pt:/app/yolo26n.pt:ro
+      # 演示视频源：模块配置里 cam_in_01 的 source 就是它（`mmpose/demo/resources/demo.mp4`）。
+      # ⚠ mmpose/ 被 .dockerignore 排除（体积大），所以镜像里**没有**这个文件 ——
+      #   不挂载的话"服务器摄像头"在容器里永远打不开（实测 /app 下一个 mp4 都没有）。
+      #   cv2 读文件不需要本机设备，因此这是容器里唯一能真正出画面的"服务器摄像头"来源。
+      - ./mmpose/demo/resources/demo.mp4:/app/mmpose/demo/resources/demo.mp4:ro
       - ./best.pt:/app/best.pt:ro
       - ./mobilenetv3_fer_best.pth:/app/mobilenetv3_fer_best.pth:ro
       - ./all_models:/app/all_models:ro

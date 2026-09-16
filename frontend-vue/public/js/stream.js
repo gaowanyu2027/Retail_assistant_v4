@@ -281,7 +281,53 @@ const StreamManager = {
     sendAction(action, params = {}) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({ action, mode: this.currentMode, ...params }));
+            return true;
         }
+        // 修复前这里是"**静默丢弃**"：WS 还没就绪时点"打开摄像头"什么都不会发生，
+        // 界面上却已经被写成"运行中"，用户只能看到一片空白（典型的"点了没反应"）。
+        // 现在：未连接就主动建连 —— 调用方（startWebcam/startFile/...）已经先设置了
+        // reconnectAction，onopen 会把它补发出去，所以动作不会丢。
+        console.warn('[Stream] WebSocket 未就绪，自动连接后补发动作:', action);
+        if (!this.ws ||
+            this.ws.readyState === WebSocket.CLOSED ||
+            this.ws.readyState === WebSocket.CLOSING) {
+            this.connect();
+        }
+        return false;
+    },
+
+    /**
+     * 按"摄像头配置里的 source"选择正确的 WS 动作（纯函数，便于测试）。
+     *
+     * 为什么需要它：本项目有**两套"摄像头"概念**，前端此前把它们接错了 ——
+     *   1. 模块配置里的摄像头（`GET /api/cameras`，id 形如 `cam_in_01`，
+     *      source 可以是文件路径 / `rtsp://…` / `webcam`）；
+     *   2. WS 的 `start_webcam` 只接受**本机设备号**（服务端 `cv2.VideoCapture(id, CAP_DSHOW)`）。
+     * 修复前 `parseInt('cam_in_01')` = NaN → `|| 0` → 一律去开 **0 号设备**，
+     * 于是永远失败（容器里更是没有任何设备）。
+     *
+     * 返回 `{action, params, desc}`：
+     *   - `webcam` / 纯数字 / 空 → `start_webcam`（设备号）
+     *   - 其它（文件路径、`rtsp://`）→ `start_file`（服务端用 `cv2.VideoCapture(path)`，
+     *     文件与 RTSP URL 都能开，**不需要本机设备**）
+     */
+    pickServerAction(source) {
+        const s = String(source == null ? '' : source).trim();
+        if (!s || s === 'webcam') {
+            return { action: 'start_webcam', params: { camera_id: 0 }, desc: '本机设备 #0' };
+        }
+        if (/^\d+$/.test(s)) {
+            return { action: 'start_webcam', params: { camera_id: parseInt(s, 10) }, desc: `本机设备 #${s}` };
+        }
+        return { action: 'start_file', params: { file_path: s }, desc: s };
+    },
+
+    /** 启动"服务器摄像头"：按配置里的 source 选择动作（App.vue 只调这一个入口）。 */
+    startServerSource(source) {
+        const pick = this.pickServerAction(source);
+        this.reconnectAction = { action: pick.action, params: pick.params };
+        const sent = this.sendAction(pick.action, pick.params);
+        return { ...pick, sent };
     },
 
     startWebcam(cameraId = 0) {

@@ -852,9 +852,11 @@ async def video_stream(websocket: WebSocket):
                     if not cap.isOpened():
                         cap.release()
                         cap = None
+                        # 文案用"视频源"而不是"视频文件"：这个分支同样服务于
+                        # 摄像头配置里的 `rtsp://…` 源（cv2 打开 URL 走的就是它）
                         await websocket.send_json({
                             "type": "status", "status": "error",
-                            "message": f"无法打开视频文件: {file_path}",
+                            "message": f"无法打开视频源: {file_path}",
                         })
                         continue
                     with _lock:
