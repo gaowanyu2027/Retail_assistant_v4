@@ -78,6 +78,10 @@ services:
       # 改成 host.docker.internal 后实测 200。
       # 若将来把 Langfuse 并入本 compose，应改为服务名（如 http://langfuse:3000）。
       LANGFUSE_HOST: "http://host.docker.internal:3000"
+      # ⚠ 同理：Ollama 嵌入服务跑在宿主机上（本机直跑时是 127.0.0.1:11434），
+      # 但容器里的 127.0.0.1 是容器自己——实测 refused。
+      # 不设这一项，语义闸会 fail-open 关闭、向量召回退化为纯关键词（静默降级）。
+      OLLAMA_EMBED_URL: "http://host.docker.internal:11434/api/embeddings"
       QDRANT_URL: http://qdrant:6333
       # 容器内没有摄像头 → 保持鉴权与销量投递目录默认开
       AUTH_ENABLED: "${AUTH_ENABLED:-1}"
