@@ -338,11 +338,58 @@ docker compose logs -f backend     # 观察启动日志（首次会打印 root �
 | `backend` | 本项目（多阶段构建） | **8000** | FastAPI + Agent + 前端静态资源 |
 | `mysql` | mysql:8.0 | 不发布 | 业务数据（`depends_on` + healthcheck 确保就绪后再起后端） |
 | `qdrant` | qdrant/qdrant | 不发布 | 向量检索（Server 模式，支持多进程） |
-| `redis` | redis:7-alpine | 不发布 | **可选**，默认不启动；项目当前未使用 Redis（`--profile full` 才起） |
+| `redis` | redis:7-alpine | 不发布 | **常驻**（本项目的缓存层）。代码当前尚未读写 Redis，见下方「Redis 定位」 |
 
 > 只有 `backend` 对外发布端口。MySQL/Qdrant/Redis 仅在 compose 网络内被 backend 通过
 > 服务名访问，**不暴露到宿主机**——既避免端口冲突，也少一个攻击面。
 > 需要用 GUI 客户端连库时，取消 `docker-compose.yml` 里对应 `ports` 的注释即可（已限 `127.0.0.1`）。
+
+### 统一入口：一条命令管起全部环境
+
+本项目只依赖 compose 编排的四个服务；但**可观测平台 Langfuse 是独立的一套 compose 栈**
+（在 `D:\langfuse\`，有自己的 `.env` 与 postgres 卷）。为此提供一个包装脚本：
+
+```powershell
+.\stack.ps1 up       # 启动全部（本项目 + Langfuse）
+.\stack.ps1 ps       # 查看全部状态
+.\stack.ps1 stop     # 停止全部（保留容器）
+.\stack.ps1 down     # 停止并删除容器（卷保留，数据不丢）
+.\stack.ps1 logs backend
+```
+
+只想操作本项目时，照旧直接用 `docker compose`（行为与以前完全一致）。
+
+> ⚠ **为什么用脚本而不是 compose 的 `include:` 把两个文件合并**
+>
+> 实测 `include:` 会把被包含文件的服务**并入父项目**，后果很严重：
+> 顶层 `name` 变成父目录名（本项目自己的 `name: retail-assistant` 被忽略）、
+> 生成一整套**重复容器**与现有容器抢 8000 端口，且 Langfuse 的 postgres 卷名会从
+> `langfuse_postgres_data` 变成 `<父项目名>_postgres_data`——**等于换库，
+> Langfuse 的历史 trace 会全部"消失"**（其实还在旧卷里，但新容器读不到）。
+>
+> 用 `-f <各自的文件>` 逐个调用时，每个栈都保持自己的项目名与卷名
+> （已验证：Langfuse → `name: langfuse`、卷 `langfuse_postgres_data`），互不干扰。
+
+### Redis 定位（缓存层：先量再缓存）
+
+Redis 已作为**常驻服务**纳入 compose（`--maxmemory 256mb --maxmemory-policy allkeys-lru`，
+容量上限与 LRU 淘汰都已设，避免把宿主机内存吃光），但**代码当前还没有读写它**。
+
+**建议按此顺序接入，并且先用 `benchmark/loadtest.py` 量出 MySQL 实际负载再决定缓存什么**，
+否则会变成"因为零售系统都该有 Redis"的装饰品：
+
+| 优先 | 用途 | 收益 |
+|---|---|---|
+| ① | **地图工具缓存**：现有 `_MAP_CACHE` 是进程内 dict，满 500 条时 `clear()` 一次性全清（缓存雪崩） | Redis 的 per-key TTL 天然修掉，且**直接省百度地图 API 配额** |
+| ② | **热度/销量聚合查询**：前端每 5 秒轮询多个接口，每个都打 MySQL 聚合 | TTL 5~30 秒即可砍掉绝大部分重复查询 |
+| ③ | **embedding 缓存**：`hash(text) -> vector` | 省掉每次语义闸/向量召回的 Ollama 往返 |
+
+**不适合放进 Redis 的（别搬）**：
+
+- **登录会话与限流**：刻意存在独立的 SQLite 鉴权库，保证**业务库故障时管理员仍能登录**；
+  搬进 Redis 会削弱该隔离，且 Redis 重启会丢掉限流状态（暴力破解窗口重开）
+- **实时视频帧 / `_active_camera`**：高频且体积大，进程内比走网络快
+
 
 ### 四个设计说明
 
