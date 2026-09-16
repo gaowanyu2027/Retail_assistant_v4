@@ -5,12 +5,16 @@
 - POST   /api/auth/logout         登出（吊销当前会话）
 - GET    /api/auth/me             当前登录用户 + 权限（前端登录门禁用）
 - POST   /api/auth/password       修改自己的密码（改后其它会话失效）
+- GET    /api/auth/sessions       列出未过期会话（含来源 IP / UA / 最后活跃）自己 or [root] 全部
+- DELETE /api/auth/sessions/{id}  吊销某条会话（登出该设备）自己 or [root] 任一
 - GET    /api/auth/users          用户列表            [root]
 - POST   /api/auth/users          新建用户            [root]
 - PATCH  /api/auth/users/{id}     改角色/密码/启停/昵称 [root]
 - DELETE /api/auth/users/{id}     删除用户            [root]
 - GET    /api/auth/roles          角色与权限矩阵（只读，供前端渲染）
 """
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -19,18 +23,24 @@ from api.security import (
     ROLE_LABELS,
     ROLE_ROOT,
     ROLES,
+    client_ip_from_request,
     create_session,
     create_user,
     cookie_secure,
     delete_user,
     get_current_user,
+    has_perm,
     issue_ticket,
+    list_active_sessions,
     list_users,
     login_with_throttle,
     perms_of,
     require_perm,
     revoke_session,
+    revoke_session_by_public_id,
     revoke_user_sessions,
+    session_public_id,
+    token_from_request,
     update_user,
 )
 from config.settings import AUTH_SESSION_HOURS
@@ -110,7 +120,11 @@ async def login(req: LoginRequest, response: Response, request: Request):
         raise HTTPException(status_code=401, detail="用户名或密码错误，或账号已停用")
 
     user = result["user"]
-    session = create_session(user["id"], user["username"], user["role"])
+    session = create_session(
+        user["id"], user["username"], user["role"],
+        ip=client_ip_from_request(request),
+        user_agent=request.headers.get("user-agent", ""),
+    )
     secure = _set_session_cookie(response, session["token"], request)
     user = dict(user)
     user.pop("permissions", None)
@@ -214,6 +228,49 @@ async def roles():
 @router.get("/auth/users")
 async def get_users(_: dict = Depends(require_perm("user:manage"))):
     return {"users": list_users()}
+
+
+# ==================== 会话（登录态）管理 ====================
+# 为什么加这两个接口：会话表此前**不记录来源**，管理员无法回答
+# "这条登录态是哪台机器/哪个浏览器"，也无法把可疑设备踢下线。
+# 与 B3 的会话归属策略保持一致：普通账号只看/只管自己，root 为审计视角。
+
+@router.get("/auth/sessions")
+async def get_sessions(request: Request, user: dict = Depends(get_current_user)):
+    """列出**未过期**会话（含来源 IP / UA / 最后活跃时间）。
+
+    - 普通账号：只看自己的；
+    - root（`system:manage`）：审计视角，看全部账号。
+
+    ⚠ 返回**不含 session token**，只给不可逆短标识（sha256 前 12 位）：
+    token 等价于密码，任何列表接口都不该把它吐出来；
+    短标识足够在 UI 里定位并调 DELETE 踢下线。
+    """
+    scope_user = None if has_perm(user["role"], "system:manage") else user["username"]
+    rows = await asyncio.to_thread(list_active_sessions, scope_user)
+    own_id = session_public_id(token_from_request(request))
+    for r in rows:
+        r["current"] = bool(own_id) and r["id"] == own_id
+    return {
+        "sessions": rows,
+        "count": len(rows),
+        "scope": scope_user or "all",
+        "idle_hours": AUTH_SESSION_HOURS,
+    }
+
+
+@router.delete("/auth/sessions/{session_id}")
+async def delete_session(session_id: str, user: dict = Depends(get_current_user)):
+    """吊销指定会话（= 把该设备踢下线）。普通账号只能吊销自己的，root 可吊销任意一条。
+
+    吊销自己当前这条也能工作：下个请求就会 401，前端 D3 的兜底会把人送回登录页。
+    """
+    scope_user = None if has_perm(user["role"], "system:manage") else user["username"]
+    ok = await asyncio.to_thread(revoke_session_by_public_id, session_id, scope_user)
+    if not ok:
+        # 不存在与无权返回同一个 404，避免用返回码探测会话是否存在（同 B3）
+        raise HTTPException(status_code=404, detail="会话不存在或不属于当前账号")
+    return {"status": "ok", "id": session_id}
 
 
 @router.post("/auth/users")
