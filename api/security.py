@@ -66,6 +66,8 @@ COOKIE_NAME = "retail_sid"
 MIN_PASSWORD_LEN = AUTH_MIN_PASSWORD_LEN
 MIN_USERNAME_LEN = 3
 MAX_USERNAME_LEN = 32
+# 口令最大长度：见 _validate_password 的说明（防超长口令放大哈希开销）
+MAX_PASSWORD_LEN = 128
 
 # 常见弱口令 / 与本产品相关的易猜口令（小写比较）
 _WEAK_PASSWORDS = {
@@ -208,9 +210,20 @@ def _validate_password(password: str, username: str = "") -> str:
 
     说明：不强制大小写/符号组合——OWASP 更推荐「足够长度 + 黑名单」，
     因为强制组合规则会促使用户产生 `Password1!` 这类可预测口令。
+
+    ⚠ 两个**曾经漏判**的情况（实测都被接受）：
+    1. **纯空白**：`'        '`（9 个空格）长度达标、`strip()` 后为空、
+       既不在弱口令表里也不是纯数字 —— 一路通过。等于允许空口令。
+    2. **超长**：`'a'*200` 也被接受。PBKDF2 没有 bcrypt 那样的 72 字节上限，
+       但超长口令会让每次校验的哈希开销线性增长（可被用作放大攻击），
+       且没有任何实际强度收益。这里按 OWASP 建议给一个宽松上界。
     """
     if not password or len(password) < MIN_PASSWORD_LEN:
         raise ValueError(f"密码至少 {MIN_PASSWORD_LEN} 位")
+    if len(password) > MAX_PASSWORD_LEN:
+        raise ValueError(f"密码最多 {MAX_PASSWORD_LEN} 位")
+    if not password.strip():
+        raise ValueError("密码不能只包含空白字符")
     low = password.strip().lower()
     if low in _WEAK_PASSWORDS:
         raise ValueError("密码过于常见，请更换")

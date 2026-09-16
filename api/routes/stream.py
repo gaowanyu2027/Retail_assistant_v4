@@ -665,6 +665,10 @@ async def video_stream(websocket: WebSocket):
 
     await websocket.accept()
     print("[WS] 客户端已连接")
+    # ⚠ 必须登记进 _active_ws：shutdown 时靠它主动断开所有 WS，
+    # 否则 uvicorn 会一直等浏览器优雅关闭（只能靠 timeout_graceful_shutdown=5 兜底）。
+    # 此前只有 /ws/client 登记、**主视频 WS 恰好漏了**——而它才是最需要被断开的那条。
+    _active_ws.add(websocket)
 
     _latest_result = None
     _latest_frame_b64 = None

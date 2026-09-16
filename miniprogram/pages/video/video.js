@@ -131,8 +131,12 @@ Page({
       });
       this.sock.onOpen(() => {
         this.setData({ wsStatus: '已连接', videoReady: true });
-        // 服务端视频由 /api/ws/stream 客户端路径控制；这里监听帧即可
-        this.sock.send({ data: JSON.stringify({ type: 'start_webcam', camera_id: 0, mode: 'retail' }) });
+        // ⚠ 字段名必须是 action，不是 type：后端只解析 msg["action"]
+        // （api/routes/stream.py 的 `action = msg.get("action", "")`，仅特判 type=="ping"）。
+        // 此前发的是 {type:'start_webcam'}，消息被当成未知指令**静默忽略** ——
+        // 表现为：WS 显示"已连接"、但画布永远空白、帧号恒为 0，无从排查。
+        // 浏览器端 public/js/stream.js 发的就是 {action, mode, ...}，这里对齐即可。
+        this.sock.send({ data: JSON.stringify({ action: 'start_webcam', camera_id: 0, mode: 'retail' }) });
       });
       this.sock.onMessage((res) => {
         if (typeof res.data === 'string') {

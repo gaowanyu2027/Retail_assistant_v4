@@ -219,6 +219,52 @@ else:
 
 
 @app.middleware("http")
+async def security_headers(request, call_next):
+    """补齐安全响应头（B7）。
+
+    此前**一个都没有**（实测响应头探针返回 {}），意味着：
+      - 可被任意站点用 <iframe> 嵌套本系统（点击劫持）
+      - 浏览器可能把上传的 JSON/文本按 HTML 嗅探执行（MIME 混淆）
+      - 跳转时会带 Referer 泄露内网地址
+      - CSP 缺失，一旦有 XSS 就没有第二道防线
+
+    CSP 的取值说明：
+      - `script-src 'self'`：前端产物全部是同源外部脚本（Vite 构建，
+        index.html 无内联脚本、全仓无 eval/new Function），所以**不需要** unsafe-inline/eval
+      - `style-src 'self' 'unsafe-inline'`：index.html 有内联 <style>（v-cloak），
+        Vue 也会注入行内样式
+      - `img-src/media-src` 允许 `data:` 与 `blob:`：favicon 是 data:URL，
+        视频帧/上传预览走 blob:
+      - `connect-src 'self' ws: wss:`：需要 WebSocket（视频流/推送/语音）
+      - `frame-ancestors 'none'`：等价于 X-Frame-Options: DENY（现代浏览器以 CSP 为准）
+
+    HSTS **仅在 HTTPS 下发送**——在纯 HTTP 开发环境里发 HSTS 没有意义，
+    还可能把 localhost 锁进 HTTPS。
+    """
+    response = await call_next(request)
+    h = response.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "no-referrer")
+    # 摄像头/麦克风是本系统的核心能力，必须允许同源使用；其余一律关掉
+    h.setdefault("Permissions-Policy",
+                 "camera=(self), microphone=(self), geolocation=(), payment=()")
+    h.setdefault("Content-Security-Policy",
+                 "default-src 'self'; "
+                 "script-src 'self'; "
+                 "style-src 'self' 'unsafe-inline'; "
+                 "img-src 'self' data: blob:; "
+                 "media-src 'self' blob:; "
+                 "connect-src 'self' ws: wss:; "
+                 "font-src 'self' data:; "
+                 "object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    if proto == "https":
+        h.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
+@app.middleware("http")
 async def no_cache_static_files(request, call_next):
     """开发阶段避免浏览器缓存旧的 CSS/JS 导致页面看不到最新功能。"""
     response = await call_next(request)

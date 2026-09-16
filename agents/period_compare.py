@@ -36,8 +36,13 @@ def _period_key(dt: datetime) -> str:
     return dt.strftime("%Y%m%d%H")
 
 
-def _aggregate(period_key: str) -> dict:
+def _aggregate(period_key: str, until_key: str | None = None) -> dict:
     """聚合某个时段的视频热度与销量（同口径指标）。
+
+    `until_key`：把热度窗口截断到"同一分钟"（见 compare_periods 的说明）。
+    注意**销量无法按分钟截断**——`product_sales.period_key` 是 10 位小时粒度，
+    一小时只有一行，所以销量对比在本小时未结束时仍是"整小时 vs 已过部分"，
+    这一点会在 note 里明确说明，不让它冒充成等长对比。
 
     ⚠ **取数失败（如数据库不可用）必须与"确实没有数据"区分开**：
     原先两个 `try/except` 都把异常吞成空列表，于是 `has_data=False`，
@@ -54,7 +59,8 @@ def _aggregate(period_key: str) -> dict:
 
     errors: list[str] = []
     try:
-        stats = mysql_db.get_retail_stats_by_zone(period_key=period_key)
+        stats = mysql_db.get_retail_stats_by_zone(period_key=period_key,
+                                                 until_key=until_key)
     except Exception as e:
         stats = []
         errors.append(f"retail_stats({type(e).__name__})")
@@ -141,11 +147,20 @@ def compare_periods(reference: datetime | None = None,
         }
     """
     now = reference or datetime.now()
-    current = _aggregate(_period_key(now))
+
+    # ⚠「本小时只过了 N 分钟」必须与历史**相同已过分钟数**对齐（A12 修复）。
+    # 否则会拿"本小时前 5 分钟"比"昨天整个小时"，实测 15:05 时显示 -93.3% 的假暴跌
+    # —— 那个数字不是业务变化，纯粹是窗口长度不等造成的。
+    # period_key 是 YYYYMMDDHHMM（可直接字典序比较），所以用一个上界把窗口截齐即可。
+    minute = now.minute
+    cur_key = _period_key(now)
+    current = _aggregate(cur_key, until_key=f"{cur_key}{minute:02d}")
 
     comparisons = []
     for hours, label in offsets:
-        base = _aggregate(_period_key(now - timedelta(hours=hours)))
+        base_key = _period_key(now - timedelta(hours=hours))
+        # 历史基线同样截断到"同一分钟"，保证两个窗口等长
+        base = _aggregate(base_key, until_key=f"{base_key}{minute:02d}")
         comparisons.append({
             "label": label,
             "period_key": base["period_key"],
@@ -170,6 +185,16 @@ def compare_periods(reference: datetime | None = None,
         note = "当前时段无数据：对比结果仅反映历史时段值"
     else:
         note = ""
+
+    # 本小时未结束时补充窗口说明（A12）：热度已按同分钟数对齐，
+    # 但销量是小时粒度、无法截断，不能让它冒充等长对比。
+    if minute < 55:
+        partial = (f"当前小时仅进行到第 {minute} 分钟：热度已与历史**相同已过分钟数**对齐"
+                   f"（不是拿 {minute} 分钟比整小时）；"
+                   "但销量是小时粒度、无法按分钟截断，销量变化率仍会系统性偏低，"
+                   "建议整点后再看。样本偏小，结论仅供参考。")
+        note = f"{note} {partial}".strip() if note else partial
+
     return {
         "current": current,
         "comparisons": comparisons,
