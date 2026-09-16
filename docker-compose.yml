@@ -132,8 +132,11 @@ services:
     volumes:
       - mysql8_volume:/var/lib/mysql
     healthcheck:
-      # 后端要等 MySQL 真正可用再启动，否则首启会因连不上库而降级到 SQLite
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      # ⚠ 用**真实查询**而不是 `mysqladmin ping`（E7）：
+      # mysqladmin ping 只证明"进程还活着能应答"，**认证失败时它同样返回成功**，
+      # 于是"口令配错了/账号被禁"这种最该被发现的故障会被判成健康。
+      # 换成带凭据的 SELECT 1：认证过不了就直接 unhealthy。
+      test: ["CMD-SHELL", "mysql -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" -e 'SELECT 1' >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 12

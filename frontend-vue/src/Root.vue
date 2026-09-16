@@ -64,9 +64,17 @@ export default {
       await this.enterApp()
     },
     async enterApp() {
-      // 语音能力依赖 voice.js 提供的全局对象，放在挂载仪表盘之前加载
-      await loadScriptOnce('/js/voice.js')
+      // ⚠ 顺序很重要（D1 修复）：voice.js 在**顶层**就 `document.getElementById`
+      // 去绑定语音按钮。若在仪表盘挂载**之前**加载，DOM 里只有 loading 占位，
+      // 取到 null 后 `addEventListener` 抛 TypeError，**整个 IIFE 中断**——
+      // 结果是：语音输入 / 转文字测试 / 语音回复开关三个按钮都没有监听，
+      // 且 window.playVoiceReply / prepareVoiceReply 未定义（App.vue 的 TTS 播报因此永不生效）。
+      // 表现是"语音功能整体失效"，而控制台只有一条容易被忽略的报错。
+      //
+      // 正确顺序：先切到 ready 让 App 挂载（DOM 出现按钮）→ 等 DOM 更新 → 再加载脚本。
       this.phase = 'ready'
+      await this.$nextTick()
+      await loadScriptOnce('/js/voice.js')
     },
   },
 }

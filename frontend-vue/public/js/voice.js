@@ -9,6 +9,17 @@
     const btnVoice = document.getElementById('btn-voice');
     const btnTranscribeTest = document.getElementById('btn-transcribe-test');
     const btnVoiceReply = document.getElementById('btn-voice-reply');
+
+    // ⚠ 防御性守卫（D1）：本脚本在**顶层**就要拿 DOM 并绑定事件。
+    // 若在仪表盘挂载之前执行，这些元素还不存在，后面 `btnVoice.addEventListener`
+    // 会抛 TypeError 并**中断整个 IIFE** —— 语音功能整体失效，且只留一条易忽略的报错。
+    // Root.vue 已改为"先挂载仪表盘、DOM 就绪后再加载本脚本"，
+    // 这里再加一道守卫：即使被提前加载（例如缓存/顺序变更），也只提示而不静默崩溃。
+    if (!btnVoice) {
+        console.warn('[voice] 未找到 #btn-voice：本脚本需在仪表盘挂载后加载（见 Root.vue）。语音功能已跳过。');
+        return;
+    }
+
     const voiceBar = document.getElementById('voice-bar');
     const voiceStatus = document.getElementById('voice-status');
     const voiceHeard = document.getElementById('voice-heard');

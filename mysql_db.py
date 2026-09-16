@@ -1083,7 +1083,8 @@ def get_track_visit_paths(source: str | None = None, limit: int = 2000) -> list[
     return out
 
 
-def get_retail_stats_by_zone(period_key: str | None = None, hours: int = 1) -> list[dict]:
+def get_retail_stats_by_zone(period_key: str | None = None, hours: int = 1,
+                             until_key: str | None = None) -> list[dict]:
     """按区域聚合最近 N 小时视频热度（与销量比对用）。
 
     ⚠ period_key 有两种粒度，本函数**两种都要支持**：
@@ -1095,6 +1096,10 @@ def get_retail_stats_by_zone(period_key: str | None = None, hours: int = 1) -> l
     "今天客流比昨天怎么样"从来拿不到客流数据。实测（同一时刻）：
         销量 sold_count = 5，而客流 visit_count = 0
     长度不足 12 位时按**前缀**匹配整点，配合 MAX(visit_count) 即得到该小时末的累计值。
+
+    `until_key`：可选的**上界**（同样按 period_key 字符串比较，因为它是 YYYYMMDDHHMM
+    这种可直接字典序比较的格式）。用于"本小时只过了 N 分钟"时与历史**相同已过分钟数**
+    对齐——否则会拿"5 分钟的数据"去比"昨天整小时"，得出 -93% 这种假暴跌。
     """
     conn = get_connection()
     try:
@@ -1105,6 +1110,14 @@ def get_retail_stats_by_zone(period_key: str | None = None, hours: int = 1) -> l
                         "SELECT zone_id, MAX(zone_label), MAX(visit_count), MAX(total_dwell_seconds), MAX(heat_score)"
                         " FROM retail_stats WHERE period_key=%s GROUP BY zone_id",
                         (period_key,),
+                    )
+                elif until_key:
+                    # 小时粒度 + 截断上界：只取"到同一分钟为止"的快照
+                    cur.execute(
+                        "SELECT zone_id, MAX(zone_label), MAX(visit_count), MAX(total_dwell_seconds), MAX(heat_score)"
+                        " FROM retail_stats WHERE period_key LIKE %s AND period_key <= %s"
+                        " GROUP BY zone_id",
+                        (period_key + "%", until_key),
                     )
                 else:
                     # 小时（或更短）粒度：前缀匹配该整点的所有分钟快照
