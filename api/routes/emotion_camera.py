@@ -16,13 +16,14 @@
 import asyncio
 import time
 from datetime import datetime, timedelta
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from database import (
     init_db, get_statistic, get_latest_records,
     get_record_count, cleanup_old_records,
 )
 from api.routes.stream import get_emotion_camera_status, stop_emotion_camera
+from api.security import require_perm
 
 router = APIRouter(tags=["emotion_camera"])
 
@@ -30,7 +31,7 @@ router = APIRouter(tags=["emotion_camera"])
 # ==================== 摄像头资源（运行会话） ====================
 
 @router.post("/emotion-cameras")
-async def start_emotion_camera():
+async def start_emotion_camera(_: dict = Depends(require_perm("system:manage"))):
     """启动门店出入口摄像头（标记开始时间，实际视频流通过WebSocket控制）"""
     status = get_emotion_camera_status()
     if status["running"]:
@@ -41,7 +42,7 @@ async def start_emotion_camera():
 
 
 @router.delete("/emotion-cameras")
-async def stop_emotion_camera_api():
+async def stop_emotion_camera_api(_: dict = Depends(require_perm("system:manage"))):
     """停止门店出入口摄像头，返回前后半段表情对比分析"""
     # 内部是两次全表 GROUP BY + 批量写 + 持锁，必须放线程池
     result = await asyncio.to_thread(stop_emotion_camera)
@@ -101,15 +102,19 @@ async def emotion_summary(camera_id: str = "camera_entrance", hours: int = 1):
 
 
 # ==================== 兼容别名（旧动作路径，deprecated） ====================
+#
+# ⚠ 权限门禁必须**在别名上再加一次**：别名是「直接调用」主函数的
+# （`return await start_emotion_camera()`），这种调用**不经过 FastAPI 的依赖注入**，
+# 所以主函数签名上的 Depends 对别名完全无效 —— 只给主函数加会被绕过。
 
 @router.get("/emotion_camera/start", include_in_schema=False)
-async def start_emotion_camera_legacy():
+async def start_emotion_camera_legacy(_: dict = Depends(require_perm("system:manage"))):
     """兼容别名：GET /api/emotion_camera/start（旧路径）"""
     return await start_emotion_camera()
 
 
 @router.get("/emotion_camera/stop", include_in_schema=False)
-async def stop_emotion_camera_api_legacy():
+async def stop_emotion_camera_api_legacy(_: dict = Depends(require_perm("system:manage"))):
     """兼容别名：GET /api/emotion_camera/stop（旧路径）
 
     ⚠ 待办：这是个**改状态的 GET**（会真的停掉管线并写库）。Cookie 为 SameSite=Lax，
