@@ -99,6 +99,15 @@ class FaceEmotionDetector:
                 "conf": round(conf, 3),
             })
 
+        # ⚠ 必须显式 return：本函数此前**漏了这一行**，于是"无脸帧正常返回空列表、
+        # 一检测到人脸反而隐式返回 None"，调用方 `for face in faces` 直接
+        # TypeError: 'NoneType' object is not iterable —— 表情模式线程当场死亡
+        # （叠加处理线程无兜底的年代就是"画面永久卡死"）。实测复现过：
+        #   检测到 1 张人脸时 detect() 返回 = None
+        #   调用方 stream.py:311 执行 for face in faces -> TypeError
+        # 同类错误在本项目出现过两次（另见 cv_engine/video_processor.py 的 faces=None）。
+        return faces
+
     @staticmethod
     def mask_faces(frame, faces: list[dict]) -> "np.ndarray":
         """人脸脱敏：对原始帧中检测到的人脸区域做高斯模糊（合规——展示/推帧不泄露人脸）。

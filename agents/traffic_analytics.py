@@ -18,11 +18,28 @@ def hourly_traffic(hours: int = 24) -> dict:
     conn = mysql_db.get_connection()
     try:
         with conn.cursor() as cur:
+            # ⚠ 聚合口径（曾经写错，务必别改回去）：
+            # retail_stats 里的 visit_count / deep_interest_count / total_dwell_seconds
+            # 都是**累计值**（视频管线每 75 帧写一次当前累计快照，只会涨、会话重启才归零），
+            # 不是"这一分钟的增量"。所以**不能 SUM**——SUM 等于把同一个值按采样密度
+            # 重复相加。实测（shelf_B 18:00~18:15 原始序列 2,2,...,2,4,4,...,4）：
+            #     SUM = 2×9 + 4×8 = 50   而 MAX = 4   真实增量只有 2
+            # 正确做法是两层聚合：**先按 (小时,区域) 取窗口内峰值，再跨区域求和**。
+            # 这样也与 mysql_db.get_retail_stats_by_zone 的 MAX 口径保持一致
+            # （原先两处口径不同：那边 MAX、这边 SUM，同一份数据两个答案）。
+            # 残留不精确：若某个会话跨小时，小时 2 的峰值会包含小时 1 的到访，
+            # 略偏高；要做到精确需要"窗口末值 - 窗口前末值"，成本高、暂不做。
             cur.execute(
-                "SELECT DATE_FORMAT(period_start, '%%Y-%%m-%%d %%H:00') AS hr,"
-                " SUM(visit_count), SUM(deep_interest_count),"
-                " SUM(total_dwell_seconds), MAX(heat_score)"
-                " FROM retail_stats WHERE period_end >= %s GROUP BY hr ORDER BY hr",
+                "SELECT hr, SUM(mx_visit), SUM(mx_deep), SUM(mx_dwell), MAX(heat_score)"
+                " FROM ("
+                "   SELECT DATE_FORMAT(period_start, '%%Y-%%m-%%d %%H:00') AS hr, zone_id,"
+                "          MAX(visit_count) AS mx_visit,"
+                "          MAX(deep_interest_count) AS mx_deep,"
+                "          MAX(total_dwell_seconds) AS mx_dwell,"
+                "          MAX(heat_score) AS heat_score"
+                "   FROM retail_stats WHERE period_end >= %s"
+                "   GROUP BY hr, zone_id"
+                " ) t GROUP BY hr ORDER BY hr",
                 (cutoff,),
             )
             rows = cur.fetchall()
@@ -100,9 +117,11 @@ def zone_depth(hours: int = 1) -> dict:
     conn = mysql_db.get_connection()
     try:
         with conn.cursor() as cur:
+            # 同 hourly_traffic：visit/deep/dwell 是**累计值**，取窗口内峰值而非 SUM
+            # （SUM 会把同一累计值按采样密度重复相加，实测放大约 12 倍）。
             cur.execute(
-                "SELECT zone_id, MAX(zone_label), SUM(visit_count),"
-                " SUM(deep_interest_count), SUM(total_dwell_seconds)"
+                "SELECT zone_id, MAX(zone_label), MAX(visit_count),"
+                " MAX(deep_interest_count), MAX(total_dwell_seconds)"
                 " FROM retail_stats WHERE period_end >= %s GROUP BY zone_id",
                 (cutoff,),
             )

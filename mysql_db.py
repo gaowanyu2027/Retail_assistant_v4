@@ -1084,16 +1084,35 @@ def get_track_visit_paths(source: str | None = None, limit: int = 2000) -> list[
 
 
 def get_retail_stats_by_zone(period_key: str | None = None, hours: int = 1) -> list[dict]:
-    """按区域聚合最近 N 小时视频热度（与销量比对用）。"""
+    """按区域聚合最近 N 小时视频热度（与销量比对用）。
+
+    ⚠ period_key 有两种粒度，本函数**两种都要支持**：
+      - 视频管线写的是 **12 位分钟**（`YYYYMMDDHHMM`，每 75 帧一条累计快照，
+        为的是每分钟能 UPSERT 一行）
+      - 销量侧与同期对比用的是 **10 位小时**（`YYYYMMDDHH`）
+
+    原先这里是精确匹配 `WHERE period_key=%s`，于是拿小时 key 查热度**永远 0 行**：
+    "今天客流比昨天怎么样"从来拿不到客流数据。实测（同一时刻）：
+        销量 sold_count = 5，而客流 visit_count = 0
+    长度不足 12 位时按**前缀**匹配整点，配合 MAX(visit_count) 即得到该小时末的累计值。
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             if period_key:
-                cur.execute(
-                    "SELECT zone_id, MAX(zone_label), MAX(visit_count), MAX(total_dwell_seconds), MAX(heat_score)"
-                    " FROM retail_stats WHERE period_key=%s GROUP BY zone_id",
-                    (period_key,),
-                )
+                if len(period_key) >= 12:
+                    cur.execute(
+                        "SELECT zone_id, MAX(zone_label), MAX(visit_count), MAX(total_dwell_seconds), MAX(heat_score)"
+                        " FROM retail_stats WHERE period_key=%s GROUP BY zone_id",
+                        (period_key,),
+                    )
+                else:
+                    # 小时（或更短）粒度：前缀匹配该整点的所有分钟快照
+                    cur.execute(
+                        "SELECT zone_id, MAX(zone_label), MAX(visit_count), MAX(total_dwell_seconds), MAX(heat_score)"
+                        " FROM retail_stats WHERE period_key LIKE %s GROUP BY zone_id",
+                        (period_key + "%",),
+                    )
             else:
                 cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
                 cur.execute(

@@ -25,7 +25,14 @@ FLAT_THRESHOLD_PCT = 5.0
 
 
 def _period_key(dt: datetime) -> str:
-    """period_key 口径：与视频管线写入保持一致（YYYYMMDDHH）。"""
+    """period_key 口径：**小时粒度**（YYYYMMDDHH），与销量侧保持一致。
+
+    ⚠ 注意视频管线写入 `retail_stats` 时用的是 **12 位分钟**（YYYYMMDDHHMM），
+    与本函数的 10 位小时 key **不同粒度**。这里不改写路径（它需要每分钟一行做
+    UPSERT），而是由 `mysql_db.get_retail_stats_by_zone` 对短 key 做前缀匹配来兼容。
+    历史上这里注释自称"与视频管线写入保持一致"，是错的——正因如此
+    "客流同期对比"长期恒为 0（实测同刻销量 5 件、客流 0）。
+    """
     return dt.strftime("%Y%m%d%H")
 
 
