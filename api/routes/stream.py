@@ -72,6 +72,45 @@ _latest_frame_b64: str | None = None
 # 当前处理线程的引用：供 get_stream_status() 做「线程是否真在跑」的校验，
 # 避免出现"线程已死但状态仍报 running"的假象（见 _guard_processing_thread）
 _bg_thread_ref: "threading.Thread | None" = None
+# 「本机摄像头模式」的会话归属者（websocket 对象）。
+#
+# 为什么需要这个：本项目的视频处理会话是**进程级单份**的（_active / _run_token /
+# _latest_result / _latest_frame_b64 / _client_frames 都是模块级），这对
+# 「服务端摄像头」是合理设计——一个源、多人观看。但「本机摄像头」模式是把**每个
+# 浏览器自己的摄像头帧**推进同一个 _client_frames 队列，就必然互相踩：
+#
+#   实测（两个真实 WS 客户端，A 停止推帧、只有 B 推蓝帧）：
+#       A 收到 92 帧: {'RED': 1, 'BLUE': 91}   <- A 在看 B 的摄像头
+#       B 收到 181 帧: {'RED': 90, 'BLUE': 91} <- B 连 A 阶段1 的积压帧都收到了
+#   B 一点"本机摄像头"就会杀掉 A 的处理线程、清空 A 的帧队列，
+#   然后 A 继续显示 B 的画面而毫无提示。
+#
+# 单进程 + 全局会话的架构下无法真正按连接隔离，因此这里**显式拒绝第二个会话**，
+# 给出明确提示，而不是静默串台。
+# （彻底解法见 改进记录.md：把会话状态收进 per-connection 会话对象。）
+#
+# 归属用**用户名**而不是 websocket 对象：浏览器推帧走的是**另一条连接**
+# `/api/ws/client`（见 frontend-vue/public/js/stream.js:297），
+# 与启动会话的 `/api/ws/stream` 不是同一个 websocket 实例，
+# 只有"同一个登录用户"这个共同点能把两者关联起来。
+_client_camera_owner: "str | None" = None
+# 启动仲裁用：记录**启动会话的那条 /ws/stream 连接本身**。
+# 仅靠用户名不够——同一个用户开两个标签页时用户名相同，第二个标签页会在
+# 用户名比较中"看起来是归属者"从而抢占第一个标签页的会话。
+_client_camera_owner_ws = None
+
+
+def _ws_username(websocket) -> "str | None":
+    """取当前 WS 连接的登录用户名。
+
+    鉴权中间件已把用户解析进 `scope["state"]["user"]`（见 api/security.py），
+    这里直接读即可——**不要**改用 user_from_scope()，它会消费一次性票据。
+    """
+    try:
+        user = (websocket.scope.get("state") or {}).get("user") or {}
+        return user.get("username")
+    except Exception:
+        return None
 
 # 客户端帧队列
 _client_frames: deque = deque(maxlen=CLIENT_FRAME_QUEUE_MAXLEN)
@@ -595,10 +634,19 @@ async def client_camera_stream(websocket: WebSocket):
     _active_ws.add(websocket)
     await websocket.send_json({"event": "ready"})
 
+    username = _ws_username(websocket)
     try:
         while True:
             frame_bytes = await websocket.receive_bytes()
             if not frame_bytes:
+                continue
+            # 只接受「本机摄像头」会话归属者的帧。
+            # 否则其他用户的帧会混进同一个 _client_frames 队列，被归属者的
+            # 处理线程消费、显示成归属者自己的画面（实测：A 停止推帧后仍收到
+            # 105/108 帧来自 B 的摄像头）。
+            with _lock:
+                owner = _client_camera_owner
+            if owner is not None and owner != username:
                 continue
             inject_client_frame_bytes(frame_bytes)
     except WebSocketDisconnect:
@@ -610,7 +658,10 @@ async def client_camera_stream(websocket: WebSocket):
 
 @router.websocket("/ws/stream")
 async def video_stream(websocket: WebSocket):
-    global _latest_result, _latest_frame_b64
+    # 统一在函数顶部声明（同一函数内重复 global 声明会触发
+    # "name is used prior to global declaration" 语法错误；
+    # 而漏声明则会被当成局部变量，赋值后再读取会 UnboundLocalError）
+    global _latest_result, _latest_frame_b64, _client_camera_owner, _client_camera_owner_ws
 
     await websocket.accept()
     print("[WS] 客户端已连接")
@@ -735,7 +786,11 @@ async def video_stream(websocket: WebSocket):
                     continue
 
                 if action == "client_frame":
-                    inject_client_frame(msg.get("frame", ""))
+                    # 同 /ws/client：只接受归属者的帧（见 _client_camera_owner 注释）
+                    with _lock:
+                        owner = _client_camera_owner
+                    if owner is None or owner == _ws_username(websocket):
+                        inject_client_frame(msg.get("frame", ""))
                     continue
 
                 if action == "start_webcam":
@@ -815,6 +870,19 @@ async def video_stream(websocket: WebSocket):
                     print(f"[WS] 视频文件: {file_path} (模式: {mode})")
 
                 elif action == "start_client_camera":
+                    # 本机摄像头模式必须按连接独占（原因见 _client_camera_owner 注释）。
+                    # 单进程 + 全局会话的架构下无法真正隔离，故显式拒绝第二个会话，
+                    # 给出明确提示，而不是静默串台。
+                    uname = _ws_username(websocket)
+                    with _lock:
+                        owner_ws = _client_camera_owner_ws
+                    if owner_ws is not None and owner_ws is not websocket:
+                        await websocket.send_json({
+                            "type": "status", "status": "error",
+                            "message": "已有其他用户正在使用「本机摄像头」模式，请稍后重试；"
+                                       "多人同时观看请使用「服务器摄像头」。",
+                        })
+                        continue
                     if cap:
                         cap.release()
                         cap = None
@@ -822,10 +890,14 @@ async def video_stream(websocket: WebSocket):
                         _client_frames.clear()
                     with _lock:
                         _active["source"] = "client"
+                        _client_camera_owner = uname
+                        _client_camera_owner_ws = websocket
                     try:
                         start_processing(None, mode, local_processor, local_event_detector)
                     except Exception as e:
                         print(f"[WS] 浏览器摄像头处理启动失败: {e}")
+                        with _lock:
+                            _client_camera_owner = None
                         _stop_internal()
                         await websocket.send_json({
                             "type": "status", "status": "error",
@@ -843,6 +915,11 @@ async def video_stream(websocket: WebSocket):
                         _active["paused"] = False
 
                 elif action == "stop":
+                    # 主动停止：释放「本机摄像头」归属（见 _client_camera_owner 注释）
+                    with _lock:
+                        if _client_camera_owner_ws is websocket:
+                            _client_camera_owner = None
+                            _client_camera_owner_ws = None
                     # 如果是表情模式，先停止表情摄像头并生成分段分析
                     segment_analysis = None
                     with _emo_lock:
@@ -959,6 +1036,11 @@ async def video_stream(websocket: WebSocket):
         traceback.print_exc()
     finally:
         _active_ws.discard(websocket)
+        # 断连即释放「本机摄像头」归属，否则该模式下会一直拒绝其他用户
+        with _lock:
+            if _client_camera_owner_ws is websocket:
+                _client_camera_owner = None
+                _client_camera_owner_ws = None
         _stop_internal()
         with _emo_lock:
             _emo_state["running"] = False
