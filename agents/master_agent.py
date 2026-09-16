@@ -25,6 +25,30 @@ from agents.map_tools import (
 
 # Langfuse @observe 装饰器（未配置环境变量时为 no-op，不影响主流程）
 _observe = observe_langfuse()
+
+
+def _quality_gate(source: str) -> str:
+    """数据可信度门禁：返回空串=数据可信；否则返回该说给用户的话。
+
+    为什么问答链路必须有它：`report_agent`（主动汇报链路）早就有这道门禁，
+    会明确输出"【数据不可信】…本次不出运营结论"；而**问答链路此前完全没有**，
+    于是同一个 0 在两条链路上有两种解释——实测（无任何视频帧时）：
+
+        [quick_answer/popularity] 当前最热的是1号货架，全店累计到访 0 人次，疑似店员 0 人…
+        [quick_answer/anomaly]    当前共有 0 起可疑行为告警…目前未发现异常。
+        [report_agent 模板]       【数据不可信】…本次不出运营结论，请检查摄像头/视频源后重试。
+
+    ⚠ 必须**按源判定**（传入 `SOURCE_RETAIL` / `SOURCE_EMOTION`），不能用聚合口径：
+    否则浏览器推帧（SOURCE_CLIENT）会把停摆的服务器摄像头掩盖成"数据可信"
+    （见 agents/data_quality.py 的说明）。
+
+    门禁本身不能成为故障点：任何异常都当作"数据可信"放行，保持原有行为。
+    """
+    try:
+        from agents.data_quality import warning_text
+        return warning_text(source)
+    except Exception:
+        return ""
 from config.settings import (
     AGENT_MEMORY_HISTORY_KEEP,
     AGENT_MEMORY_HISTORY_MAX,
@@ -752,26 +776,44 @@ class MasterAgent:
                 f"{z.get('zone_label', z.get('zone_id', ''))}(热度{float(z.get('heat_score', 0)):.0f})"
                 for z in ranking
             ) or "暂无数据"
-            answer = (
-                f"当前最热的是{top_label}，全店累计到访 {total_visits} 人次，疑似店员 {total_staff} 人。"
-                f"热度排行：{parts}。"
-            )
+            # 门禁：热度依赖服务器摄像头（SOURCE_RETAIL）。未启动/断流时统计值同样是 0，
+            # 直接输出就变成"全店累计到访 0 人次"这种**假业务结论**。
+            gate = _quality_gate("retail")
+            if gate:
+                answer = (
+                    f"{gate} 本次不出热度结论。"
+                    "（设备正常时可能是真无客流，但当前无法区分，请先确认视频源。）"
+                )
+                suggestions = ["请先确认摄像头/视频源是否正常运行，再查看热度排行。"]
+            else:
+                answer = (
+                    f"当前最热的是{top_label}，全店累计到访 {total_visits} 人次，疑似店员 {total_staff} 人。"
+                    f"热度排行：{parts}。"
+                )
+                suggestions = self._make_suggestions(stats, None)
             data["popularity"] = stats
-            suggestions = self._make_suggestions(stats, None)
 
         elif intent == "anomaly":
             summary = self.anom_skill.get_alert_summary()
             total = summary.get("total_alerts", 0)
             high = summary.get("high_risk_count", 0)
             watch = summary.get("watch_count", 0)
-            answer = f"当前共有 {total} 起可疑行为告警，其中高风险 {high} 起、需关注 {watch} 起。"
-            if high > 0:
-                answer += " 高风险告警建议立即人工复核。"
-            elif total == 0:
-                answer += " 目前未发现异常。"
+            # 门禁：告警同样来自服务器摄像头。断流时"0 起告警"会被误读成"未发现异常"
+            # ——这是最危险的一类误读（安保场景下等于谎报平安）。
+            gate = _quality_gate("retail")
+            if gate:
+                answer = (f"{gate} 本次不出告警结论——"
+                          "「0 起告警」不等于「未发现异常」，请先确认视频源。")
+                suggestions = ["请先确认摄像头/视频源是否正常运行，再查看告警。"]
+            else:
+                answer = f"当前共有 {total} 起可疑行为告警，其中高风险 {high} 起、需关注 {watch} 起。"
+                if high > 0:
+                    answer += " 高风险告警建议立即人工复核。"
+                elif total == 0:
+                    answer += " 目前未发现异常。"
+                suggestions = self._make_suggestions(None, summary)
             data["anomaly"] = summary
             alerts = summary.get("high_risk", [])[:5]
-            suggestions = self._make_suggestions(None, summary)
 
         elif intent == "emotion":
             if self.emo_skill is None:
@@ -781,7 +823,12 @@ class MasterAgent:
             total = stats.get("total_faces", 0)
             pos = stats.get("positive_count", 0)
             neg = stats.get("negative_count", 0)
-            if total > 0:
+            # 门禁：表情数据来自**表情模式**那一路（SOURCE_EMOTION），
+            # 与零售热度是不同的源，所以要分开判定。
+            gate = _quality_gate("emotion")
+            if gate and total == 0:
+                answer = f"{gate} 本次不出情绪结论。"
+            elif total > 0:
                 pos_rate = round(pos / total * 100, 1)
                 answer = (
                     f"共识别 {total} 人次表情，正面情绪 {pos} 次（占比 {pos_rate}%）、"
@@ -870,7 +917,15 @@ class MasterAgent:
         return suggestions
 
     def _fallback_answer(self, pop_data: dict, anom_data: dict) -> str:
-        """LLM 不通时的降级回答"""
+        """LLM 不通时的降级回答。
+
+        ⚠ 同样要过数据可信度门禁：这是"LLM 挂了"时的最后一道输出，
+        实测它在无任何视频帧时会答「当前累计 0 人次对货架商品感兴趣。暂无异常告警。」
+        ——把设备故障说成了业务事实，比 LLM 路径更该拦住。
+        """
+        gate = _quality_gate("retail")
+        if gate:
+            return f"{gate} 当前无法给出经营结论，请先确认摄像头/视频源。"
         parts = []
         total = pop_data.get("total_visitors", 0)
         parts.append(f"当前累计 {total} 人次对货架商品感兴趣。")

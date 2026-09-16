@@ -53,8 +53,21 @@ def reset() -> None:
 def snapshot() -> dict:
     """返回数据可信度快照。
 
-    reliable=False 表示「当前没有可信的实时数据」：此时业务统计里的 0
+    `reliable=False` 表示「当前没有可信的实时数据」：此时业务统计里的 0
     应被理解为「无数据」，而不是「无客流/无告警」。
+
+    ⚠ **两套口径，别用错**：
+
+    | 字段 | 口径 | 适用 |
+    |---|---|---|
+    | `reliable`（顶层） | **任一路新鲜即为 True** | 只看"系统整体是否在收数据"，如监控/健康检查 |
+    | `reliable_by_source[src]` | **该源自身**是否新鲜 | **业务结论必须用这个** |
+
+    为什么要分：顶层口径会把"某一路停摆"掩盖掉。实测各源为
+    `{'retail': 未新鲜, 'client': 新鲜}` 时顶层返回 `reliable=True`
+    ——于是"浏览器在推帧"就把停摆的服务器摄像头粉饰成"数据可信"，
+    系统照样输出"到访 0 人次""未发现异常"。
+    业务侧请用 `is_reliable(SOURCE_RETAIL)` / `warning_text(SOURCE_RETAIL)`。
     """
     now = time.monotonic()
     with _lock:
@@ -64,26 +77,34 @@ def snapshot() -> dict:
     sources = {}
     for src, ts in last.items():
         age = max(0.0, now - ts)
+        fresh = age <= DATA_STALE_SECONDS
         sources[src] = {
             "label": _SOURCE_LABEL.get(src, src),
             "age_seconds": round(age, 1),
-            "stale": age > DATA_STALE_SECONDS,
+            "stale": not fresh,
+            "reliable": fresh,          # 该源自身是否可信
             "frames": counts.get(src, 0),
         }
+
+    reliable_by_source = {src: s["reliable"] for src, s in sources.items()}
+    unreliable_sources = [src for src, ok in reliable_by_source.items() if not ok]
 
     # 从未收到任何帧 → 视频源未启动
     if not sources:
         return {
             "reliable": False,
+            "reliable_by_source": {},
+            "unreliable_sources": [],
             "stale_seconds": DATA_STALE_SECONDS,
             "reason": "视频源未启动，当前没有任何视频帧，统计值 0 不代表真实客流",
             "sources": {},
         }
 
-    # 任一路新鲜 → 数据可信（多路场景下不因某一路空闲而整体判死）
-    if any(not s["stale"] for s in sources.values()):
+    if any(reliable_by_source.values()):
         return {
-            "reliable": True,
+            "reliable": True,           # 聚合口径（见 docstring，业务侧别直接用）
+            "reliable_by_source": reliable_by_source,
+            "unreliable_sources": unreliable_sources,
             "stale_seconds": DATA_STALE_SECONDS,
             "reason": "",
             "sources": sources,
@@ -92,6 +113,8 @@ def snapshot() -> dict:
     oldest_active = min(s["age_seconds"] for s in sources.values())
     return {
         "reliable": False,
+        "reliable_by_source": reliable_by_source,
+        "unreliable_sources": unreliable_sources,
         "stale_seconds": DATA_STALE_SECONDS,
         "reason": (
             f"视频源已断流约 {int(oldest_active)} 秒"
@@ -101,14 +124,40 @@ def snapshot() -> dict:
     }
 
 
-def is_reliable() -> bool:
-    """当前是否存在可信的实时数据。"""
-    return snapshot()["reliable"]
+def is_reliable(source: str | None = None) -> bool:
+    """数据是否可信。
 
-
-def warning_text() -> str:
-    """给报表/问答用的一句话告警；数据可信时返回空串。"""
+    - 指定 `source`：按**该源**判定 —— 业务侧应当这样用（见 `snapshot` 的说明）
+    - 不指定：按"任一路新鲜"的聚合口径（向后兼容，仅适合整体健康判断）
+    """
     snap = snapshot()
-    if snap["reliable"]:
+    if source is None:
+        return bool(snap["reliable"])
+    return bool(snap.get("reliable_by_source", {}).get(source, False))
+
+
+def warning_text(source: str | None = None) -> str:
+    """给报表/问答用的一句话告警；数据可信时返回空串。
+
+    指定 `source` 时按该源判定，并在"其它源仍在推送"时**点明是哪一路缺数据**
+    ——否则读者会以为整体正常。
+    """
+    snap = snapshot()
+
+    if source is None:
+        if snap["reliable"]:
+            return ""
+        return f"【数据不可信】{snap['reason']}。"
+
+    if snap.get("reliable_by_source", {}).get(source, False):
         return ""
+
+    label = _SOURCE_LABEL.get(source, source)
+    if snap.get("reliable"):
+        # 其它源有数据，但业务结论所依赖的这一路没有 —— 必须点名
+        others = [s for s in snap.get("reliable_by_source", {}) if s != source]
+        others_txt = "、".join(_SOURCE_LABEL.get(o, o) for o in others) or "其它来源"
+        return (f"【数据不可信】{label}当前没有视频帧"
+                f"（注意：{others_txt}仍在推送，但本次结论依赖的是{label}）。"
+                f"统计值 0 不代表真实客流/无异常。")
     return f"【数据不可信】{snap['reason']}。"
