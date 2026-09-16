@@ -19,7 +19,21 @@ from config.settings import (
 COLLECTION_NAME = "query_history_vectors"
 SESSION_SUMMARY_COLLECTION = "session_summary_vectors"
 EMBED_MODEL = "qllama/bge-small-zh-v1.5"
-OLLAMA_EMBED_URL = "http://127.0.0.1:11434/api/embeddings"
+# Ollama 嵌入服务地址（语义闸 + 向量召回共用 _embed()，所以这一处决定两者的可用性）。
+#
+# ⚠ 曾经**硬编码**为 http://127.0.0.1:11434，容器化后直接失效：
+#   容器里的 127.0.0.1 是**容器自己**，不是宿主机。实测在容器内
+#     127.0.0.1:11434      → Connection refused
+#     host.docker.internal:11434 → 200 OK
+#   后果是"语义闸 fail-open 关闭 + 向量召回退化为纯关键词"——
+#   两者都只在日志里留一行提示，不报错，属于静默降级。
+#
+# 故改为环境变量可覆盖（与 QDRANT_URL 一致的处理方式）：
+#   - 本机直跑：不设即可，默认值保持不变（向后兼容）
+#   - 容器内跑：由 docker-compose 注入 host.docker.internal 地址
+OLLAMA_EMBED_URL = os.environ.get(
+    "OLLAMA_EMBED_URL", "http://127.0.0.1:11434/api/embeddings"
+)
 VECTOR_SIZE = 512
 # Qdrant 接入模式：配置 QDRANT_URL 时使用 Server 模式（Docker 部署），
 # 否则回退本地嵌入式模式（项目原单进程方案，存 qdrant_data/）
