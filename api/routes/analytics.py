@@ -10,10 +10,19 @@
 """
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from api.security import require_perm
+
 router = APIRouter()
+
+# ⚠ 权限门禁（B2 修复）：本文件的**写接口**（销量录入/导入/扫描/演示数据生成）
+# 统一要求 data:write。
+# 动机：这些接口能直接**写入/伪造业务数据**，而之前 PERMISSIONS 里声明的
+# data:write 从未被任何端点校验（全项目只用过 user:manage），
+# 于是任何登录账号都能篡改用于经营决策的销量数据。
+# 读取类接口（hourly-traffic / zone-depth / period-compare 等）不加门禁。
 
 
 class SalesRecordRequest(BaseModel):
@@ -63,7 +72,8 @@ class SalesImportRequest(BaseModel):
 
 
 @router.post("/analytics/sales/import")
-async def import_sales(req: SalesImportRequest):
+async def import_sales(req: SalesImportRequest,
+                _: dict = Depends(require_perm("data:write"))):
     """导入**真实**销量（POS / 人工录入）。
 
     与 /analytics/sales-simulate 的区别：本接口写入整点时段标识（YYYYMMDDHH），
@@ -96,7 +106,7 @@ async def import_sales(req: SalesImportRequest):
 
 
 @router.post("/analytics/sales/scan-inbox")
-async def scan_sales_inbox():
+async def scan_sales_inbox(_: dict = Depends(require_perm("data:write"))):
     """立即扫描销量投递目录（POST POS/ERP 导出的 CSV 到该目录后调用）。
 
     与后台定时扫描是同一逻辑：解析 → 导入（来源标记 pos）→ 归档；
@@ -112,7 +122,8 @@ async def scan_sales_inbox():
 
 
 @router.post("/analytics/sales-records")
-async def upsert_sales_record(req: SalesRecordRequest):
+async def upsert_sales_record(req: SalesRecordRequest,
+                _: dict = Depends(require_perm("data:write"))):
     """录入/更新一条区域销量。"""
     try:
         import mysql_db
@@ -128,7 +139,8 @@ async def upsert_sales_record(req: SalesRecordRequest):
 
 
 @router.post("/analytics/sales-records/batch")
-async def upsert_sales_batch(req: SalesBatchRequest):
+async def upsert_sales_batch(req: SalesBatchRequest,
+                _: dict = Depends(require_perm("data:write"))):
     """批量录入多个区域销量（同一时段）。"""
     try:
         import mysql_db
@@ -146,7 +158,7 @@ async def upsert_sales_batch(req: SalesBatchRequest):
 
 
 @router.post("/analytics/sales-simulate")
-async def simulate_sales():
+async def simulate_sales(_: dict = Depends(require_perm("data:write"))):
     """生成演示销量数据（体现 高热度低销量 / 低热度高销量 / 健康 三象限）。"""
     try:
         from agents.sales_analytics import simulate_demo_sales
@@ -172,7 +184,8 @@ async def movement_paths(source: str | None = None, limit: int = 2000, top: int 
 
 
 @router.post("/analytics/paths-simulate")
-async def simulate_paths(count: int = 200):
+async def simulate_paths(count: int = 200,
+                _: dict = Depends(require_perm("data:write"))):
     """生成测试用模拟动线数据（source=simulated，与真实采集区分）。
 
     用于测试动线分析链路；真实数据由视频管线自动落库（source=video）。
@@ -222,7 +235,7 @@ async def zone_depth(hours: int = 1):
 
 
 @router.post("/analytics/traffic-simulate")
-async def simulate_traffic():
+async def simulate_traffic(_: dict = Depends(require_perm("data:write"))):
     """生成测试用时段客流+深度模拟数据（24 小时曲线，高峰/低谷 + 三维深度场景）。"""
     try:
         from agents.traffic_analytics import seed_traffic_demo

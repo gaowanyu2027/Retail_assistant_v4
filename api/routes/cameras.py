@@ -17,13 +17,20 @@
 """
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from agents.module_registry import get_registry
 from agents.analytics_module import candidates_for_type
+from api.security import require_perm
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
+
+# ⚠ 权限门禁（B2 修复）：本文件里所有**改状态**的端点都要求 system:manage。
+# 此前全项目只用到了 user:manage，PERMISSIONS 里声明的 data:write / system:manage
+# **从未被任何端点校验** —— 于是 platform 角色（只应有 data:read/data:write）
+# 可注册任意视频源摄像头、绑定输出、增删模块，属越权。
+# 读接口（list / scan / modules / stats）不加门禁，保持 data:read。
 
 
 class CameraCreate(BaseModel):
@@ -69,7 +76,8 @@ async def list_modules():
 
 
 @router.post("")
-async def add_camera(req: CameraCreate):
+async def add_camera(req: CameraCreate,
+                          _: dict = Depends(require_perm("system:manage"))):
     """添加一个摄像头（写入运行时注册表，需在候选池内校验）。"""
     reg = _reg()
     from agents.analytics_module import candidates_for_type as _c, list_registered_modules
@@ -96,7 +104,8 @@ async def add_camera(req: CameraCreate):
 
 
 @router.delete("/{cam_id}")
-async def delete_camera(cam_id: str):
+async def delete_camera(cam_id: str,
+                          _: dict = Depends(require_perm("system:manage"))):
     reg = _reg()
     if reg.get_camera(cam_id) is None:
         raise HTTPException(status_code=404, detail=f"摄像头 {cam_id} 不存在")
@@ -105,7 +114,8 @@ async def delete_camera(cam_id: str):
 
 
 @router.post("/{cam_id}/modules")
-async def add_module(cam_id: str, req: ModuleAdd):
+async def add_module(cam_id: str, req: ModuleAdd,
+                          _: dict = Depends(require_perm("system:manage"))):
     """运行时给某摄像头加载一个模块（校验标签候选池），并持久化到 cameras.yaml。"""
     res = _reg().add_module(cam_id, req.module)
     if not res.get("ok"):
@@ -115,7 +125,8 @@ async def add_module(cam_id: str, req: ModuleAdd):
 
 
 @router.delete("/{cam_id}/modules/{mod}")
-async def remove_module(cam_id: str, mod: str):
+async def remove_module(cam_id: str, mod: str,
+                          _: dict = Depends(require_perm("system:manage"))):
     res = _reg().remove_module(cam_id, mod)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "卸载失败"))
@@ -124,7 +135,8 @@ async def remove_module(cam_id: str, mod: str):
 
 
 @router.put("/{cam_id}/modules/{mod}/enabled")
-async def set_module_enabled(cam_id: str, mod: str, req: ModuleEnabled):
+async def set_module_enabled(cam_id: str, mod: str, req: ModuleEnabled,
+                          _: dict = Depends(require_perm("system:manage"))):
     res = _reg().set_module_enabled(cam_id, mod, req.enabled)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "设置失败"))
@@ -144,7 +156,8 @@ class ActiveBody(BaseModel):
 
 
 @router.post("/active")
-async def set_active(req: ActiveBody):
+async def set_active(req: ActiveBody,
+                          _: dict = Depends(require_perm("system:manage"))):
     """把当前视频输出绑定到某逻辑摄像头（多路视频/切换时用）。"""
     if _reg().get_camera(req.cam_id) is None:
         raise HTTPException(status_code=404, detail=f"摄像头 {req.cam_id} 不存在")

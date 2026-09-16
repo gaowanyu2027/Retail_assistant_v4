@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File as FastAPIFile, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File as FastAPIFile, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -26,6 +26,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import API_HOST, API_PORT, AUTH_CORS_ORIGINS, ensure_dirs
+
+# 权限依赖工厂：`Depends(require_perm(...))` 在**函数定义时**求值，
+# 所以必须模块级导入（不能像 get_optional_user 那样在函数内局部导入）。
+from api.security import require_perm
 
 
 # ==================== 缓存清理线程 ====================
@@ -587,7 +591,8 @@ async def get_zones():
 
 
 @app.put("/api/zones")
-async def update_zone(zone: dict):
+async def update_zone(zone: dict,
+                      _zone_admin: dict = Depends(require_perm("system:manage"))):
     zone_id = zone.get("zone_id")
     polygon = zone.get("polygon")
     if not zone_id or not isinstance(zone_id, str):
@@ -630,7 +635,8 @@ async def update_zone(zone: dict):
 
 
 @app.delete("/api/zones/{zone_id}")
-async def delete_zone(zone_id: str):
+async def delete_zone(zone_id: str,
+                      _zone_admin: dict = Depends(require_perm("system:manage"))):
     from api.dependencies import get_roi_manager
     roi_mgr = get_roi_manager()
     if roi_mgr.remove_zone(zone_id):
