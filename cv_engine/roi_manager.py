@@ -146,26 +146,57 @@ class ROIManager:
         return self.zone_type.get(zone_id) == "exit"
 
     # ==================== ROI增删改 ====================
+    #
+    # ⚠ 并发安全约定（重要）：处理线程**每帧**都会遍历 self.zones
+    # （get_zone() 判区域、draw_zones() 画框），而这些增删改是 **API 线程**调用的
+    # （PUT /api/zones）。若原地修改，遍历中的迭代器会抛
+    #   RuntimeError: dictionary changed size during iteration
+    #
+    # 实测复现（一边调 get_zone、一边新增区域）：
+    #   增+删成对 → 0 次（字典大小很快复原，探测不到，所以很容易被误判为"没问题"）
+    #   **只增不删 → 200/200 次全部抛错**（真实用户就是"保存一个区域后留着"）
+    #
+    # 而处理线程原本没有异常兜底（已在 api/routes/stream.py 的 _guard_processing_thread
+    # 中修复），所以这条链路的后果是：**用户在 ROI 页面新增一个区域 → 视频永久卡死，
+    # 而状态仍显示"运行中"**。
+    #
+    # 因此这里统一改为 **copy-on-write**：复制出新字典、改完再原子替换引用。
+    # 遍历方要么拿到旧快照、要么拿到新快照，永远不会看到"正在被修改"的字典。
+    # （Python 的引用赋值是原子的，无需加锁。）
 
     def add_zone(self, zone_id: str, zone_type: str, label: str, polygon: list[list[float]]):
         """动态添加ROI区域（API用）"""
-        self.zones[zone_id] = np.array(polygon, dtype=np.float32)
-        self.zone_type[zone_id] = zone_type
-        self.zone_label[zone_id] = label
+        new_zones = dict(self.zones)
+        new_zones[zone_id] = np.array(polygon, dtype=np.float32)
+        new_type = dict(self.zone_type)
+        new_type[zone_id] = zone_type
+        new_label = dict(self.zone_label)
+        new_label[zone_id] = label
+        self.zones = new_zones
+        self.zone_type = new_type
+        self.zone_label = new_label
 
     def remove_zone(self, zone_id: str) -> bool:
-        """动态删除ROI区域"""
-        if zone_id in self.zones:
-            del self.zones[zone_id]
-            del self.zone_type[zone_id]
-            del self.zone_label[zone_id]
-            return True
-        return False
+        """动态删除ROI区域（同样 copy-on-write，见上方并发说明）"""
+        if zone_id not in self.zones:
+            return False
+        new_zones = dict(self.zones)
+        del new_zones[zone_id]
+        new_type = dict(self.zone_type)
+        new_type.pop(zone_id, None)
+        new_label = dict(self.zone_label)
+        new_label.pop(zone_id, None)
+        self.zones = new_zones
+        self.zone_type = new_type
+        self.zone_label = new_label
+        return True
 
     def update_zone_polygon(self, zone_id: str, polygon: list[list[float]]):
-        """更新已有区域的坐标"""
+        """更新已有区域的坐标（字典大小不变，但仍走 copy-on-write 保持一致）"""
         if zone_id in self.zones:
-            self.zones[zone_id] = np.array(polygon, dtype=np.float32)
+            new_zones = dict(self.zones)
+            new_zones[zone_id] = np.array(polygon, dtype=np.float32)
+            self.zones = new_zones
 
     # ==================== 可视化辅助 ====================
 
