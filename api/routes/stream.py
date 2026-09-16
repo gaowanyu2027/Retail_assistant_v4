@@ -69,6 +69,9 @@ _run_token = object()
 
 _latest_result: dict | None = None
 _latest_frame_b64: str | None = None
+# 当前处理线程的引用：供 get_stream_status() 做「线程是否真在跑」的校验，
+# 避免出现"线程已死但状态仍报 running"的假象（见 _guard_processing_thread）
+_bg_thread_ref: "threading.Thread | None" = None
 
 # 客户端帧队列
 _client_frames: deque = deque(maxlen=CLIENT_FRAME_QUEUE_MAXLEN)
@@ -129,8 +132,14 @@ def get_client_frame():
 
 def get_stream_status() -> dict:
     with _lock:
+        # 线程存活校验：`_active["running"]` 是"意图状态"，线程是否真在跑是"事实状态"。
+        # 两者不一致时以事实为准（thread_alive=False 即说明处理线程已退出）。
+        # _guard_processing_thread 已经会在异常时复位 running，这里是第二道保险，
+        # 覆盖"线程被杀/进程内其他方式退出"等不经过 guard 的路径。
+        alive = bool(_bg_thread_ref is not None and _bg_thread_ref.is_alive())
         return {
             "running": _active["running"],
+            "thread_alive": alive,
             "source": _active["source"],
             "paused": _active["paused"],
             "current_frame": _active["current_frame"],
@@ -370,6 +379,48 @@ def _processing_thread_emotion(cap_source, face_emotion, run_token):
 
 
 # ==================== 零售模式处理线程 ====================
+
+def _guard_processing_thread(fn, *args) -> None:
+    """处理线程的异常兜底。
+
+    为什么必须有：两个处理线程（零售 / 表情）的循环体**原本没有任何 try/except**，
+    于是任意一帧里的异常（推理、ROI 遍历、skill、DB、模型）都会让线程**静默死亡**——
+    而 `_active["running"]` 不会复位。实测复现（第 30 帧抛异常）：
+
+        Exception in thread retail-processing:
+          File "/app/api/routes/stream.py", line 419, in _processing_thread_retail
+        RuntimeError: 模拟推理阶段异常（第 30 帧）
+
+        处理线程还活着吗 : False
+        get_stream_status: {'running': True, ..., 'current_frame': 29}
+
+    即：画面永久冻结、`/api/streams/status` 一直报"运行中"、客户端收不到任何错误，
+    必须人工重启服务。这与 ROI 并发改写（见 cv_engine/roi_manager.py 的
+    copy-on-write 修复）叠加时**必现**：用户在 ROI 页面新增一个区域即可触发。
+
+    这里在**线程入口统一兜底**（一处覆盖两种模式），并复用既有的 `_latest_result`
+    约定把错误交给 WebSocket 循环 → 客户端收到明确的 error 状态，运行态同时复位。
+    """
+    global _latest_result
+    try:
+        fn(*args)
+    except Exception as e:  # 线程兜底必须捕获一切，否则又回到静默死亡
+        import traceback
+        print(f"[WS][ERROR] 处理线程异常退出，已复位运行态并通知客户端: "
+              f"{type(e).__name__}: {e}")
+        traceback.print_exc()
+        with _lock:
+            _active["running"] = False
+            _active["paused"] = False
+        try:
+            with _emo_lock:
+                _emo_state["running"] = False
+        except Exception:
+            pass
+        # 复用 finished 的通道：WS 循环看到 type=error 会通知客户端并清理资源
+        _latest_result = {"type": "error",
+                          "message": f"{type(e).__name__}: {e}"}
+
 
 def _processing_thread_retail(cap_source, processor, pop_skill, anom_skill, emo_skill, event_detector, run_token):
     """零售模式后台线程：完整推理管线"""
@@ -611,7 +662,7 @@ async def video_stream(websocket: WebSocket):
     def start_processing(cap_source, mode="retail", use_processor=None, use_event_detector=None):
         """启动后台处理线程"""
         nonlocal bg_thread
-        global _run_token, _latest_result, _latest_frame_b64
+        global _run_token, _latest_result, _latest_frame_b64, _bg_thread_ref
         target_processor = use_processor or processor
         target_event_detector = use_event_detector or event_detector
         _stop_internal()
@@ -641,9 +692,11 @@ async def video_stream(websocket: WebSocket):
             emo_skill.reset()
             target_processor.reset()
             bg_thread = threading.Thread(
-                target=_processing_thread_retail,
-                args=(cap_source, target_processor, pop_skill, anom_skill, emo_skill, target_event_detector, token),
+                target=_guard_processing_thread,
+                args=(_processing_thread_retail, cap_source, target_processor, pop_skill,
+                      anom_skill, emo_skill, target_event_detector, token),
                 daemon=True,
+                name="retail-processing",
             )
         else:
             # 表情模式
@@ -659,11 +712,14 @@ async def video_stream(websocket: WebSocket):
                 # 本机摄像头与服务器摄像头分别记账，便于分段统计
                 _emo_state["camera_id"] = "camera_local" if cap_source is None else "camera_entrance"
             bg_thread = threading.Thread(
-                target=_processing_thread_emotion,
-                args=(cap_source, face_emotion, token),
+                target=_guard_processing_thread,
+                args=(_processing_thread_emotion, cap_source, face_emotion, token),
                 daemon=True,
+                name="emotion-processing",
             )
         bg_thread.start()
+        # 记录引用，供 get_stream_status() 校验线程是否真在运行
+        _bg_thread_ref = bg_thread
 
     try:
         while True:
@@ -831,6 +887,18 @@ async def video_stream(websocket: WebSocket):
                     })
                     _last_pushed_frame_id = -1
                 await asyncio.sleep(WS_POLL_SLEEP_SECONDS)
+                continue
+
+            # 处理线程异常退出的通知通道（由 _guard_processing_thread 写入）：
+            # 必须显式告知客户端，否则画面只是"卡住"，用户完全不知道发生了什么。
+            if result_to_send.get("type") == "error":
+                await websocket.send_json({
+                    "type": "status", "status": "error",
+                    "message": f"视频分析异常已终止：{result_to_send.get('message', '')}",
+                })
+                _stop_internal()
+                _latest_result = None
+                _latest_frame_b64 = None
                 continue
 
             if result_to_send.get("type") == "finished":
