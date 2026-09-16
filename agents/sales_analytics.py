@@ -36,7 +36,8 @@ def compare_hotness_vs_sales(period_key: str | None = None, hours: int = 1) -> d
     # 数据来源判定：四象限依赖销量，必须让使用者知道结论是建立在真实数据还是演示/测试数据上。
     # 优先用**显式 source 字段**（权威口径）；旧库缺该字段时退回 period_key 前缀推测。
     try:
-        from agents.sales_ingest import classify_period_keys, classify_sources, source_caveat
+        from agents.sales_ingest import (SOURCE_UNKNOWN, classify_period_keys,
+                                         classify_sources, source_caveat)
         try:
             sources = mysql_db.get_sales_sources(period_key, hours)
         except Exception:
@@ -47,8 +48,14 @@ def compare_hotness_vs_sales(period_key: str | None = None, hours: int = 1) -> d
             sales_source = classify_period_keys(
                 mysql_db.get_sales_period_keys(period_key, hours))
         caveat = source_caveat(sales_source)
-    except Exception:
-        sales_source, caveat = "unknown", ""
+    except Exception as e:
+        # ⚠ 判定失败时**必须给非空提示**：原先这里是 `sales_source, caveat = "unknown", ""`，
+        # 而空串的语义是"已确认为真实数据、无需提示"——于是"来源无法确认"被伪装成
+        # "已确认真实"，与真实 POS 数据的输出**一模一样**（实测确认）。
+        sales_source = SOURCE_UNKNOWN
+        caveat = (f"⚠ **销量数据来源无法确认**（{type(e).__name__}）——无法判断是真实业务数据"
+                  "还是演示/测试数据，请勿据此做经营决策；建议核对数据库连接与 "
+                  "product_sales.source 字段。")
 
     all_zones = sorted(set(hot) | set(sales))
     zones_out = []
