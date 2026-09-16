@@ -57,6 +57,15 @@ class AnomalySkill:
         self.l3_weights = l3_weights or ANOMALY_L3_WEIGHTS
 
         self.alerts: deque[AnomalyAlert] = deque(maxlen=ANOMALY_ALERT_QUEUE_MAX)
+        # 累计告警计数（**不封顶**，供"异常突增"判定使用）。
+        #
+        # ⚠ 为什么必须有它：`alerts` 是 deque，超过 ANOMALY_ALERT_QUEUE_MAX 会丢弃最旧的，
+        # 于是 `len(self.alerts)` 永远停在 500。而突增检测靠的是"两次观测的**增量**"，
+        # 队列一封顶增量就恒为 0 → **突增检测永久失效**。
+        # 实测：累计产生 1200 起后，total_alerts / high_risk_count 仍报 500，
+        # 基线也停在 500，之后无论真实新增多少都不再触发。
+        self._total_count: int = 0
+        self._high_count: int = 0
         self._alerted_tracks: OrderedDict[int, None] = OrderedDict()
         self._alerted_max = ANOMALY_ALERTED_MAX
         self._global_log: deque[dict] = deque(maxlen=ANOMALY_GLOBAL_LOG_MAX)
@@ -175,6 +184,10 @@ class AnomalySkill:
                     timestamp=timestamp,
                 )
                 self.alerts.append(alert)
+                # 累计计数（不封顶）——队列只保存明细，增量判定看这个
+                self._total_count += 1
+                if level == "high":
+                    self._high_count += 1
                 if track.track_id not in self._alerted_tracks:
                     self._alerted_tracks[track.track_id] = None
                     if len(self._alerted_tracks) > self._alerted_max:
@@ -236,9 +249,12 @@ class AnomalySkill:
             elif alert.level == "watch":
                 watch.append(item)
         return {
-            "total_alerts": total,
+            "total_alerts": total,                    # 明细条数（受队列上限约束，最多 500）
             "high_risk_count": len(high),
             "watch_count": len(watch),
+            # 累计口径：**不封顶**，供"异常突增"增量判定使用（见 __init__ 的说明）
+            "total_alerts_cumulative": self._total_count,
+            "high_risk_count_cumulative": self._high_count,
             "high_risk": high,
             "watch_list": watch,
         }
@@ -247,3 +263,5 @@ class AnomalySkill:
         self.alerts.clear()
         self._alerted_tracks.clear()
         self._global_log.clear()
+        self._total_count = 0
+        self._high_count = 0

@@ -28,7 +28,13 @@ from langgraph.graph import END, START, StateGraph
 from agents import data_quality
 
 # 进程内基线：上次观测到的告警水位
-_baseline = {"total_alerts": 0, "high_risk_count": 0, "total_visits": 0}
+#
+# ⚠ `ready` 用来避免**重启后的第一次假突增**：
+# 原先 `_baseline` 初值是 0，重启后第一次 detect_surge() 会拿"历史累计水位"
+# 与 0 相减，于是必然报一次突增（实测重启首轮 delta_total=30、delta_high=8）。
+# 现在首轮只**建立基线**、不判定，从第二轮起才比较。
+# 另注：基线存在进程内，多副本部署时每个副本各有一套（见 改进记录.md 待办 F7）。
+_baseline = {"total_alerts": 0, "high_risk_count": 0, "total_visits": 0, "ready": False}
 _baseline_lock = threading.Lock()
 
 # 突增阈值
@@ -294,12 +300,32 @@ def generate_surge_report(surge: dict) -> dict:
     return {"summary": out.get("summary", ""), "data": out.get("data", {})}
 
 
+def _alert_levels(anom: dict) -> tuple[int, int]:
+    """取告警水位（优先**累计**口径）。
+
+    累计口径不封顶，是增量判定的正确依据；旧字段（明细条数）受队列上限 500 约束，
+    一旦封顶增量恒为 0、突增永远不触发（见 skills/skill_anomaly.py 的说明）。
+    兼容：没有新字段时退回旧字段。
+    """
+    total = anom.get("total_alerts_cumulative", anom.get("total_alerts", 0))
+    high = anom.get("high_risk_count_cumulative", anom.get("high_risk_count", 0))
+    return int(total or 0), int(high or 0)
+
+
 def detect_surge() -> dict | None:
-    """对比基线检测异常突增。返回突增信息 dict 或 None。"""
+    """对比基线检测异常突增。返回突增信息 dict 或 None。
+
+    首轮**只建立基线、不判定**——否则会把"本次启动之前累积的历史水位"
+    当成一轮突增报出去（重启即误报）。
+    """
     _, anom, _, _ = _collect_snapshot()
-    total = anom.get("total_alerts", 0)
-    high = anom.get("high_risk_count", 0)
+    total, high = _alert_levels(anom)
     with _baseline_lock:
+        if not _baseline["ready"]:
+            _baseline["total_alerts"] = total
+            _baseline["high_risk_count"] = high
+            _baseline["ready"] = True
+            return None
         base_total = _baseline["total_alerts"]
         base_high = _baseline["high_risk_count"]
     d_total = total - base_total
@@ -315,12 +341,15 @@ def detect_surge() -> dict | None:
 
 
 def update_baseline(anom_summary: dict):
-    """用当前告警水位刷新基线。"""
+    """用当前告警水位刷新基线（用累计口径，见 _alert_levels）。"""
+    total, high = _alert_levels(anom_summary or {})
     with _baseline_lock:
-        _baseline["total_alerts"] = anom_summary.get("total_alerts", 0)
-        _baseline["high_risk_count"] = anom_summary.get("high_risk_count", 0)
+        _baseline["total_alerts"] = total
+        _baseline["high_risk_count"] = high
+        _baseline["ready"] = True
 
 
 def reset_baseline():
     with _baseline_lock:
-        _baseline.update({"total_alerts": 0, "high_risk_count": 0, "total_visits": 0})
+        _baseline.update({"total_alerts": 0, "high_risk_count": 0,
+                          "total_visits": 0, "ready": False})
