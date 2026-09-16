@@ -132,16 +132,43 @@ services:
     volumes:
       - qdrant-docker:/qdrant/storage
 
-  # ---------------- Redis（可选） ----------------
-  # 说明：项目当前**未使用** Redis（缓存/限流均为进程内实现）。
-  # 保留该服务以便将来多进程化时承接共享缓存与分布式限流；
-  # 默认不启动，需要时：docker compose --profile full up -d
+  # ---------------- Redis（常驻：本项目的缓存层） ----------------
+  # 定位：项目的**缓存层**，纳入 compose 统一管理（此前是游离的 `docker run` 容器）。
+  #
+  # ⚠ 代码当前**尚未读写 Redis**（缓存与限流仍是进程内实现）。接入请按此顺序，
+  #   并且**先量再缓存**——用 benchmark/loadtest.py 测出 MySQL 实际负载后再决定缓存什么，
+  #   否则会变成"因为零售系统都该有 Redis"的装饰品。
+  #   ① 地图工具缓存：现有 _MAP_CACHE 是进程内 dict，满 500 条时 clear() 一次性全清
+  #      （缓存雪崩）。Redis 的 per-key TTL 天然修掉，且直接省百度地图 API 配额。
+  #   ② 热度/销量聚合查询结果：前端每 5 秒轮询多个接口，每个都打 MySQL 聚合；
+  #      TTL 5~30 秒即可砍掉绝大部分重复查询。
+  #   ③ embedding 缓存：hash(text) -> vector，省掉每次语义闸/向量召回的 Ollama 往返。
+  #   不适合放进 Redis 的（别搬）：
+  #     - 登录会话与限流：刻意存在独立的 SQLite 鉴权库，保证**业务库故障时管理员
+  #       仍能登录**；搬进 Redis 会削弱该隔离，且 Redis 重启会丢掉限流状态。
+  #     - 实时视频帧 / _active_camera：高频且体积大，进程内比走网络快。
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    profiles: ["full"]
+    command:
+      # 作为缓存层要限制内存并用 LRU 淘汰，避免把宿主机内存吃光。
+      # allkeys-lru 适用于纯缓存场景（没有必须永久保留的 key）。
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
     volumes:
       - redis_data:/data
+    # 不发布端口：backend 通过 compose 网络用服务名 `redis` 访问。
+    # 需要从宿主机用 redis-cli / GUI 调试时再取消注释（已限 127.0.0.1）。
+    # ports:
+    #   - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   # 用 name: 固定真实卷名（不套用 compose 项目前缀）：
