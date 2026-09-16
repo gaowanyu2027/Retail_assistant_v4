@@ -7,6 +7,8 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%234da6ff'/></svg>">
   <link rel="stylesheet" href="/css/dashboard.css">
   <style>[v-cloak]{display:none}</style>
+  <!-- 登录态兜底（D3）：必须在 main.js 之前加载，才能在首个请求前接管 fetch -->
+  <script src="/js/auth-guard.js"></script>
 </head>
 <body>
   <div id="app" v-cloak></div>
