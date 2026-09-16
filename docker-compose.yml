@@ -41,6 +41,11 @@ services:
         condition: service_started
     ports:
       - "8000:8000"
+    # Docker Desktop（Windows/Mac）自带 host.docker.internal；
+    # 但 Linux 上必须显式映射，否则上面 LANGFUSE_HOST 指向的宿主机地址解析不了。
+    # 加上它对各平台都安全。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       # 可选：从 .env.example 复制而来。没建 .env 时也不报错
       # （此时依赖 shell 里已有的环境变量或下面的 environment 默认值）
@@ -61,6 +66,18 @@ services:
       mysql_root: "${mysql_root:?请在 .env 或 shell 中设置 mysql_root}"
       # LLM Key 同理。用 :- 允许为空（无 Key 时问答降级，但服务仍可用）
       dazuoye_api: "${dazuoye_api:-}"
+      # ---- 百度地图（竞品 / 商圈 / 地理编码 / 距离工具）----
+      # 未设置时地图类工具会报错，但不影响其它功能，故用 :- 而非 :?
+      baidu_map_ak: "${baidu_map_ak:-}"
+      baidu_map_sk: "${baidu_map_sk:-}"
+      # ---- Langfuse 可观测（Public + Secret 两个 Key 齐全才启用 Trace）----
+      LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-}"
+      LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-}"
+      # ⚠ 这里**不能**照搬宿主机的 http://localhost:3000：
+      # 容器里的 localhost 是容器自己而非宿主机——实测 Connection refused，
+      # 改成 host.docker.internal 后实测 200。
+      # 若将来把 Langfuse 并入本 compose，应改为服务名（如 http://langfuse:3000）。
+      LANGFUSE_HOST: "http://host.docker.internal:3000"
       QDRANT_URL: http://qdrant:6333
       # 容器内没有摄像头 → 保持鉴权与销量投递目录默认开
       AUTH_ENABLED: "${AUTH_ENABLED:-1}"
