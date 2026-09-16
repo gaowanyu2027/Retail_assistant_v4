@@ -792,7 +792,8 @@ def require_perm(perm: str):
 _PUBLIC_PATHS = {
     "/api/auth/login",
     "/api/auth/logout",       # 幂等：未登录也算成功，便于客户端清理本地状态
-    "/api/health",
+    "/api/health",            # liveness：只证明进程在跑
+    "/api/health/ready",      # readiness：真实探测依赖（探针无法带凭据，必须公开）
     "/api/frontend/fallback",
 }
 _DOC_PREFIXES = ("/docs", "/redoc", "/openapi.json")
