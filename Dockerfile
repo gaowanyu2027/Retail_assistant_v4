@@ -68,6 +68,14 @@ COPY --from=frontend /build/dist ./frontend-vue/dist
 # 运行时目录（模型与 data 通过 compose 挂载）
 RUN mkdir -p /app/data
 
+# Ultralytics 会把自己的子目录名再拼到 YOLO_CONFIG_DIR 之后
+# （即实际用 /tmp/Ultralytics/Ultralytics），且判定依据是
+# **父目录是否存在且可写**。只设变量不建目录，它会报
+# "user config directory '.../Ultralytics' is not writable" —— 所以必须一并 mkdir。
+# 放在最后：避免使上方那层昂贵的 pip 安装层缓存失效。
+RUN mkdir -p /tmp/Ultralytics
+ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
+
 EXPOSE 8000
 
 # 健康检查：/api/health 为公开端点（无需登录），适合探活
