@@ -4,6 +4,7 @@ MySQL 数据层 — Retail_assistant
 """
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -21,6 +22,11 @@ MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
 MYSQL_USER = os.environ.get("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.environ.get("mysql_root") or os.environ.get("MYSQL_PASSWORD", "")
 MYSQL_DB = "retail_assistant"  # Docker MySQL(Linux) 库名大小写敏感，与容器内库名一致
+
+
+# 同会话 seq_no 的「读-改-写」串行锁（原因见 save_query_history 的 docstring）。
+# 单进程部署下用它即可；多进程化时需换成 DB 层方案。
+_seq_no_lock = threading.Lock()
 
 
 def mysql_available() -> bool:
@@ -593,39 +599,59 @@ def save_query_history(
     intent: str = "general",
     confidence: float | None = None,
 ):
-    """保存自然语言查询历史。"""
+    """保存自然语言查询历史。
+
+    ⚠ 同会话的 seq_no 分配必须**串行**：本函数是「SELECT MAX(seq_no)+1」再「INSERT」
+    两条独立语句，而池化连接是 autocommit=True，中间没有任何保护。实测（8 线程
+    用 barrier 同时写同一 session_id）：
+
+        旧写法 -> 库中 seq_no = [1, 1, 1, 1, 1, 1, 1, 1]   （全部撞成 1）
+
+    后果不止"顺序乱"：`api/routes/query.py` 用 `seq_no == 1` 判断"会话首条消息"
+    来决定是否用 LLM 生成标题——撞号会让它**重复触发**（多余的 LLM 调用 + 标题被覆盖）。
+
+    为什么在进程内加锁、而不是改成 SQL 层原子操作（两条路都实测过）：
+      - 单条 `INSERT ... SELECT COALESCE(MAX(seq_no),0)+1`：并发下大量
+        MySQL **死锁 1213**（实测 8 线程有 5~6 个失败），加重试也仍有失败
+      - `SELECT ... FOR UPDATE` + 显式事务：需要对**池化连接**来回切换 autocommit，
+        一旦异常路径没恢复，就会污染后续复用该连接的业务
+
+    本项目是单进程部署（compose 单副本），进程内锁即可彻底解决；
+    将来多进程化时需改为 DB 层方案（见 改进记录.md 待办）。
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO chat_session(session_id, title)
-                VALUES (%s, LEFT(%s, 60))
-                ON DUPLICATE KEY UPDATE
-                    title=CASE WHEN title='新会话' THEN VALUES(title) ELSE title END,
-                    updated_at=CURRENT_TIMESTAMP
+            with _seq_no_lock:
+                cur.execute(
+                    """
+                    INSERT INTO chat_session(session_id, title)
+                    VALUES (%s, LEFT(%s, 60))
+                    ON DUPLICATE KEY UPDATE
+                        title=CASE WHEN title='新会话' THEN VALUES(title) ELSE title END,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (session_id, question.strip()),
+                )
+                cur.execute(
+                    "SELECT id FROM chat_session WHERE session_id=%s",
+                    (session_id,),
+                )
+                conversation_row = cur.fetchone()
+                conversation_id = conversation_row[0] if conversation_row else None
+                cur.execute(
+                    "SELECT COALESCE(MAX(seq_no), 0) + 1 FROM query_history WHERE session_id=%s",
+                    (session_id,),
+                )
+                seq_no = int(cur.fetchone()[0])
+                cur.execute(
+                    """
+                    INSERT INTO query_history
+                    (session_id, conversation_id, seq_no, question, answer, intent, confidence)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (session_id, question.strip()),
+                (session_id, conversation_id, seq_no, question, answer, intent, confidence),
             )
-            cur.execute(
-                "SELECT id FROM chat_session WHERE session_id=%s",
-                (session_id,),
-            )
-            conversation_row = cur.fetchone()
-            conversation_id = conversation_row[0] if conversation_row else None
-            cur.execute(
-                "SELECT COALESCE(MAX(seq_no), 0) + 1 FROM query_history WHERE session_id=%s",
-                (session_id,),
-            )
-            seq_no = int(cur.fetchone()[0])
-            cur.execute(
-                """
-                INSERT INTO query_history
-                (session_id, conversation_id, seq_no, question, answer, intent, confidence)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
-            (session_id, conversation_id, seq_no, question, answer, intent, confidence),
-        )
         message_id = cur.lastrowid
     finally:
         conn.close()
