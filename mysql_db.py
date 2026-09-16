@@ -43,24 +43,39 @@ def get_connection(database: str = MYSQL_DB):
         try:
             import db_engine
         except Exception as e:
+            db_engine = None
             print(f"[mysql_db] 连接池模块不可用，降级裸连接: {e}")
         else:
             try:
                 return db_engine.pooled_connection()
-            except db_engine.DBPoolBusy:
-                raise          # 池满：快速失败，绝不在此再开裸连接
+            except (db_engine.DBPoolBusy, db_engine.DBUnavailable):
+                # 池满 / 已熔断：**快速失败**，绝不在此再叠一层裸连接
+                raise
             except Exception as e:
                 print(f"[mysql_db] 连接池获取失败，降级裸连接: {e}")
-    return pymysql.connect(
-        host=MYSQL_HOST,
-        port=MYSQL_PORT,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=database,
-        charset="utf8mb4",
-        autocommit=True,
-        connect_timeout=10,
-    )
+
+    # 走到这里说明：指定了别的库，或池模块不可用 → 用裸连接。
+    # 同样要受熔断保护，否则 MySQL 掉线时每个请求都白等 connect_timeout（实测约 8s）。
+    if db_engine is not None and db_engine.breaker_open():
+        raise db_engine.DBUnavailable("数据库近期连续不可用，已熔断快速失败")
+    try:
+        conn = pymysql.connect(
+            host=MYSQL_HOST,
+            port=MYSQL_PORT,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=database,
+            charset="utf8mb4",
+            autocommit=True,
+            connect_timeout=3,     # 降级路径，不该挂 8~10 秒
+        )
+        if db_engine is not None:
+            db_engine.breaker_record(True)
+        return conn
+    except Exception:
+        if db_engine is not None:
+            db_engine.breaker_record(False)
+        raise
 
 
 def create_database():

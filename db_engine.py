@@ -37,6 +37,62 @@ MAX_OVERFLOW = 10
 POOL_TIMEOUT = 5
 
 
+# ==================== 熔断：避免 MySQL 掉线时每次调用都白等连接超时 ====================
+#
+# 问题（实测）：MySQL 掉线后，**每一次** get_connection() 都要先尝试 TCP 连接、
+# 一直等到 connect_timeout 才抛错——容器里实测每次阻塞约 8 秒：
+#     第1次 12.1s   第2次 7.9s   第3次 7.9s
+#
+# 危害不止"慢"：这些调用大多来自 `asyncio.to_thread` 的线程池，
+# **每个挂起请求占住一个 worker**。累积之后所有异步路由都要排队，
+# "数据库故障"就被放大成"全站卡死"。
+#
+# 熔断策略：连续失败 N 次后进入冷却窗口，窗口内**直接快速失败**（不再尝试建连）；
+# 冷却结束放一次探测，成功即复位。这样故障代价从"每次 8s"降到"首几次 + 之后瞬时"。
+_BREAKER_FAIL_THRESHOLD = 3
+_BREAKER_COOLDOWN = 15.0
+_breaker_lock = threading.Lock()
+_breaker_fails = 0
+_breaker_until = 0.0
+
+
+class DBUnavailable(RuntimeError):
+    """快速失败：数据库近期连续不可用，已进入熔断冷却，不再尝试建连。
+
+    与 `DBPoolBusy`（池满）区分：那个是"连接被别人占着"，
+    这个是"根本连不上数据库"。
+    """
+
+
+def breaker_open() -> bool:
+    """熔断是否处于打开（冷却）状态。"""
+    with _breaker_lock:
+        return time.time() < _breaker_until
+
+
+def breaker_record(ok: bool) -> None:
+    """记录一次连接尝试结果，用于维护熔断状态。"""
+    global _breaker_fails, _breaker_until
+    with _breaker_lock:
+        if ok:
+            _breaker_fails = 0
+            _breaker_until = 0.0
+        else:
+            _breaker_fails += 1
+            if _breaker_fails >= _BREAKER_FAIL_THRESHOLD and time.time() >= _breaker_until:
+                _breaker_until = time.time() + _BREAKER_COOLDOWN
+                print(f"[DBEngine] MySQL 连续失败 {_breaker_fails} 次，"
+                      f"熔断 {_BREAKER_COOLDOWN:.0f}s（期间快速失败，不再白等连接超时）")
+
+
+def breaker_reset() -> None:
+    """手动复位熔断（测试用）。"""
+    global _breaker_fails, _breaker_until
+    with _breaker_lock:
+        _breaker_fails = 0
+        _breaker_until = 0.0
+
+
 class DBPoolBusy(RuntimeError):
     """连接池已满：应当**快速失败**，而不是无限新建裸连接。
 
@@ -92,6 +148,7 @@ def _build_engine():
     except Exception as e:
         print(f"[DBEngine] 连接池初始化失败，30s 后重试（当前降级为裸 pymysql）: {e}")
         _pool_fail_ts = time.time()
+        breaker_record(False)
         return None
 
 
@@ -100,8 +157,14 @@ def get_engine():
     import time
     global _engine
     if _engine is None:
+        # 熔断打开时**不做建池尝试**：_build_engine 内部要真实 TCP 连接，
+        # 否则每 _POOL_RETRY_INTERVAL（30s）就会白等一次 connect_timeout（约 12s）。
+        if breaker_open():
+            return None
         with _engine_lock:
             if _engine is None:
+                if breaker_open():
+                    return None
                 if _pool_fail_ts == 0.0 or time.time() - _pool_fail_ts >= _POOL_RETRY_INTERVAL:
                     _engine = _build_engine()
     return _engine
@@ -121,25 +184,46 @@ def pooled_connection():
       这里**刻意不再**新建裸连接：实测池满后 30 次调用会新建 30 条不受限的连接，
       并发再高就撞 `max_connections` 把全库拖垮。快速失败 >> 降级放大故障。
     """
+    # 熔断中：直接快速失败。**不要**放在 get_engine() 之后——那会先触发建池尝试、
+    # 白等一次 connect_timeout（实测约 12s），且每 30s 重复一次。
+    if breaker_open():
+        raise DBUnavailable(
+            "数据库近期连续不可用，已熔断快速失败（避免每次请求白等连接超时）")
+
     engine = get_engine()
     if engine is not None:
         try:
-            return engine.raw_connection()
+            conn = engine.raw_connection()
+            breaker_record(True)
+            return conn
         except Exception as e:
+            breaker_record(False)
             raise DBPoolBusy(
                 f"连接池已满（容量 {POOL_SIZE}+{MAX_OVERFLOW}，等待 {POOL_TIMEOUT}s 仍无空闲连接）"
                 f"，请稍后重试: {e}"
             ) from e
-    return pymysql.connect(
-        host=MYSQL_HOST,
-        port=int(MYSQL_PORT),
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DB,
-        charset="utf8mb4",
-        autocommit=True,
-        connect_timeout=10,
-    )
+    # 池没建起来（MySQL 不可达 / 缺驱动）→ 稳态降级为裸连接。
+    # 但必须熔断：否则 MySQL 掉线时每次调用都白等 connect_timeout（实测约 8s）。
+    if breaker_open():
+        raise DBUnavailable(
+            "数据库近期连续不可用，已熔断快速失败（避免每次请求白等连接超时）")
+    try:
+        conn = pymysql.connect(
+            host=MYSQL_HOST,
+            port=int(MYSQL_PORT),
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB,
+            charset="utf8mb4",
+            autocommit=True,
+            # 从 10s 压到 3s：这是**降级路径**，不该让每个请求挂 8~10 秒
+            connect_timeout=3,
+        )
+        breaker_record(True)
+        return conn
+    except Exception:
+        breaker_record(False)
+        raise
 
 
 def dispose_engine():
