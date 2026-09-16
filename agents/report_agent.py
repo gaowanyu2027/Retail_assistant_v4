@@ -84,14 +84,24 @@ def _template_text(pop: dict, anom: dict, emo: dict, trend: dict,
     而是明确说明当前无有效数据——避免把设备故障报成「今天没生意」。
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    if quality is not None and not quality.get("reliable", True):
-        reason = quality.get("reason", "当前无有效视频数据")
-        if report_type == "surge":
-            return (
-                f"【异常突增·数据不可信】{now}：{reason}，"
-                "告警增量无法确认，请先检查摄像头再判断是否需人工复核。"
-            )
-        return f"【数据不可信】{now}：{reason}。本次不出运营结论，请检查摄像头/视频源后重试。"
+    # ⚠ 门禁按**零售源**判定，不能用聚合口径的 quality["reliable"]：
+    # 聚合口径是"任一路新鲜即为真"，于是浏览器推帧（client）会把停摆的
+    # 服务器摄像头掩盖成"数据可信"，汇报照样输出"到访 0 人次"
+    # （见 agents/data_quality.py 的说明）。
+    # 兼容：若调用方传进来的 quality 没有 reliable_by_source 字段，退回旧口径。
+    if quality is not None:
+        by_src = quality.get("reliable_by_source")
+        reliable = by_src.get("retail") if isinstance(by_src, dict) else None
+        if reliable is None:
+            reliable = quality.get("reliable", True)
+        if not reliable:
+            reason = quality.get("reason") or "服务器摄像头当前没有视频帧，本次结论依赖它"
+            if report_type == "surge":
+                return (
+                    f"【异常突增·数据不可信】{now}：{reason}，"
+                    "告警增量无法确认，请先检查摄像头再判断是否需人工复核。"
+                )
+            return f"【数据不可信】{now}：{reason}。本次不出运营结论，请检查摄像头/视频源后重试。"
 
     zones = pop.get("zones", {})
     top = pop.get("top_zone")

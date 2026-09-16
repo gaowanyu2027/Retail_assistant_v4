@@ -168,11 +168,22 @@ async def get_heat_reports(limit: int = Query(default=20, ge=1, le=100)):
 async def get_data_quality():
     """数据可信度门禁结果：区分「真的没生意」与「设备/视频源异常」。
 
-    reliable=False 时，各统计里的 0 应理解为「无数据」而非「无客流」。
+    ⚠ 顶层 `reliable` 采用**零售源（服务器摄像头）**的判定，而不是
+    "任一路新鲜"的聚合口径——本接口是给仪表盘判断"业务数字能不能信"用的，
+    而业务数字都来自零售源。若用聚合口径，浏览器推帧（client）会把停摆的
+    服务器摄像头掩盖成"可信"，预警横幅就不会出现（见 agents/data_quality.py）。
+
+    各源明细见 `reliable_by_source` / `sources`。
     """
     try:
         from agents import data_quality
-        return data_quality.snapshot()
+        snap = data_quality.snapshot()
+        by_src = snap.get("reliable_by_source") or {}
+        if by_src:
+            snap = dict(snap)
+            snap["reliable"] = bool(by_src.get(data_quality.SOURCE_RETAIL, False))
+            snap["reliable_scope"] = "retail"   # 说明顶层 reliable 是哪个口径
+        return snap
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取数据可信度失败: {str(e)}")
 
