@@ -41,13 +41,28 @@ def _connect():
 
 
 def init_db():
-    """初始化数据库，创建表情记录表"""
+    """初始化数据库：**MySQL 与 SQLite 两条路径都要**把表建好。
+
+    为什么必须都建（实测踩过）：本模块的设计是"平时写 MySQL，MySQL 挂了自动落
+    SQLite"。但 SQLite 的表原先只在「MySQL 不可用」这个分支里创建，
+    而 MySQL 正常启动时会 `return` 提前结束——于是 SQLite 里根本没有
+    `emotion_record` 表。运行期 MySQL 一旦掉线，降级写入直接抛
+    `no such table: emotion_record`，**这批表情数据被静默丢弃**
+    （外层 except 只打一行日志，没有任何重试或告警）。
+
+    实测复现：
+        场景A（MySQL 可用）-> SQLite 文件甚至没被创建
+        场景B（MySQL 掉线）-> OperationalError: no such table: emotion_record
+
+    建表是幂等的（`IF NOT EXISTS`）且开销极低，两条路径都建好，
+    降级路径才真正可用。
+    """
     if _mysql_enabled():
         try:
             _mysql_import().init_schema()
-            return
         except Exception as e:
             print(f"[database] MySQL 初始化失败，回退 SQLite: {e}")
+        # ⚠ 这里**不能 return**：SQLite 表必须始终建好，否则降级路径不可用
 
     with _db_lock:
         conn = _connect()
