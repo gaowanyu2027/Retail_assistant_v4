@@ -38,7 +38,15 @@ langchain-core>=1.0         # @tool 装饰器与消息类型（被多处直接 i
 langgraph>=1.0              # 状态图工作流（主动汇报链路 StateGraph + checkpointer）
 langchain-openai>=1.0       # LangChain 的 OpenAI 兼容适配器
 langchain-mcp-adapters>=0.1 # [可选] 百度地图官方 MCP（BAIDU_MCP_ENABLED=1 时启用）
-langfuse>=2.0               # [可选] LLM 全链路可观测；缺失时自动跳过打点
+# [可选] LLM 全链路可观测；缺失时自动跳过打点。
+# ⚠ 必须锁定 <3：本文件上方的 @observe 打点用的是 langfuse v2 的
+#   `from langfuse.decorators import observe`，而 v3 起该子模块被移除
+#   （observe 挪到顶层 langfuse.observe），且 v3+ SDK 的摄取接口与
+#   v2 服务端不兼容（实测上报返回 404）。
+#   本项目配套的 Langfuse 服务端是 ghcr.io/langfuse/langfuse:2，
+#   故 SDK 也必须留在 v2。写成 `>=2.0` 会导致 pip 装到 v4 →
+#   trace 被静默禁用（只打印一行提示，不影响主流程，极易被忽略）。
+langfuse>=2.0,<3
 
 # --- 语音（唤醒 / 识别 / 合成） ---
 sherpa-onnx>=1.10.0         # 本地 KWS 唤醒词 + 流式中文 ASR

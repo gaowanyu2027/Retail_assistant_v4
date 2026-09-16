@@ -51,12 +51,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 依赖安装：torch/torchvision 先按 CPU 源装好，
-# 随后 pip 解析 requirements.txt 时会认为其已满足，不会重复拉 CUDA 版
+# 依赖安装：torch/torchvision 走 CPU 源，避免拉到 CUDA 版（镜像会大 2~3 倍）。
+#
+# 这里用 --no-deps 是**构建提速**的关键：
+#   --index-url 会把 torch 的**全部依赖**也导向 pytorch 索引，而该索引在本网络
+#   实测只有 ~30KB/s（numpy 16.7MB 单独就花了约 9 分钟，整个 pip 阶段 21.6 分钟）。
+#   加 --no-deps 后本步只下 torch/torchvision 本体（实测 3.2MB/s，约 80 秒），
+#   它们的依赖改由下一步从清华源补齐 —— requirements.txt 里的 torch>=2.0.0/
+#   torchvision>=0.15.0 已被满足，但 pip 仍会解析其 Requires-Dist 并装上缺失的依赖。
+#   实测依赖完整（torch/ultralytics/cv2 均可正常 import）。
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PYTORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
 COPY requirements.txt ./
-RUN pip install --index-url ${PYTORCH_CPU_INDEX} torch torchvision \
+RUN pip install --no-deps --index-url ${PYTORCH_CPU_INDEX} torch torchvision \
     && pip install --index-url ${PIP_INDEX_URL} -r requirements.txt
 
 # 应用代码
