@@ -881,6 +881,26 @@ def user_from_scope(scope) -> dict | None:
     return None
 
 
+def _set_request_actor(user: dict | None) -> None:
+    """把当前账号写进**请求上下文**，供会话归属过滤使用（B3）。
+
+    为什么放在中间件而不是各路由：Agent 工具（`search_chat_history`）与向量记忆
+    检索拿不到 request 对象，却能读到 ContextVar —— 它们正是最危险的泄露路径
+    （会把别人的历史问答喂给 LLM）。详见 auth_context.py 的模块说明。
+    """
+    try:
+        import auth_context  # 本地导入：root 级模块，避免启动期导入顺序问题
+        if user:
+            auth_context.set_actor(
+                user.get("username"),
+                audit=has_perm(user.get("role", ""), "system:manage"),
+            )
+        else:
+            auth_context.set_actor(None)
+    except Exception as e:                                  # 上下文失败不能拦请求
+        print(f"[Auth] 请求上下文设置失败（会话过滤将退化为看不到有归属的数据）: {e}")
+
+
 class AuthMiddleware:
     """鉴权中间件（纯 ASGI，同时覆盖 HTTP 与 WebSocket）。
 
@@ -905,9 +925,11 @@ class AuthMiddleware:
             user = get_session(token_from_scope(scope))
             if user:
                 scope.setdefault("state", {})["user"] = user
+            _set_request_actor(user)
             return await self.app(scope, receive, send)
 
         user = user_from_scope(scope)
+        _set_request_actor(user)
         if not user:
             if stype == "websocket":
                 # 先 accept 再以 1008（策略违规）关闭，客户端可拿到明确关闭码

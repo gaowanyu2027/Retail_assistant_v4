@@ -232,9 +232,11 @@ def init_schema():
             id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             session_id VARCHAR(128) NOT NULL,
             title VARCHAR(255) NOT NULL DEFAULT '新会话',
+            owner VARCHAR(64) NOT NULL DEFAULT '',
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            UNIQUE KEY uq_chat_session_id (session_id)
+            UNIQUE KEY uq_chat_session_id (session_id),
+            KEY idx_chat_session_owner (owner)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
 
@@ -360,6 +362,26 @@ def init_schema():
                 "ALTER TABLE query_history "
                 "ADD COLUMN seq_no BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER conversation_id, "
                 "ADD INDEX idx_query_conversation_seq (conversation_id, seq_no)"
+            )
+
+        # ===== B3：会话归属（owner）=====
+        # 修复前 chat_session / query_history **没有归属字段**，任意登录账号都能
+        # 列出、搜索、删除所有人的问答记录。这里给 chat_session 加 owner
+        # （query_history 通过 JOIN 归属到会话，保持单一事实来源，不重复存）。
+        #
+        # 历史行保持 owner=''（**无归属**）：迁移前无法追溯是谁建的，
+        # 不猜测、不乱认领；'' 只有审计视角（root / system:manage）可见，
+        # 普通账号看不到 —— 这正是本次修复要达到的效果。
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema=%s AND table_name='chat_session' AND column_name='owner'",
+            (MYSQL_DB,),
+        )
+        if int(cur.fetchone()[0]) == 0:
+            cur.execute(
+                "ALTER TABLE chat_session "
+                "ADD COLUMN owner VARCHAR(64) NOT NULL DEFAULT '' AFTER title, "
+                "ADD INDEX idx_chat_session_owner (owner)"
             )
 
         cur.execute(
@@ -598,8 +620,14 @@ def save_query_history(
     answer: str | None,
     intent: str = "general",
     confidence: float | None = None,
+    owner: str | None = None,
 ):
     """保存自然语言查询历史。
+
+    `owner`（B3）：本次问答的归属账号。
+    - 会话不存在 → 用它建会话；
+    - 会话已存在 → **不改动原有 owner**（第二个账号拿着别人的 session_id 写入时，
+      不会把会话"认领"走；写路径的越权判定在 `api/routes/query.py`）。
 
     ⚠ 同会话的 seq_no 分配必须**串行**：本函数是「SELECT MAX(seq_no)+1」再「INSERT」
     两条独立语句，而池化连接是 autocommit=True，中间没有任何保护。实测（8 线程
@@ -625,13 +653,13 @@ def save_query_history(
             with _seq_no_lock:
                 cur.execute(
                     """
-                    INSERT INTO chat_session(session_id, title)
-                    VALUES (%s, LEFT(%s, 60))
+                    INSERT INTO chat_session(session_id, title, owner)
+                    VALUES (%s, LEFT(%s, 60), %s)
                     ON DUPLICATE KEY UPDATE
                         title=CASE WHEN title='新会话' THEN VALUES(title) ELSE title END,
                         updated_at=CURRENT_TIMESTAMP
                     """,
-                    (session_id, question.strip()),
+                    (session_id, question.strip(), owner or ""),
                 )
                 cur.execute(
                     "SELECT id FROM chat_session WHERE session_id=%s",
@@ -658,48 +686,75 @@ def save_query_history(
     return message_id, seq_no
 
 
-def create_chat_session(session_id: str, title: str = "新会话"):
-    """新建会话。"""
+def create_chat_session(session_id: str, title: str = "新会话", owner: str | None = None):
+    """新建会话（`owner` 为归属账号，见 B3）。"""
     conn = get_connection()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT IGNORE INTO chat_session(session_id, title) VALUES (%s, %s)",
-            (session_id, title[:255]),
+            "INSERT IGNORE INTO chat_session(session_id, title, owner) VALUES (%s, %s, %s)",
+            (session_id, title[:255], owner or ""),
         )
     conn.close()
 
 
-def save_chat_session(session_id: str, title: str | None = None):
-    """保存会话标题并刷新更新时间。"""
+def save_chat_session(session_id: str, title: str | None = None, owner: str | None = None):
+    """保存会话标题并刷新更新时间。
+
+    `owner=None` 表示**不限定归属**（审计视角）；否则只允许改动该归属的会话，
+    影响 0 行即说明这个会话不属于调用方（路由据此返回 404）。
+    """
     conn = get_connection()
     with conn.cursor() as cur:
         if title:
             cur.execute(
                 "UPDATE chat_session SET title=%s, updated_at=CURRENT_TIMESTAMP "
-                "WHERE session_id=%s",
-                (title[:255], session_id),
+                "WHERE session_id=%s AND (%s IS NULL OR owner=%s)",
+                (title[:255], session_id, owner, owner),
             )
         else:
             cur.execute(
                 "UPDATE chat_session SET updated_at=CURRENT_TIMESTAMP "
-                "WHERE session_id=%s",
-                (session_id,),
+                "WHERE session_id=%s AND (%s IS NULL OR owner=%s)",
+                (session_id, owner, owner),
             )
+        affected = cur.rowcount
     conn.close()
+    return affected
 
 
-def list_chat_sessions():
-    """列出全部会话及消息数。"""
+def get_chat_session_owner(session_id: str) -> str | None:
+    """取会话归属；返回 None 表示**会话不存在**。
+
+    写路径用它判定越权（`api/routes/query.py`）：会话属于他人时拒绝写入，
+    避免把内容注入别人的问答记录。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT owner FROM chat_session WHERE session_id=%s", (session_id,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return None if row is None else (row[0] or "")
+
+
+def list_chat_sessions(owner: str | None = None):
+    """列出会话及消息数。
+
+    `owner=None` = 审计视角（全部账号）；否则只列该账号的会话（B3）。
+    """
     conn = get_connection()
     sessions = []
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT s.session_id, s.title, s.created_at, s.updated_at,
+            SELECT s.session_id, s.title, s.created_at, s.updated_at, s.owner,
                    (SELECT COUNT(*) FROM query_history q WHERE q.session_id=s.session_id) AS message_count
             FROM chat_session s
+            WHERE (%s IS NULL OR s.owner=%s)
             ORDER BY s.updated_at DESC, s.id DESC
-            """
+            """,
+            (owner, owner),
         )
         for row in cur.fetchall():
             sessions.append({
@@ -707,25 +762,30 @@ def list_chat_sessions():
                 "title": row[1],
                 "created_at": row[2].strftime("%Y-%m-%d %H:%M:%S") if row[2] else "",
                 "updated_at": row[3].strftime("%Y-%m-%d %H:%M:%S") if row[3] else "",
-                "message_count": row[4],
+                "owner": row[4] or "",
+                "message_count": row[5],
             })
     conn.close()
     return sessions
 
 
-def get_chat_messages(session_id: str):
-    """获取指定会话的消息列表。"""
+def get_chat_messages(session_id: str, owner: str | None = None):
+    """获取指定会话的消息列表（`owner` 限定归属；None = 审计视角）。
+
+    归属通过 JOIN `chat_session` 过滤（单一事实来源），不在这里重复存 owner。
+    """
     conn = get_connection()
     messages = []
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT seq_no, question, answer, intent, confidence, created_at
-            FROM query_history
-            WHERE session_id=%s
-            ORDER BY seq_no, id
+            SELECT q.seq_no, q.question, q.answer, q.intent, q.confidence, q.created_at
+            FROM query_history q
+            JOIN chat_session s ON q.session_id = s.session_id
+            WHERE q.session_id=%s AND (%s IS NULL OR s.owner=%s)
+            ORDER BY q.seq_no, q.id
             """,
-            (session_id,),
+            (session_id, owner, owner),
         )
         for row in cur.fetchall():
             messages.append({
@@ -740,44 +800,76 @@ def get_chat_messages(session_id: str):
     return messages
 
 
-def get_chat_message_ids(session_id: str):
-    """获取指定会话下的消息 ID。"""
+def get_chat_message_ids(session_id: str, owner: str | None = None):
+    """获取指定会话下的消息 ID（`owner` 限定归属）。"""
     conn = get_connection()
     ids = []
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id FROM query_history WHERE session_id=%s ORDER BY id",
-            (session_id,),
+            """
+            SELECT q.id
+            FROM query_history q
+            JOIN chat_session s ON q.session_id = s.session_id
+            WHERE q.session_id=%s AND (%s IS NULL OR s.owner=%s)
+            ORDER BY q.id
+            """,
+            (session_id, owner, owner),
         )
         ids = [row[0] for row in cur.fetchall()]
     conn.close()
     return ids
 
 
-def delete_chat_session(session_id: str):
-    """删除会话及其全部消息，返回被删除的消息 ID。"""
-    message_ids = get_chat_message_ids(session_id)
+def delete_chat_session(session_id: str, owner: str | None = None):
+    """删除会话及其全部消息，返回被删除的消息 ID。
+
+    `owner` 限定归属（None = 审计视角）。**返回 None 表示会话不存在或不属于调用方**
+    —— 路由据此返回 404，避免"能删别人的会话"或"用返回码泄露会话是否存在"。
+    """
     conn = get_connection()
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM query_history WHERE session_id=%s", (session_id,))
-        cur.execute("DELETE FROM chat_session WHERE session_id=%s", (session_id,))
-    conn.close()
+    try:
+        with conn.cursor() as cur:
+            # 不用 FOR UPDATE：池化连接是 autocommit，锁在语句结束即释放，
+            # 加了只会给人"已加锁"的错觉；并发删除本身是幂等的。
+            cur.execute(
+                "SELECT owner FROM chat_session WHERE session_id=%s",
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            if owner is not None and (row[0] or "") != owner:
+                return None
+            cur.execute(
+                "SELECT id FROM query_history WHERE session_id=%s ORDER BY id",
+                (session_id,),
+            )
+            message_ids = [r[0] for r in cur.fetchall()]
+            cur.execute("DELETE FROM query_history WHERE session_id=%s", (session_id,))
+            cur.execute("DELETE FROM chat_session WHERE session_id=%s", (session_id,))
+    finally:
+        conn.close()
     return message_ids
 
 
-def get_all_query_history_records():
-    """获取全部查询历史，用于向量库重建。"""
+def get_all_query_history_records(owner: str | None = None):
+    """获取查询历史，用于向量库重建。
+
+    `owner=None`（默认）= 全部账号（重建/审计场景）；否则只取该归属。
+    """
     conn = get_connection()
     records = []
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT q.id, q.session_id, q.seq_no, q.question, q.answer,
-                   q.created_at, s.title
+                   q.created_at, s.title, s.owner
             FROM query_history q
             JOIN chat_session s ON q.session_id = s.session_id
+            WHERE (%s IS NULL OR s.owner=%s)
             ORDER BY q.id
-            """
+            """,
+            (owner, owner),
         )
         for row in cur.fetchall():
             records.append({
@@ -788,13 +880,19 @@ def get_all_query_history_records():
                 "answer": row[4],
                 "created_at": row[5].strftime("%Y-%m-%d %H:%M:%S") if row[5] else "",
                 "title": row[6],
+                "owner": row[7] or "",
             })
     conn.close()
     return records
 
 
-def search_chat_messages(keyword: str, limit: int = CHAT_SEARCH_LIMIT):
-    """按关键词搜索会话标题、问题或回答。"""
+def search_chat_messages(keyword: str, limit: int = CHAT_SEARCH_LIMIT, owner: str | None = None):
+    """按关键词搜索会话标题、问题或回答。
+
+    ⚠ 这是**最容易被忽视的泄露路径**：它既给 `GET /api/chat/search` 用，
+    也被 Agent 工具 `search_chat_history` 调用（检索结果会直接进入 LLM 上下文）。
+    因此必须按 `owner` 过滤（None = 审计视角，见 B3）。
+    """
     if not keyword or not keyword.strip():
         return []
     pattern = f"%{keyword.strip()}%"
@@ -807,13 +905,14 @@ def search_chat_messages(keyword: str, limit: int = CHAT_SEARCH_LIMIT):
                 SELECT q.session_id, s.title, q.seq_no, q.question, q.answer, q.created_at
                 FROM query_history q
                 JOIN chat_session s ON q.session_id=s.session_id
-                WHERE q.question LIKE %s
+                WHERE (q.question LIKE %s
                    OR q.answer LIKE %s
-                   OR s.title LIKE %s
+                   OR s.title LIKE %s)
+                  AND (%s IS NULL OR s.owner=%s)
                 ORDER BY q.created_at DESC
                 LIMIT %s
                 """,
-                (pattern, pattern, pattern, int(limit)),
+                (pattern, pattern, pattern, owner, owner, int(limit)),
             )
             for row in cur.fetchall():
                 results.append({
@@ -829,8 +928,8 @@ def search_chat_messages(keyword: str, limit: int = CHAT_SEARCH_LIMIT):
     return results
 
 
-def update_chat_session_title(session_id: str, title: str):
-    """更新会话标题（LLM 生成的简短标题）。"""
+def update_chat_session_title(session_id: str, title: str, owner: str | None = None):
+    """更新会话标题（LLM 生成的简短标题）。`owner` 限定归属（None = 审计视角）。"""
     if not title or not title.strip():
         return
     conn = get_connection()
@@ -838,8 +937,8 @@ def update_chat_session_title(session_id: str, title: str):
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE chat_session SET title=%s, updated_at=CURRENT_TIMESTAMP "
-                "WHERE session_id=%s",
-                (title.strip()[:255], session_id),
+                "WHERE session_id=%s AND (%s IS NULL OR owner=%s)",
+                (title.strip()[:255], session_id, owner, owner),
             )
     finally:
         conn.close()

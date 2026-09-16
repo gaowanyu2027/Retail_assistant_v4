@@ -12,6 +12,8 @@ from langchain_core.tools import tool
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.base_agent import create_llm, create_memory, langfuse_available, observe_langfuse
+# 会话归属过滤（B3）：Agent 工具与记忆检索拿不到 request，靠请求上下文取当前账号
+from auth_context import owner_filter
 
 # 百度地图：默认用自写业务工具（WebAPI，竞品/商圈/地理编码/距离，深度定制）。
 # 如需通用地图能力（天气/路况/路线等），设 BAIDU_MCP_ENABLED=1 再叠加官方 MCP 工具。
@@ -188,7 +190,10 @@ def search_chat_history(query: str) -> str:
     """
     try:
         import mysql_db
-        results = mysql_db.search_chat_messages(query, limit=5)
+        from auth_context import owner_filter
+        # B3：检索结果会**直接进入 LLM 上下文**，必须按归属过滤 ——
+        # 修复前这个工具能召回所有人的历史问答（用户只要问"之前问过什么"就能看到）
+        results = mysql_db.search_chat_messages(query, limit=5, owner=owner_filter())
     except Exception as e:
         return json.dumps({"error": f"历史记录查询失败: {e}"}, ensure_ascii=False)
     if not results:
@@ -1098,10 +1103,13 @@ class MasterAgent:
                 summary=summary,
                 keywords=keywords,
                 message_count=len(old_messages),
+                owner=owner_filter() or "",
             )
             try:
                 import vector_memory
-                vector_memory.upsert_session_summary(session_id, summary, keywords)
+                vector_memory.upsert_session_summary(
+                    session_id, summary, keywords, owner=owner_filter() or ""
+                )
             except Exception as e:
                 print(f"[LongTerm] 摘要向量索引失败: {e}")
         except Exception as e:
@@ -1171,7 +1179,7 @@ class MasterAgent:
                 return ""  # 已有会话上下文，不重复注入
             from agents.long_term_memory import get_long_term_memory
             ltm = get_long_term_memory()
-            summaries = ltm.get_recent(limit=AGENT_LONG_TERM_INJECT_LIMIT)
+            summaries = ltm.get_recent(limit=AGENT_LONG_TERM_INJECT_LIMIT, owner=owner_filter())
             if not summaries:
                 return ""
             parts = [
@@ -1193,7 +1201,9 @@ class MasterAgent:
         """根据当前问题召回相似历史问答（混合检索：关键词 + 向量 + 时间衰减）。"""
         try:
             import vector_memory
-            results = vector_memory.search_messages_hybrid(query, limit=limit)
+            results = vector_memory.search_messages_hybrid(
+                query, limit=limit, owner=owner_filter()
+            )
             items = []
             for item in results:
                 score = float(item.get("score", 0))

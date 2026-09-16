@@ -156,8 +156,14 @@ def upsert_message(
     question: str,
     answer: str,
     created_at: str,
+    owner: str = "",
 ):
-    """将一条查询历史写入向量库。"""
+    """将一条查询历史写入向量库。
+
+    `owner`（B3）：归属账号，写进 payload 供**检索时过滤**。
+    修复前 payload 里没有归属，`search_messages` 会召回**所有人**的历史问答 ——
+    而这条路径的检索结果会直接进入 LLM 上下文，是最隐蔽的泄露点。
+    """
     vector = _embed(f"{title}\n{question}\n{answer}")
     client = _get_client()
     with _client_lock:
@@ -175,6 +181,7 @@ def upsert_message(
                         "question": question,
                         "answer": answer or "",
                         "created_at": created_at,
+                        "owner": owner or "",
                     },
                 )
             ],
@@ -191,8 +198,22 @@ def delete_message(message_id: int):
         )
 
 
-def search_messages(query: str, limit: int = VECTOR_SEARCH_DEFAULT_LIMIT):
-    """按语义相似度搜索查询历史。"""
+def _owner_filter(owner: str | None):
+    """构造归属过滤条件（B3）。`None` = 不限定（审计视角）。"""
+    if owner is None:
+        return None
+    return models.Filter(
+        must=[models.FieldCondition(key="owner", match=models.MatchValue(value=owner or ""))]
+    )
+
+
+def search_messages(query: str, limit: int = VECTOR_SEARCH_DEFAULT_LIMIT, owner: str | None = None):
+    """按语义相似度搜索查询历史。
+
+    `owner`（B3）：只召回该归属的历史；`None` = 不限定（审计视角）。
+    注意历史向量点里没有 `owner` 字段（迁移前写入），带过滤时**不会**被召回 ——
+    这正是期望行为：无归属数据只有审计视角能看到。
+    """
     query = (query or "").strip()
     if not query:
         return []
@@ -204,6 +225,7 @@ def search_messages(query: str, limit: int = VECTOR_SEARCH_DEFAULT_LIMIT):
             query=vector,
             limit=limit,
             with_payload=True,
+            query_filter=_owner_filter(owner),
         )
         hits = response.points if response else []
     results = []
@@ -216,6 +238,7 @@ def search_messages(query: str, limit: int = VECTOR_SEARCH_DEFAULT_LIMIT):
             "question": payload.get("question", ""),
             "answer": payload.get("answer", ""),
             "created_at": payload.get("created_at", ""),
+            "owner": payload.get("owner", ""),
             "score": round(float(hit.score), 4),
         })
     return results
@@ -227,9 +250,10 @@ def _summary_point_id(session_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ltm:{session_id}"))
 
 
-def upsert_session_summary(session_id: str, summary: str, keywords: str = ""):
+def upsert_session_summary(session_id: str, summary: str, keywords: str = "", owner: str = ""):
     """把一条长期记忆摘要写入向量索引（摘要索引层）。
 
+    `owner`（B3）：同 `upsert_message`，摘要含用户问答内容，必须带归属。
     失败时（Ollama/Qdrant 不可用）自动降级，不影响主流程。
     """
     try:
@@ -246,6 +270,7 @@ def upsert_session_summary(session_id: str, summary: str, keywords: str = ""):
                             "session_id": session_id,
                             "summary": summary,
                             "keywords": keywords,
+                            "owner": owner or "",
                         },
                     )
                 ],
@@ -267,8 +292,12 @@ def delete_session_summary(session_id: str):
         print(f"[Vector] 摘要向量删除失败 session={session_id}: {e}")
 
 
-def search_session_summaries(query: str, limit: int = 3) -> list[dict]:
-    """按语义相似度检索长期记忆摘要（跨会话记忆的向量索引）。"""
+def search_session_summaries(query: str, limit: int = 3, owner: str | None = None) -> list[dict]:
+    """按语义相似度检索长期记忆摘要（跨会话记忆的向量索引）。
+
+    `owner`（B3）：只召回该归属的摘要；`None` = 不限定（审计视角）。
+    ⚠ 当前仓库内暂无调用方，一并加上过滤以免将来接上时漏掉归属。
+    """
     query = (query or "").strip()
     if not query:
         return []
@@ -281,6 +310,7 @@ def search_session_summaries(query: str, limit: int = 3) -> list[dict]:
                 query=vector,
                 limit=limit,
                 with_payload=True,
+                query_filter=_owner_filter(owner),
             )
             hits = response.points if response else []
         results = []
@@ -290,6 +320,7 @@ def search_session_summaries(query: str, limit: int = 3) -> list[dict]:
                 "session_id": payload.get("session_id", ""),
                 "summary": payload.get("summary", ""),
                 "keywords": payload.get("keywords", ""),
+                "owner": payload.get("owner", ""),
                 "score": round(float(hit.score), 4),
             })
         return results
@@ -317,10 +348,12 @@ def search_messages_hybrid(
     query: str,
     limit: int = VECTOR_SEARCH_DEFAULT_LIMIT,
     keyword_limit: int = 10,
+    owner: str | None = None,
 ):
     """混合检索：MySQL 关键词精确匹配 + Qdrant 向量语义匹配，
     统一按（相关性 × 时间衰减）排序，任一通道不可用时自动降级。
 
+    `owner`（B3）：**两个通道都要**按归属过滤（漏一个就是泄露）。`None` = 审计视角。
     返回结构与 search_messages 一致（含 score 字段）。
     """
     query = (query or "").strip()
@@ -330,7 +363,7 @@ def search_messages_hybrid(
     kw_hits: list[dict] = []
     try:
         import mysql_db
-        for r in mysql_db.search_chat_messages(query, limit=keyword_limit):
+        for r in mysql_db.search_chat_messages(query, limit=keyword_limit, owner=owner):
             kw_hits.append({
                 "session_id": r.get("session_id", ""),
                 "title": r.get("title", ""),
@@ -345,7 +378,7 @@ def search_messages_hybrid(
 
     vec_hits: list[dict] = []
     try:
-        vec_hits = search_messages(query, limit=limit * 2)
+        vec_hits = search_messages(query, limit=limit * 2, owner=owner)
     except Exception as e:
         print(f"[Vector] 向量检索失败，仅用关键词召回: {e}")
 
@@ -366,10 +399,14 @@ def search_messages_hybrid(
     return items[:limit]
 
 
-def reindex_all() -> int:
-    """把 MySQL 中全部查询历史重建到向量库（逐条容错：单条失败跳过并统计，不中断整体）。"""
+def reindex_all(owner: str | None = None) -> int:
+    """把 MySQL 中的查询历史重建到向量库（逐条容错：单条失败跳过并统计，不中断整体）。
+
+    `owner=None`（默认）重建**全部账号**的数据，这是运维/审计场景；
+    重建时会把库里的归属写进向量 payload（B3），否则检索过滤会把老数据全挡在外面。
+    """
     import mysql_db
-    records = mysql_db.get_all_query_history_records()
+    records = mysql_db.get_all_query_history_records(owner=owner)
     count = 0
     failed = 0
     for record in records:
@@ -382,6 +419,7 @@ def reindex_all() -> int:
                 question=record["question"],
                 answer=record.get("answer", ""),
                 created_at=record.get("created_at", ""),
+                owner=record.get("owner", ""),
             )
             count += 1
         except Exception as e:
