@@ -124,11 +124,12 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: "${mysql_root:?请在 .env 中设置 mysql_root}"
       MYSQL_DATABASE: retail_assistant
-    # 不对外发布端口：backend 通过 compose 网络用服务名 `mysql` 直连，
-    # 数据库本就无需暴露到宿主机（少一个攻击面）。需要 GUI 客户端连入时
-    # 再取消下面两行注释。
-    # ports:
-    #   - "127.0.0.1:3306:3306"
+    # 端口默认不对外发布：backend 通过 compose 网络用服务名 `mysql` 直连，
+    # 数据库无需暴露到宿主机（少一个攻击面）。
+    # ⚠ 已按需打开（2026-09，Navicat 等 GUI 客户端连入）：
+    #   **只绑 127.0.0.1**，不对局域网开放；用完可注释回去。
+    ports:
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql8_volume:/var/lib/mysql
     healthcheck:
