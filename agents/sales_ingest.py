@@ -26,6 +26,7 @@ SOURCE_SIMULATED = "simulated"  # 演示/模拟数据
 SOURCE_TEST = "test"            # 验证期写入的测试数据（真实格式 period_key，但非真实业务数据）
 SOURCE_MIXED = "mixed"          # 混合（同一窗口内既有真实又有演示/测试）
 SOURCE_NONE = "none"            # 无数据
+SOURCE_UNKNOWN = "unknown"      # **判定失败**（既不是"真实"，也不是"没有"）
 
 
 def classify_period_key(period_key: str | None) -> str:
@@ -59,7 +60,7 @@ def classify_sources(sources) -> str:
 
 
 def source_caveat(source: str) -> str:
-    """给归因结论附带的数据来源说明（真实数据时为空串）。"""
+    """给归因结论附带的数据来源说明（**仅"已确认为真实数据"时为空串**）。"""
     if source == SOURCE_SIMULATED:
         return "销量为**演示数据**，结论仅用于功能验证，不可作为经营决策依据。"
     if source == SOURCE_TEST:
@@ -69,6 +70,14 @@ def source_caveat(source: str) -> str:
         return "该时段销量**混有非真实数据**（演示或测试），结论可能失真，建议核对数据来源。"
     if source == SOURCE_NONE:
         return "该时段没有销量记录，转化率/四象限结论不完整。"
+    if source == SOURCE_UNKNOWN:
+        # ⚠ 必须返回**非空**：调用方（sales_analytics）在来源判定失败时会落到 unknown，
+        # 而空串的语义是"已确认为真实数据、无需提示"。若 unknown 也返回空串，
+        # "无法确认来源"与"已确认真实"就完全无法区分——实测正是如此：
+        #     sales_source = unknown，data_caveat = ''（与真实 POS 数据的输出一模一样）
+        return ("⚠ **销量数据来源无法确认**（读取来源标记失败）——无法判断是真实 POS 数据"
+                "还是演示/测试数据，请勿据此做经营决策；建议核对数据库连接与 "
+                "product_sales.source 字段。")
     return ""
 
 

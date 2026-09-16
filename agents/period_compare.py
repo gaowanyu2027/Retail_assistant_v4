@@ -37,21 +37,39 @@ def _period_key(dt: datetime) -> str:
 
 
 def _aggregate(period_key: str) -> dict:
-    """聚合某个时段的视频热度与销量（同口径指标）。"""
+    """聚合某个时段的视频热度与销量（同口径指标）。
+
+    ⚠ **取数失败（如数据库不可用）必须与"确实没有数据"区分开**：
+    原先两个 `try/except` 都把异常吞成空列表，于是 `has_data=False`，
+    结论变成"当前时段没有采集到数据…请先确认摄像头/视频源是否正常"——
+    **把数据库故障误诊成摄像头故障**，让人去查一个没问题的地方。
+    实测（打桩让查询抛 `Can't connect to MySQL server`）输出的文案与真的没数据**完全一致**。
+
+    故这里记录错误并以 `data_error` / `available` 暴露：
+    - `available=False` → 数据**取不到**（不可用）
+    - `available=True, has_data=False` → 数据取到了，但该时段**确实为空**
+    这两者的处置完全不同，不能共用一个空列表表示。
+    """
     import mysql_db
 
+    errors: list[str] = []
     try:
         stats = mysql_db.get_retail_stats_by_zone(period_key=period_key)
-    except Exception:
+    except Exception as e:
         stats = []
+        errors.append(f"retail_stats({type(e).__name__})")
     try:
         sales = mysql_db.get_product_sales(period_key=period_key)
-    except Exception:
+    except Exception as e:
         sales = []
+        errors.append(f"product_sales({type(e).__name__})")
 
     return {
         "period_key": period_key,
         "has_data": bool(stats) or bool(sales),
+        # available=False 表示"取数失败"，不是"没有数据"
+        "available": not errors,
+        "data_error": "；".join(errors),
         "zone_count": len(stats),
         "visit_count": sum(int(z.get("visit_count", 0) or 0) for z in stats),
         "dwell_seconds": round(
@@ -84,6 +102,12 @@ def _trend_text(pct: float | None) -> str:
 
 
 def _conclude(current: dict, comparisons: list[dict]) -> str:
+    # 先区分"取不到数据"与"确实没有数据"——两者对使用者的含义完全不同
+    if not current.get("available", True):
+        return (f"取数失败（{current.get('data_error') or '数据库不可用'}），"
+                "无法给出同期对比结论。"
+                "⚠ 这与「没有数据」不是一回事：请检查数据库连接后重试，"
+                "不要据此判断摄像头/视频源有问题。")
     if not current.get("has_data"):
         return ("当前时段没有采集到数据，无法给出同期对比结论"
                 "（请先确认摄像头/视频源是否正常）。")
@@ -138,10 +162,17 @@ def compare_periods(reference: datetime | None = None,
             "sales_pct": _pct(current["sales_amount"], base["sales_amount"]),
         })
 
+    # note 也要区分"取数失败"与"没有数据"（见 _aggregate 的说明）
+    if not current.get("available", True):
+        note = (f"数据不可用：{current.get('data_error') or '数据库取数失败'}。"
+                "对比结果无效，请检查数据库连接——不是「没有数据」。")
+    elif not current.get("has_data"):
+        note = "当前时段无数据：对比结果仅反映历史时段值"
+    else:
+        note = ""
     return {
         "current": current,
         "comparisons": comparisons,
         "conclusion": _conclude(current, comparisons),
-        "note": ("" if current.get("has_data")
-                 else "当前时段无数据：对比结果仅反映历史时段值"),
+        "note": note,
     }
