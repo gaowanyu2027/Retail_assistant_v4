@@ -115,10 +115,21 @@ const StreamManager = {
             console.error('[Stream] WebSocket 错误:', err);
         };
 
-        this.ws.onclose = () => {
+        this.ws.onclose = (event) => {
             console.log('[Stream] WebSocket 已断开');
             this.connected = false;
             this._stopHeartbeat();
+            // D3：1008 = 鉴权失效（会话过期）→ 不再重连，由 auth-guard 统一回登录页。
+            // 注意 1012（service restart，后端重启）必须继续重连，见 auth-guard.js。
+            const closeCode = (event && typeof event.code === 'number') ? event.code : 0;
+            if (window.DSH_AUTH &&
+                window.DSH_AUTH.shouldReconnectOnClose(closeCode) === false) {
+                if (this.canvas) this.canvas.style.display = 'none';
+                const ph = document.getElementById('video-placeholder');
+                if (ph) ph.style.display = 'flex';
+                updateStatus('offline', '登录已过期，请重新登录');
+                return;
+            }
             if (!this.manualDisconnect && this.reconnectAction) {
                 updateStatus('warning', '连接断开，正在重连...');
             } else {

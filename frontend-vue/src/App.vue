@@ -382,6 +382,10 @@ export default {
         window.__currentUser = null
         window.__currentPerms = []
       } catch (e) { /* ignore */ }
+      // D6：清掉本浏览器的会话 id。会话记录现已带归属（B3），
+      // 若不清，同一浏览器换账号登录后会拿着**上一个账号的 session_id** 继续问，
+      // 结果是查询被归属校验拒绝、或（修复前）直接读写到别人的会话。
+      try { sessionStorage.removeItem('chat_session_id') } catch (e) { /* ignore */ }
       location.reload()
     },
     escapeHtml(value) {
@@ -1008,9 +1012,13 @@ export default {
           this.updateReportBar(msg.summary, inner.type, timeStr)
         } catch (e) {}
       }
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         this._stopReportKeepalive()
         if (this.reportWs === ws) this.reportWs = null
+        // D3：1008 = 会话过期 → 不重连，交给 auth-guard 统一回登录页
+        const closeCode = (event && typeof event.code === 'number') ? event.code : 0
+        if (window.DSH_AUTH &&
+            window.DSH_AUTH.shouldReconnectOnClose(closeCode) === false) return
         this.scheduleReportWsReconnect()
       }
       ws.onerror = () => {
