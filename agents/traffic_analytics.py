@@ -57,18 +57,35 @@ def hourly_traffic(hours: int = 24) -> dict:
         return {"hours": [], "peak": "暂无数据", "valley": "暂无数据",
                 "summary": "暂无客流时段数据（需运行视频采集）"}
 
-    peak = max(hours_out, key=lambda h: h["visit_count"])
-    valley = min(hours_out, key=lambda h: h["visit_count"])
-    total = sum(h["visit_count"] for h in hours_out)
+    # ⚠ 高低谷只在**有客流的时段**里选。
+    # 断流/摄像头未启动时，视频管线同样会写下 visit_count=0 的行，与"那个时段
+    # 真的没客人"在当前 schema 下**无法区分**。若把 0 也纳入比较，低谷会永远落在
+    # "未采集"的时段上，并据此给出"低谷时段安排陈列调整"这种误导性建议
+    # （子代理实测：11:00 那行是断流写的 0，却成了 valley）。
+    active = [h for h in hours_out if h["visit_count"] > 0]
+    zero_cnt = len(hours_out) - len(active)
+    if not active:
+        return {"hours": hours_out, "peak": "暂无数据", "valley": "暂无数据",
+                "summary": f"近 {hours} 小时无任何客流记录（{zero_cnt} 个小时为 0）。"
+                           "请先确认摄像头/视频源是否正常运行——统计值为 0 不代表真实客流。"}
+
+    peak = max(active, key=lambda h: h["visit_count"])
+    valley = min(active, key=lambda h: h["visit_count"])
+    total = sum(h["visit_count"] for h in active)
     summary = (
         f"近 {hours} 小时累计到访 {total} 人次。"
         f"客流高峰在 {peak['hour'][11:16]}（{peak['visit_count']} 人次），"
         f"低谷在 {valley['hour'][11:16]}（{valley['visit_count']} 人次）。"
         "建议高峰时段增派补货/收银，低谷时段安排陈列调整。"
     )
+    if zero_cnt:
+        summary += (f" 另有 {zero_cnt} 个小时无客流记录——可能是未采集"
+                    f"（设备未运行/断流），也可能确实无客人，已排除出高低谷判定，"
+                    f"建议核对摄像头运行情况。")
     return {"hours": hours_out,
             "peak": f"{peak['hour'][11:16]} ({peak['visit_count']} 人次)",
             "valley": f"{valley['hour'][11:16]} ({valley['visit_count']} 人次)",
+            "zero_hours": zero_cnt,
             "summary": summary}
 
 
@@ -157,6 +174,10 @@ def zone_depth(hours: int = 1) -> dict:
 
 
 def _depth_quadrant(visit: int, deep: int, depth_rate: float, sold: int, conversion: float):
+    # ⚠ 与 sales_analytics 同一口径：sold 是**件数**、visit 是**人次**，
+    # sold/visit*100 严格来说是「件/人比」，只有 sold <= visit 时才近似"转化率"。
+    # 原先一律叫"转化率"，会出现"转化率 150%"这种自相矛盾的表述（实测 shelf_B）。
+    metric = "件/人比" if sold > visit else "转化率"
     has_deep = deep > 0
     has_sales = sold > 0
     if not has_deep and not has_sales:
@@ -171,7 +192,7 @@ def _depth_quadrant(visit: int, deep: int, depth_rate: float, sold: int, convers
     # 有深度兴趣
     if depth_rate >= 30.0:  # 深度占比 ≥30% 视为"认真选购区"
         if has_sales and conversion >= 30.0:
-            return ("healthy", f"深度选购占比 {depth_rate:.0f}% 且转化率 {conversion:.0f}%：认真选购+转化俱佳")
+            return ("healthy", f"深度选购占比 {depth_rate:.0f}% 且{metric} {conversion:.0f}%：认真选购+转化俱佳")
         return ("high_depth_low_sales",
                 f"深度选购占比 {depth_rate:.0f}% 但销量仅 {sold} 件：顾客停留挑选却未购买——商品品质/价格/匹配度问题")
     # 深度占比低但有销量

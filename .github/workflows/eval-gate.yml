@@ -1,5 +1,16 @@
 # CI 门禁：push/PR 时跑 Agent 评测集，失败则拦截（回归保护）
 # run_evals.py 已按"任一失败→退出码1"实现门禁。
+#
+# ⚠ 本文件曾经有一处**致命笔误**（已修，别再改回去）：
+#   env 里写的是 `DEEPSEEK_API_KEY`，而**全项目读的是 `dazuoye_api`**
+#   （见 config/settings.py）——全仓 grep `DEEPSEEK_API_KEY` 命中 0 次。
+#   后果是 CI 里 LLM_API_KEY 恒为空，走 LLM 的用例必然失败或退化，
+#   "评测门禁"名存实亡。此类"变量名不匹配"的静默失效本项目踩过多次
+#   （另见 compose 漏传 mysql_root、容器内硬编码 127.0.0.1）。
+#
+# 使用前置（需要你手动做一次）：
+#   仓库 Settings → Secrets and variables → Actions → New repository secret
+#      名称：DAZUOYE_API     值：你的 DeepSeek Key
 name: eval-gate
 
 on:
@@ -10,6 +21,24 @@ on:
 jobs:
   eval:
     runs-on: ubuntu-latest
+
+    services:
+      # ⚠ 必须有：evals/run_evals.py 的 query_tool_logs() 是**直接**连 MySQL 的
+      # （不过 SQLite 回退），evaluate() 每个用例都会调用它。
+      # 没有这个服务，CI 报的是连接错误，而不是"评测失败"——两者含义完全不同。
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpw
+          MYSQL_DATABASE: retail_assistant
+        ports:
+          - "3306:3306"
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -ptestpw"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -24,7 +53,13 @@ jobs:
 
       - name: Run evaluation gate
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}   # 你的 DeepSeek key
+          # 变量名必须与代码一致（见文件头的说明）
+          dazuoye_api: ${{ secrets.DAZUOYE_API }}
+          # CI 里的 MySQL 用一次性口令，仅本 job 生命周期有效
+          mysql_root: testpw
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: root
         run: |
           python evals/run_evals.py
         # 退出码 0=通过，1=有失败用例（门禁拦截），2=异常
