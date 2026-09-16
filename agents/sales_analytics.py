@@ -72,6 +72,14 @@ def compare_hotness_vs_sales(period_key: str | None = None, hours: int = 1) -> d
             "sold_count": sold,
             "sales_amount": float(s.get("sales_amount", 0)),
             "conversion_rate": conversion,
+            # >100% 时的口径说明（否则空串）：字段名沿用 conversion_rate 以兼容前端，
+            # 但这里讲清它其实是"件/人比"——件数/人次，同一顾客买多件就会 >100%。
+            "conversion_note": (
+                f"销量按**件**计、客流按**人次**计，{sold} 件 / {visit} 人次 = {conversion:.0f}% "
+                f"属「件/人比」而非转化率（同一顾客可购买多件）；"
+                f"真实转化率需按成交**笔数**统计，当前数据未提供。"
+                if sold > visit else ""
+            ),
             "quadrant": quadrant,
             "diagnosis": diagnosis,
             "suggestion": suggestion,
@@ -104,25 +112,34 @@ def _diagnose(visit: int, sold: int, heat: float, avg_dwell: float):
                 "建议优先检查商品品质/缺货/价格，并确认销量数据是否已录入")
 
     conversion = sold / visit
+    # ⚠ 口径（重要，别再退回"一律叫转化率"）：
+    # sold_count 是**件数**、visit 是**人次**，所以 sold/visit 严格来说是「**件/人比**」，
+    # 只有当 sold <= visit 时才能近似当作"转化率"。
+    # 原先一律叫"转化率"并直接 *100，实测 10 人次 / 45 件 -> 450%，
+    # 还被判定为"吸引与转化俱佳"——**一个自相矛盾的结论**（转化率不可能 >100%）。
+    # 这里按实际大小动态取标签；数值本身仍返回（前端在用 conversion_rate 字段），
+    # 另在 zones 里补 conversion_note 说明口径。
+    metric = "件/人比" if sold > visit else "转化率"
     # 高热度判定：平均停留超过 30 秒视为"深度停留"（吸引力信号）
     high_heat = visit >= 10 and avg_dwell >= 30
-    high_sales = conversion >= 0.3  # 转化率 >= 30% 视为高转化
+    high_sales = conversion >= 0.3  # >=30% 视为高转化（件/人比口径下同样适用）
+    pct = conversion * 100
 
     if high_heat and high_sales:
         return ("healthy",
-                f"客流 {visit} 人次、转化率 {conversion*100:.0f}%，吸引与转化俱佳",
+                f"客流 {visit} 人次、{metric} {pct:.0f}%，吸引与转化俱佳",
                 "保持当前陈列与商品策略，可考虑追加补货")
     if high_heat and not high_sales:
         return ("high_heat_low_sales",
-                f"客流 {visit} 人次（平均停留 {avg_dwell:.0f} 秒）但转化率仅 {conversion*100:.0f}%："
+                f"客流 {visit} 人次（平均停留 {avg_dwell:.0f} 秒）但{metric}仅 {pct:.0f}%："
                 "货架吸引力强，顾客停留挑选却未购买——商品品质/匹配度未达选择标准",
                 "重点排查该货架商品品质、缺货、价格竞争力与陈列次序")
     if not high_heat and high_sales:
         return ("low_heat_high_sales",
-                f"转化率 {conversion*100:.0f}% 高但客流偏低：商品有竞争力，货架曝光/吸引力不足",
+                f"{metric} {pct:.0f}% 高但客流偏低：商品有竞争力，货架曝光/吸引力不足",
                 "增强陈列吸引力、增加促销标识或引导客流到该区域")
     return ("low_heat_low_sales",
-            f"客流 {visit} 人次、转化率 {conversion*100:.0f}%，双低",
+            f"客流 {visit} 人次、{metric} {pct:.0f}%，双低",
             "从商品配置与陈列双方面整体优化，并结合时段客流做针对性调整")
 
 
