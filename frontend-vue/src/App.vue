@@ -206,6 +206,9 @@ export default {
       cameraMenuOpen: false,
       cameraActive: false,
       sourceType: null,
+      cameraList: [],          // GET /api/cameras 的原始配置（含 source，用于选择正确动作）
+      cameraSourceDesc: '',    // 当前视频源描述（状态栏用）
+      framesSeen: false,       // 是否已收到第一帧（用它确认"真的在出画面"）
       sessions: [],
       sessionSearchMode: false,
       currentSessionId: '',
@@ -298,6 +301,12 @@ export default {
       if (this.localPreviewRaf) {
         cancelAnimationFrame(this.localPreviewRaf)
         this.localPreviewRaf = null
+      }
+      // 第一帧 = "服务器摄像头真的出画面了"的唯一可信证据（服务端成功时不发回执，只推帧）
+      if (this.cameraActive && !this.framesSeen) {
+        this.framesSeen = true
+        const modeLabel = this.currentMode === 'retail' ? '货架' : '出入口'
+        window.updateStatus('online', `${modeLabel}摄像头运行中（${this.cameraSourceDesc || ''}）`)
       }
       if (msg && msg.anomaly_alerts && msg.anomaly_alerts.length) {
         this.updateAlertsPanel(msg.anomaly_alerts, msg.active_suspicious || [])
@@ -437,12 +446,15 @@ export default {
       try {
         const resp = await fetch('/api/cameras')
         const data = await resp.json()
+        this.cameraList = data.cameras || []      // 记住完整配置：source 决定用哪个 WS 动作
         cameraSelect.innerHTML = ''
         if (data.cameras && data.cameras.length > 0) {
           data.cameras.forEach(c => {
             const opt = document.createElement('option')
             opt.value = c.id
-            opt.textContent = `摄像头 ${c.id} (${c.resolution})`
+            // ⚠ 下拉框的 value 是**配置里的 camera_id**（如 cam_in_01），**不是**设备号；
+            //   以前下面直接用 parseInt(value) 取设备号，于是永远得到 0（见 startServerCamera）。
+            opt.textContent = c.name ? `${c.name}（${c.source}）` : `摄像头 ${c.id}`
             if (c.id === data.default) opt.selected = true
             cameraSelect.appendChild(opt)
           })
@@ -454,14 +466,28 @@ export default {
       }
     },
     // ==================== 视频控制 ====================
-    startServerCamera() {
+    async startServerCamera() {
       const cameraSelect = document.getElementById('camera-select')
-      const camId = parseInt(cameraSelect && cameraSelect.value) || 0
-      StreamManager.startWebcam(camId)
+      const wantId = cameraSelect ? cameraSelect.value : ''
+      if (!this.cameraList.length) await this.scanCameras()   // 保证拿得到 source
+      const cam = this.cameraList.find(c => String(c.id) === String(wantId))
+      const source = cam ? cam.source : ''
+      const label = (cam && cam.name) || wantId || '服务器摄像头'
+
+      if (!cam && !source) {
+        window.updateStatus('warning', '没有可用的服务器摄像头配置')
+        return
+      }
+      // 由 source 决定动作：文件/RTSP → start_file；webcam/数字 → start_webcam（设备号）
+      const pick = StreamManager.startServerSource(source)
+      this.cameraSourceDesc = pick.desc
       this.cameraActive = true
       this.sourceType = 'webcam'
-      const modeLabel = this.currentMode === 'retail' ? '货架' : '出入口'
-      window.updateStatus('online', `${modeLabel}摄像头 #${camId} 运行中`)
+      this.framesSeen = false
+      // ⚠ 修复前这里直接写"运行中"—— 即使动作被丢弃或服务端报错也照样显示运行中，
+      //   用户看到界面在跑、画面却全黑，只能理解为"点了没反应"。
+      //   现在先显示"启动中…"，等服务端的 status 回执（失败会报错）或**第一帧**到达再确认。
+      window.updateStatus('warning', `${label} 正在启动…`)
       if (this.currentMode === 'emotion') {
         this.updateEmoStatus(true)
       }
@@ -653,6 +679,7 @@ export default {
       StreamManager.stop()
       this.cameraActive = false
       this.sourceType = null
+      this.framesSeen = false          // 下次启动重新用"第一帧"确认
 
       // 停止本地摄像头流
       if (this.localStream) {
