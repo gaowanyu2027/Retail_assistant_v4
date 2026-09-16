@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from api.schemas import QueryRequest, QueryResponse
 from config.settings import QUERY_SESSION_TTL
 from agents.intent_router import route_intent
+from auth_context import owner_filter, write_owner
 
 router = APIRouter(tags=["query"])
 
@@ -70,8 +71,12 @@ async def _aget_agent(session_id: str):
     return await asyncio.to_thread(_get_agent, session_id)
 
 
-def _persist_query_history(session_id: str, question: str, answer: str, intent: str = "general"):
+def _persist_query_history(session_id: str, question: str, answer: str, intent: str = "general",
+                           owner: str = ""):
     """写入 MySQL 查询历史，并同步到向量库。
+
+    `owner`（B3）：本会话的归属账号，写进 `chat_session.owner` 与向量 payload。
+    调用方在请求上下文里取好（`write_owner()`），不要在这里读上下文。
 
     会话首条消息（seq_no == 1）时用 LLM 生成简短会话标题（失败回退问题前 N 字）。
     注意：包含 MySQL 与可能的 LLM 标题调用，调用方应通过 asyncio.to_thread 放入线程池。
@@ -86,6 +91,7 @@ def _persist_query_history(session_id: str, question: str, answer: str, intent: 
             question=question,
             answer=answer,
             intent=intent,
+            owner=owner,
         )
 
         # 标题：首条消息用 LLM 生成，其余沿用已有标题
@@ -94,7 +100,9 @@ def _persist_query_history(session_id: str, question: str, answer: str, intent: 
             try:
                 from agents.base_agent import generate_session_title
                 title = generate_session_title(question)
-                mysql_db.update_chat_session_title(session_id, title)
+                # 标题更新用 owner_filter()：审计视角（root）也要能改自己刚提问的会话，
+                # 而该会话可能记在别的账号名下（root 审阅他人会话时）
+                mysql_db.update_chat_session_title(session_id, title, owner=owner_filter())
             except Exception as e:
                 print(f"[Agent] 会话标题更新失败: {e}")
 
@@ -106,9 +114,38 @@ def _persist_query_history(session_id: str, question: str, answer: str, intent: 
             question=question,
             answer=answer,
             created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            owner=owner,
         )
     except Exception as e:
         print(f"[Vector] 查询历史持久化失败: {e}")
+
+
+async def _ensure_session_writable(session_id: str) -> None:
+    """写路径归属校验（B3）。
+
+    判定：
+    - 会话不存在 → 放行（本次会以当前账号建会话）；
+    - 会话属于当前账号 → 放行；
+    - 会话属于**其他账号** → 403，避免把内容注入别人的问答记录
+      （修复前不仅可读，还能往别人的会话里写、并让对方的会话标题被覆盖）；
+    - 无归属会话（迁移前遗留 `owner=''`）→ 只有审计视角能写。
+
+    前端侧配套：`App.vue` 退出登录时会清掉 `chat_session_id`（D6），
+    正常情况下同一浏览器换账号后不会带着旧 session_id 继续提问。
+    """
+    import mysql_db
+    from auth_context import get_actor, is_audit
+
+    if not session_id:
+        return
+    current = await asyncio.to_thread(mysql_db.get_chat_session_owner, session_id)
+    if current is None or is_audit():
+        return
+    if current != (get_actor() or ""):
+        raise HTTPException(
+            status_code=403,
+            detail="该会话不属于当前账号，请新建会话后再提问",
+        )
 
 
 # ===== 后台持久化（fire-and-forget，性能关键） =====
@@ -119,12 +156,19 @@ def _persist_query_history(session_id: str, question: str, answer: str, intent: 
 _persist_sem = asyncio.Semaphore(16)
 
 
-def fire_persist(session_id: str, question: str, answer: str, intent: str = "general"):
-    """后台异步持久化：不阻塞响应。限流 16 并发，超出排队。"""
+def fire_persist(session_id: str, question: str, answer: str, intent: str = "general",
+                 owner: str = ""):
+    """后台异步持久化：不阻塞响应。限流 16 并发，超出排队。
+
+    `owner`（B3）在**调用点**取好再传进来（不依赖后台任务去读上下文）：
+    归属写错等于把数据记到别人名下，显式传参更不容易出错。
+    """
     async def _do():
         try:
             async with _persist_sem:
-                await asyncio.to_thread(_persist_query_history, session_id, question, answer, intent)
+                await asyncio.to_thread(
+                    _persist_query_history, session_id, question, answer, intent, owner
+                )
         except Exception as e:
             print(f"[Persist] 后台持久化失败: {e}")
 
@@ -138,6 +182,8 @@ async def create_query(request: QueryRequest):
     RESTful：查询作为资源，POST /api/queries 提交问题。
     """
     try:
+        await _ensure_session_writable(request.session_id)
+        owner = write_owner()
         agent = await _aget_agent(request.session_id)
 
         # 意图路由：数据类问题直接模板回答（零 LLM）
@@ -148,7 +194,7 @@ async def create_query(request: QueryRequest):
         if quick is not None:
             fire_persist(
                 request.session_id, request.question,
-                quick.get("answer", ""), quick.get("intent", "general"),
+                quick.get("answer", ""), quick.get("intent", "general"), owner,
             )
             return QueryResponse(**quick)
 
@@ -160,9 +206,11 @@ async def create_query(request: QueryRequest):
         )
         fire_persist(
             request.session_id, request.question,
-            result.get("answer", ""), result.get("intent", "general"),
+            result.get("answer", ""), result.get("intent", "general"), owner,
         )
         return QueryResponse(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询处理失败: {str(e)}")
 
@@ -175,6 +223,8 @@ async def create_query_stream(request: QueryRequest):
     意图路由命中的数据类问题直接一次性返回模板回答。
     """
     try:
+        await _ensure_session_writable(request.session_id)
+        owner = write_owner()
         agent = await _aget_agent(request.session_id)
 
         # 意图路由：数据类问题直接模板回答（零 LLM）
@@ -188,7 +238,7 @@ async def create_query_stream(request: QueryRequest):
                 yield "data: [DONE]\n\n"
                 fire_persist(
                     request.session_id, request.question,
-                    quick.get("answer", ""), quick.get("intent", "general"),
+                    quick.get("answer", ""), quick.get("intent", "general"), owner,
                 )
 
             return StreamingResponse(
@@ -210,7 +260,7 @@ async def create_query_stream(request: QueryRequest):
             # 持久化（MySQL + 可能的首条 LLM 标题）后台执行，不阻塞流结束
             fire_persist(
                 request.session_id, request.question,
-                full_answer, "general",
+                full_answer, "general", owner,
             )
 
         return StreamingResponse(
@@ -221,6 +271,8 @@ async def create_query_stream(request: QueryRequest):
                 "X-Accel-Buffering": "no",
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"流式查询失败: {str(e)}")
 

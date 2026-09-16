@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS agent_long_term_memory (
     message_count INT UNSIGNED NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_ltm_session (session_id)
+    owner VARCHAR(64) NOT NULL DEFAULT '',
+    UNIQUE KEY uq_ltm_session (session_id),
+    KEY idx_ltm_owner (owner)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
@@ -37,27 +39,44 @@ CREATE TABLE IF NOT EXISTS agent_long_term_memory (
     keywords TEXT NOT NULL DEFAULT '',
     message_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT ''
 )
 """
+
+# ⚠ owner 一律加在**最后一列**：新装走 DDL、老库走 ALTER，两者列序一致，
+# `_row_to_dict` 才能继续用固定下标取值（否则新老库下标会错位）。
+MYSQL_ALTER_OWNER = (
+    "ALTER TABLE agent_long_term_memory "
+    "ADD COLUMN owner VARCHAR(64) NOT NULL DEFAULT '', "
+    "ADD INDEX idx_ltm_owner (owner)"
+)
+SQLITE_ALTER_OWNER = (
+    "ALTER TABLE agent_long_term_memory ADD COLUMN owner TEXT NOT NULL DEFAULT ''"
+)
 
 
 class LongTermMemory:
     """长期记忆统一接口：upsert / get_recent / get_by_session / search / count。
 
     子类（MySQL/SQLite 后端）实现 _execute 等差异逻辑。
+
+    `owner`（B3）：摘要来自用户对话，**必须带归属** —— 否则新会话会把
+    「其他人历史会话的摘要」注入到自己的上下文里（LLM 会直接读出来）。
+    `owner=None` 表示不限定（审计视角）。
     """
 
-    def upsert(self, session_id: str, summary: str, keywords: str = "", message_count: int = 0):
+    def upsert(self, session_id: str, summary: str, keywords: str = "", message_count: int = 0,
+               owner: str = ""):
         raise NotImplementedError
 
-    def get_recent(self, limit: int = 3) -> list[dict]:
+    def get_recent(self, limit: int = 3, owner: str | None = None) -> list[dict]:
         raise NotImplementedError
 
     def get_by_session(self, session_id: str) -> dict | None:
         raise NotImplementedError
 
-    def search(self, keyword: str, limit: int = 5) -> list[dict]:
+    def search(self, keyword: str, limit: int = 5, owner: str | None = None) -> list[dict]:
         raise NotImplementedError
 
     def count(self) -> int:
@@ -89,6 +108,14 @@ class MysqlLongTermMemory(LongTermMemory):
         with self._lock:
             cur = self._conn_get().cursor()
             cur.execute(MYSQL_DDL)
+            # B3 迁移：老库补 owner 列（新装已由 DDL 带上）
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema=DATABASE() "
+                "AND table_name='agent_long_term_memory' AND column_name='owner'"
+            )
+            if int(cur.fetchone()[0]) == 0:
+                cur.execute(MYSQL_ALTER_OWNER)
             cur.close()
 
     def _run(self, sql: str, params=(), fetch: bool = False):
@@ -117,22 +144,27 @@ class MysqlLongTermMemory(LongTermMemory):
             "keywords": row[3], "message_count": row[4],
             "created_at": str(row[5]) if row[5] else "",
             "updated_at": str(row[6]) if row[6] else "",
+            "owner": (row[7] or "") if len(row) > 7 else "",
         }
 
-    def upsert(self, session_id, summary, keywords="", message_count=0):
+    def upsert(self, session_id, summary, keywords="", message_count=0, owner=""):
         self._run(
-            "INSERT INTO agent_long_term_memory(session_id, summary, keywords, message_count)"
-            " VALUES (%s, %s, %s, %s)"
+            "INSERT INTO agent_long_term_memory(session_id, summary, keywords, message_count, owner)"
+            " VALUES (%s, %s, %s, %s, %s)"
             " ON DUPLICATE KEY UPDATE"
             " summary=VALUES(summary), keywords=VALUES(keywords),"
-            " message_count=VALUES(message_count), updated_at=CURRENT_TIMESTAMP",
-            (session_id, summary[:4000], (keywords or "")[:500], int(message_count or 0)),
+            " message_count=VALUES(message_count), owner=VALUES(owner),"
+            " updated_at=CURRENT_TIMESTAMP",
+            (session_id, summary[:4000], (keywords or "")[:500], int(message_count or 0),
+             owner or ""),
         )
 
-    def get_recent(self, limit: int = 3):
+    def get_recent(self, limit: int = 3, owner: str | None = None):
         rows = self._run(
-            "SELECT * FROM agent_long_term_memory ORDER BY updated_at DESC, id DESC LIMIT %s",
-            (int(limit),), fetch=True,
+            "SELECT * FROM agent_long_term_memory"
+            " WHERE (%s IS NULL OR owner=%s)"
+            " ORDER BY updated_at DESC, id DESC LIMIT %s",
+            (owner, owner, int(limit)), fetch=True,
         )
         return [self._row_to_dict(r) for r in (rows or [])]
 
@@ -143,13 +175,14 @@ class MysqlLongTermMemory(LongTermMemory):
         )
         return self._row_to_dict(rows[0]) if rows else None
 
-    def search(self, keyword: str, limit: int = 5):
+    def search(self, keyword: str, limit: int = 5, owner: str | None = None):
         pattern = f"%{keyword.strip()}%"
         rows = self._run(
             "SELECT * FROM agent_long_term_memory"
-            " WHERE summary LIKE %s OR keywords LIKE %s"
+            " WHERE (summary LIKE %s OR keywords LIKE %s)"
+            " AND (%s IS NULL OR owner=%s)"
             " ORDER BY updated_at DESC LIMIT %s",
-            (pattern, pattern, int(limit)), fetch=True,
+            (pattern, pattern, owner, owner, int(limit)), fetch=True,
         )
         return [self._row_to_dict(r) for r in (rows or [])]
 
@@ -176,6 +209,13 @@ class SqliteLongTermMemory(LongTermMemory):
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False, autocommit=True)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(SQLITE_DDL)
+        # B3 迁移：老库补 owner 列（新装已由 DDL 带上）
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(agent_long_term_memory)")]
+        if "owner" not in cols:
+            try:
+                self._conn.execute(SQLITE_ALTER_OWNER)
+            except sqlite3.OperationalError as e:
+                print(f"[LongTermMemory][WARN] SQLite 补 owner 列失败（可能并发迁移）: {e}")
 
     def _now(self) -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -185,26 +225,30 @@ class SqliteLongTermMemory(LongTermMemory):
             "id": row[0], "session_id": row[1], "summary": row[2],
             "keywords": row[3], "message_count": row[4],
             "created_at": row[5] or "", "updated_at": row[6] or "",
+            "owner": (row[7] or "") if len(row) > 7 else "",
         }
 
-    def upsert(self, session_id, summary, keywords="", message_count=0):
+    def upsert(self, session_id, summary, keywords="", message_count=0, owner=""):
         now = self._now()
         with self._lock:
             self._conn.execute(
-                "INSERT INTO agent_long_term_memory(session_id, summary, keywords, message_count, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?)"
+                "INSERT INTO agent_long_term_memory(session_id, summary, keywords, message_count, created_at, updated_at, owner)"
+                " VALUES (?,?,?,?,?,?,?)"
                 " ON CONFLICT(session_id) DO UPDATE SET"
                 " summary=excluded.summary, keywords=excluded.keywords,"
-                " message_count=excluded.message_count, updated_at=excluded.updated_at",
-                (session_id, summary[:4000], (keywords or "")[:500], int(message_count or 0), now, now),
+                " message_count=excluded.message_count, owner=excluded.owner,"
+                " updated_at=excluded.updated_at",
+                (session_id, summary[:4000], (keywords or "")[:500], int(message_count or 0),
+                 now, now, owner or ""),
             )
 
-    def get_recent(self, limit: int = 3):
+    def get_recent(self, limit: int = 3, owner: str | None = None):
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM agent_long_term_memory"
+                " WHERE (? IS NULL OR owner=?)"
                 " ORDER BY updated_at DESC, id DESC LIMIT ?",
-                (int(limit),),
+                (owner, owner, int(limit)),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
@@ -216,14 +260,15 @@ class SqliteLongTermMemory(LongTermMemory):
             ).fetchone()
         return self._row_to_dict(row) if row else None
 
-    def search(self, keyword: str, limit: int = 5):
+    def search(self, keyword: str, limit: int = 5, owner: str | None = None):
         pattern = f"%{keyword.strip()}%"
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM agent_long_term_memory"
-                " WHERE summary LIKE ? OR keywords LIKE ?"
+                " WHERE (summary LIKE ? OR keywords LIKE ?)"
+                " AND (? IS NULL OR owner=?)"
                 " ORDER BY updated_at DESC LIMIT ?",
-                (pattern, pattern, int(limit)),
+                (pattern, pattern, owner, owner, int(limit)),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
