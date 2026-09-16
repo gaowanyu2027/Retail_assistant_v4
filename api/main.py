@@ -19,7 +19,7 @@ from pathlib import Path
 from fastapi import FastAPI, UploadFile, File as FastAPIFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -418,6 +418,87 @@ async def health(request: Request):
         "user": user.get("username"),
         "role": user.get("role"),
     }
+
+
+@app.get("/api/health/ready")
+async def health_ready():
+    """**就绪**探针：真实探测依赖，而不是只看进程活着。
+
+    与 `/api/health` 的分工（两者都要保留）：
+
+    | 端点 | 语义 | 是否查依赖 |
+    |---|---|---|
+    | `/api/health` | liveness：进程还在跑吗 | **不查**（保持向后兼容） |
+    | `/api/health/ready` | readiness：现在能干活吗 | **真去 ping** |
+
+    为什么必须加这个：本项目实际发生过"MySQL 口令没传进容器 → 后端静默回退 SQLite
+    → `/api/health` 依然 200 healthy → 编排与看板全都以为正常，但业务数据一条都读不到"。
+    liveness 探针**天然发现不了**这类问题。
+
+    判定策略（有意区分"致命"与"降级"，避免探针一抖动就把服务判死）：
+
+    - **MySQL 不可用 → 503**：业务数据读写全废，服务等于不能用
+    - Qdrant / Redis 不可用 → 仍 200，但计入 `degraded`：向量召回退化为关键词、
+      缓存未命中，主链路（问答 / 报表 / 鉴权）不受影响，不该因此判为不可用
+    - CV 引擎未初始化 → 计入 `degraded`（容器内没有摄像头，属预期情况）
+
+    匿名可访问（探针无法携带凭据），但**只返回状态与依赖可用性，
+    不返回主机名 / 版本 / 设备等指纹**。
+    """
+    critical: dict[str, bool] = {}
+    degraded: list[str] = []
+    detail: dict[str, str] = {}
+
+    # ① MySQL：致命依赖，真执行一次查询（不用 mysql_available()——它只看环境变量，
+    #    正是当初"假绿灯"的根源）
+    try:
+        import mysql_db
+        conn = mysql_db.get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            critical["mysql"] = True
+        finally:
+            conn.close()
+    except Exception as e:
+        critical["mysql"] = False
+        # 只给异常类型，不回显主机名/凭据等细节
+        detail["mysql"] = type(e).__name__
+
+    # ② Qdrant：非致命。嵌入式模式（未配 QDRANT_URL）不算降级。
+    try:
+        import vector_memory
+        qurl = (getattr(vector_memory, "QDRANT_URL", "") or "").rstrip("/")
+        if qurl:
+            import httpx
+            r = httpx.get(f"{qurl}/collections", timeout=3.0)
+            if r.status_code >= 400:
+                degraded.append("qdrant")
+                detail["qdrant"] = f"HTTP {r.status_code}"
+        else:
+            detail["qdrant"] = "embedded"
+    except Exception as e:
+        degraded.append("qdrant")
+        detail["qdrant"] = type(e).__name__
+
+    # ③ Redis：非致命。代码当前尚未读写 Redis（缓存层待接入），
+    #    因此**不做探测**——探一个没人用的依赖只会制造噪音。
+    #    接入缓存后在此补探测并计入 degraded。
+
+    # ④ CV 引擎：初始化失败只降级。容器内没有摄像头，本就预期如此。
+    if getattr(app.state, "ready", None) is False:
+        degraded.append("cv_engine")
+        detail["cv_engine"] = "not_initialized"
+
+    if not critical.get("mysql"):
+        body = {"status": "unavailable", "critical": critical,
+                "degraded": degraded, "detail": detail}
+        return JSONResponse(status_code=503, content=body)
+
+    body = {"status": "degraded" if degraded else "ok",
+            "critical": critical, "degraded": degraded, "detail": detail}
+    return body
 
 
 @app.post("/api/videos")

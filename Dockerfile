@@ -85,8 +85,14 @@ ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
 
 EXPOSE 8000
 
-# 健康检查：/api/health 为公开端点（无需登录），适合探活
+# 健康检查：用 **readiness** 端点而非 liveness。
+# /api/health 只证明进程活着；本项目实际发生过"MySQL 口令没传进容器 → 后端静默
+# 回退 SQLite → /api/health 依然 200 healthy → 编排与看板全以为正常，但业务数据
+# 一条都读不到"。改用 /api/health/ready 后，MySQL 不可用会返回 503 → 容器变
+# `unhealthy`，问题立刻可见（Qdrant/Redis 等非致命依赖只在响应体里报 degraded，
+# 不会因此判死）。
+# start-period 给足：模型预热 + 向量索引后台重建需要时间。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1
+    CMD curl -fsS http://127.0.0.1:8000/api/health/ready || exit 1
 
 CMD ["python", "run.py", "--host", "0.0.0.0", "--port", "8000"]

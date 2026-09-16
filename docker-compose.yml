@@ -26,9 +26,26 @@
 
 name: retail-assistant
 
+# ============================================================
+# 日志轮转（全服务共用）
+#
+# 为什么必须配：项目里有 211 处 print() 全部走 stdout，Docker 默认的
+# json-file 驱动**没有大小上限**——定时汇报（每 10 分钟一轮 LLM 摘要）+
+# 销量目录扫描（每 60 秒）持续写日志，长期运行会把宿主机磁盘逐步吃满，
+# 而磁盘满又会连带 MySQL 写入失败，属于典型的"平时无感、出事很惨"。
+#
+# 上限给到 50MB × 5 个文件（单服务约 250MB 封顶），足够排查问题。
+# ============================================================
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   # ---------------- 业务后端（本项目） ----------------
   backend:
+    logging: *default-logging
     build:
       context: .
       dockerfile: Dockerfile
@@ -98,6 +115,7 @@ services:
 
   # ---------------- MySQL（业务数据持久化） ----------------
   mysql:
+    logging: *default-logging
     image: mysql:8.0
     restart: unless-stopped
     command:
@@ -123,6 +141,7 @@ services:
 
   # ---------------- Qdrant（向量检索，Server 模式） ----------------
   qdrant:
+    logging: *default-logging
     image: qdrant/qdrant:latest
     restart: unless-stopped
     # 同上：向量库仅在 compose 网络内被 backend 访问。
@@ -148,6 +167,7 @@ services:
   #       仍能登录**；搬进 Redis 会削弱该隔离，且 Redis 重启会丢掉限流状态。
   #     - 实时视频帧 / _active_camera：高频且体积大，进程内比走网络快。
   redis:
+    logging: *default-logging
     image: redis:7-alpine
     restart: unless-stopped
     command:

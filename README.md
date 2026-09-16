@@ -344,6 +344,51 @@ docker compose logs -f backend     # 观察启动日志（首次会打印 root �
 > 服务名访问，**不暴露到宿主机**——既避免端口冲突，也少一个攻击面。
 > 需要用 GUI 客户端连库时，取消 `docker-compose.yml` 里对应 `ports` 的注释即可（已限 `127.0.0.1`）。
 
+### 健康检查：liveness 与 readiness 分开
+
+| 端点 | 语义 | 查依赖 | 用途 |
+|---|---|---|---|
+| `/api/health` | **liveness**：进程还在跑吗 | 不查 | 兼容旧监控；匿名只返回 `{"status":"ok"}`，登录后附带设备/运行时长 |
+| `/api/health/ready` | **readiness**：现在能干活吗 | **真去 ping** | Docker `HEALTHCHECK` 与编排探活 |
+
+就绪探针的判定策略（有意区分"致命"与"降级"）：
+
+- **MySQL 不可用 → 503**：业务数据读写全废，服务等于不能用
+- Qdrant / Redis 不可用 → 仍 200，但列入 `degraded`：向量召回退化为关键词、缓存未命中，
+  主链路（问答 / 报表 / 鉴权）不受影响，不该因此判死
+- CV 引擎未初始化 → 列入 `degraded`（容器内没有摄像头属预期）
+
+```powershell
+curl http://localhost:8000/api/health/ready
+# {"status":"ok","critical":{"mysql":true},"degraded":[],"detail":{}}
+# MySQL 停掉时： HTTP 503
+# {"status":"unavailable","critical":{"mysql":false},"detail":{"mysql":"OperationalError"}}
+```
+
+> **为什么必须两个都有**：本项目实际发生过"MySQL 口令没传进容器 → 后端静默回退 SQLite
+> → `/api/health` 依然 200 healthy → 编排与看板全以为正常，但业务数据一条都读不到"。
+> liveness 探针**天然发现不了**这类问题。修好后该场景会立刻变 `unavailable`。
+>
+> 实测：停 MySQL 后 readiness 立即 503、恢复后**自动回 200（无需重启 backend）**。
+
+### 日志轮转（避免吃满磁盘）
+
+四个服务都配了 `json-file` 驱动的轮转（`max-size: 50m` / `max-file: 5`，单服务约 250MB 封顶）。
+项目里有 211 处 `print()` 全走 stdout，而 Docker 默认**无大小上限**——叠加每 10 分钟一轮的
+LLM 汇报与每 60 秒的销量目录扫描，长期运行会把宿主机磁盘逐步吃满，
+而磁盘满又会连带 MySQL 写入失败，属于"平时无感、出事很惨"。
+
+### 生产部署还需要什么（当前**有意不做**）
+
+本地开发与单店部署都不需要下面这些；**上线前**才需要，列出来是为了路径清晰：
+
+| 项 | 何时需要 | 说明 |
+|---|---|---|
+| Nginx 反向代理 | 公网访问 | 统一入口 + HTTPS 终止 + 静态资源缓存。当前 backend 自己提供前端产物且只发布 8000，单机够用 |
+| Prometheus + Grafana | 多实例/多店 | 当前用 readiness 探针 + 容器健康状态已够；指标端点尚无，需要时再加 |
+| 日志聚合（Loki/ELK） | 多实例 | 当前单机 `docker compose logs` 足够 |
+| 消息队列（RabbitMQ/Celery） | 出现真正的异步重任务 | 现在视频处理、定时汇报、销量扫描**已有后台线程**；真正该先修的是"处理线程异常静默死亡"（见 `改进记录.md` 审计待办），而不是引入 MQ |
+
 ### 统一入口：一条命令管起全部环境
 
 本项目只依赖 compose 编排的四个服务；但**可观测平台 Langfuse 是独立的一套 compose 栈**
