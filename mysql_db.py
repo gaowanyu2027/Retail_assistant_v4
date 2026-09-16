@@ -33,13 +33,24 @@ def get_connection(database: str = MYSQL_DB):
 
     返回的连接语义与旧实现完全一致（cursor()/close()/autocommit），
     close() 归还连接池而非真正断开。
+
+    ⚠ 对 `DBPoolBusy`（池满）**必须原样抛出**，不能走下面的通用降级：
+    实测这条 `except Exception` 会把池满异常吞掉、再新建一条不受限的裸连接——
+    等于在 db_engine 的兜底之上**又叠了一层**，两层叠加后并发一高就会撞
+    MySQL 的 max_connections。只修 db_engine.py 是无效的。
     """
     if database == MYSQL_DB:
         try:
-            from db_engine import pooled_connection
-            return pooled_connection()
+            import db_engine
         except Exception as e:
-            print(f"[mysql_db] 连接池获取失败，降级裸连接: {e}")
+            print(f"[mysql_db] 连接池模块不可用，降级裸连接: {e}")
+        else:
+            try:
+                return db_engine.pooled_connection()
+            except db_engine.DBPoolBusy:
+                raise          # 池满：快速失败，绝不在此再开裸连接
+            except Exception as e:
+                print(f"[mysql_db] 连接池获取失败，降级裸连接: {e}")
     return pymysql.connect(
         host=MYSQL_HOST,
         port=MYSQL_PORT,
