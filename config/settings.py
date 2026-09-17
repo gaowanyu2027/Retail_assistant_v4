@@ -329,6 +329,19 @@ EMOTION_DB_PATH = str(DATA_DIR / "shop_emotion.db")
 # 视频输出目录
 VIDEO_OUTPUT_DIR = str(DATA_DIR / "videos")
 
+# ==================== 视频输入源（统一入口：open_source / kind=file 白名单） ====================
+# ⚠ 这是**安全边界**（台账 B6）：修复前 WS 的 `start_file` 接受**任意路径**，
+#   登录账号就能让服务端打开容器内任意可解码文件（并当存在性探测器）。
+#   现在 `kind=file` 只允许这些目录（相对项目根或绝对路径，逗号分隔）；
+#   `kind=upload` 更是只接受**文件名**，真实路径由服务端拼接。
+#   服务端自己配置的摄像头（config/cameras.yaml 的 source）不受此限制 —— 那是可信配置。
+VIDEO_ALLOWED_DIRS = [
+    _p.strip() for _p in os.environ.get(
+        "VIDEO_ALLOWED_DIRS", "data/videos,data/sources").split(",") if _p.strip()
+]
+# 上传视频落盘的子目录（必须与 `POST /api/videos` 的保存位置一致，供 kind=upload 映射）
+VIDEO_UPLOAD_SUBDIR = os.environ.get("VIDEO_UPLOAD_SUBDIR", "videos")
+
 # ==================== 本地语音唤醒模型配置 ====================
 # sherpa-onnx 推理设备：cpu / cuda
 SHERPA_ONNX_PROVIDER = os.environ.get("SHERPA_ONNX_PROVIDER", "cpu")

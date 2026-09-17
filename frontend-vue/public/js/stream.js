@@ -26,6 +26,7 @@ const StreamManager = {
     currentMode: 'retail',
     onFrameCallbacks: [],
     onEventCallbacks: [],
+    onSourceStatusCallbacks: [],
 
     init(canvasId) {
         this.canvas = document.getElementById(canvasId);
@@ -252,6 +253,13 @@ const StreamManager = {
                 this.onEventCallbacks.forEach(cb => cb(msg));
                 break;
 
+            // 统一状态回执（A 档）：带**机器可读的 code** 与源回显，前端据此给精确提示
+            case 'source_status':
+                console.log('[Stream] 源状态:', msg.state, msg.code || '', msg.message || '',
+                            msg.source || '');
+                this.onSourceStatusCallbacks.forEach(cb => cb(msg));
+                break;
+
             case 'status':
                 console.log('[Stream] 状态:', msg.message);
                 if (msg.status === 'finished' || msg.status === 'stopped') {
@@ -330,6 +338,27 @@ const StreamManager = {
         return { ...pick, sent };
     },
 
+    /**
+     * **统一入口**（A 档）：用一个 source 描述符打开任意视频输入。
+     *
+     *   openSource({kind: 'camera', id: 'cam_in_01'})   // 服务端配置的摄像头
+     *   openSource({kind: 'device', index: 0})          // 本机设备
+     *   openSource({kind: 'file',   path: '/app/data/sources/x.mp4'})
+     *   openSource({kind: 'upload', id: 'x.mp4'})       // 上传接口返回的文件名
+     *   openSource({kind: 'client'})                    // 浏览器采帧
+     *
+     * 取代之前三个各自为政的入口（start_webcam/start_file/start_client_camera）——
+     * 那三个保留为兼容别名，但它们**没有统一校验与统一错误码**，容易再踩"发错参数"的坑。
+     */
+    openSource(source) {
+        this.reconnectAction = { action: 'open_source', params: { source } };
+        const sent = this.sendAction('open_source', { source });
+        return { sent };
+    },
+
+    onSourceStatus(callback) { this.onSourceStatusCallbacks.push(callback); },
+
+    /** 老的三个入口保留（兼容），内部也走统一描述符，便于逐步收敛。 */
     startWebcam(cameraId = 0) {
         this.reconnectAction = { action: 'start_webcam', params: { camera_id: cameraId } };
         this.sendAction('start_webcam', { camera_id: cameraId });
