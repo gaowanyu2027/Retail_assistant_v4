@@ -378,6 +378,10 @@ VIDEO_SOURCE_ALLOWED_SCHEMES = [
     os.environ.get("VIDEO_SOURCE_ALLOWED_SCHEMES", "rtsp,rtsps").split(",") if s.strip()
 ]
 VIDEO_SOURCE_ALLOW_HTTP = os.environ.get("VIDEO_SOURCE_ALLOW_HTTP", "0") == "1"
+# 是否接受**客户端直接提交**的流地址（`open_source` 的 kind=rtsp）
+# 默认允许：守卫已能拦住 SSRF 目标（环回/链路本地/云元数据永久封禁、公网默认拒绝），
+# 演示时可以直接填门店内网的 RTSP；要"只允许服务端配置的源"时置 0。
+VIDEO_SOURCE_ALLOW_CLIENT_URL = os.environ.get("VIDEO_SOURCE_ALLOW_CLIENT_URL", "1") == "1"
 # 旧别名 `start_file` 是否也强制目录白名单（=1 严格；置 0 可临时回滚）
 # 前端已全部改用 `open_source`，所以默认就收紧；留开关只为万一要回滚。
 VIDEO_LEGACY_START_FILE_STRICT = os.environ.get("VIDEO_LEGACY_START_FILE_STRICT", "1") == "1"

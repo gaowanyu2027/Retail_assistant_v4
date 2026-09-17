@@ -43,6 +43,7 @@ from config.settings import (
     DATA_DIR,
     PROJECT_ROOT,
     VIDEO_ALLOWED_DIRS,
+    VIDEO_SOURCE_ALLOW_CLIENT_URL,
     VIDEO_SOURCE_ALLOW_HTTP,
     VIDEO_SOURCE_ALLOW_PRIVATE,
     VIDEO_SOURCE_ALLOW_PUBLIC,
@@ -56,6 +57,7 @@ KIND_DEVICE = "device"
 KIND_FILE = "file"
 KIND_UPLOAD = "upload"
 KIND_CLIENT = "client"
+KIND_RTSP = "rtsp"        # 客户端直传的流地址（校验后放行）
 
 # 各 kind 对应的**老动作**（内部转发用；对外仍是同一套描述符）
 _LEGACY = {
@@ -64,6 +66,7 @@ _LEGACY = {
     KIND_CAMERA: "start_file",
     KIND_UPLOAD: "start_file",
     KIND_CLIENT: "start_client_camera",
+    KIND_RTSP: "start_file",          # RTSP/URL 走 start_file（cv2 直接吃 URL）
 }
 
 _VIDEO_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
@@ -162,12 +165,18 @@ def normalize(source, camera_ids: list[str] | None = None) -> dict:
     kind = str(source.get("kind") or "").strip().lower()
 
     # ---- 客户端直传 URL：明确拒绝（SSRF 面，见 B1）----
+    # ---- rtsp：客户端直传流地址（**校验后放行**）----
+    # 早期版本这里是"一律拒绝"（`unsupported_kind`），因为那时还没有守卫；
+    # 现在 `guard_url` 能拦住 SSRF 目标（环回/链路本地/云元数据一律封禁、公网默认拒），
+    # 所以升级为"校验后放行" —— 演示时可以直接填门店内网的 RTSP。
     if kind in ("rtsp", "url", "http", "https"):
-        raise SourceError(
-            "unsupported_kind",
-            "不接受客户端直传的流地址（服务端会替你去连任意地址）。"
-            "请先用 POST /api/cameras 注册摄像头，再用 kind=camera 打开。",
-        )
+        url = str(source.get("url") or source.get("path") or "").strip()
+        if not url:
+            raise SourceError("bad_request", f"kind={kind} 需要 url")
+        safe = guard_url(url, client_supplied=True)
+        return {"kind": KIND_RTSP, "legacy_action": "start_file",
+                "params": {"file_path": safe},
+                "echo": {"kind": KIND_RTSP, "url": mask_credentials(safe)}}
     if kind not in _LEGACY:
         raise SourceError("unsupported_kind",
                           f"未知的视频源类型 {kind!r}；支持: {', '.join(_LEGACY)}")
@@ -335,6 +344,10 @@ def guard_url(url: str, *, client_supplied: bool = False) -> str:
     elif scheme not in VIDEO_SOURCE_ALLOWED_SCHEMES:
         raise SourceError("unsupported_scheme",
                           f"不支持的协议 {scheme!r}；允许: {', '.join(VIDEO_SOURCE_ALLOWED_SCHEMES)}")
+    if client_supplied and not VIDEO_SOURCE_ALLOW_CLIENT_URL:
+        # 总开关：默认允许（守卫已能拦住 SSRF 目标）；要"只允许服务端配置的源"时置 0
+        raise SourceError("client_url_disabled",
+                          "当前配置不接受客户端直接提交的流地址（VIDEO_SOURCE_ALLOW_CLIENT_URL=0）")
 
     host = parsed.hostname
     if not host:
@@ -463,6 +476,10 @@ def capabilities() -> dict:
              "upload_dir": str(upload_dir())},
             {"kind": KIND_CLIENT, "available": True,
              "note": "浏览器采帧（getUserMedia）：容器里也能用，摄像头归浏览器所在机器"},
+            {"kind": KIND_RTSP, "available": VIDEO_SOURCE_ALLOW_CLIENT_URL,
+             "reason": None if VIDEO_SOURCE_ALLOW_CLIENT_URL else "当前配置不接受客户端提交流地址",
+             "note": "直传网络摄像头地址（rtsp://）：服务端做 SSRF 校验"
+                     "（环回/链路本地/云元数据一律拒；公网默认拒；私网放行）"},
         ],
         "cameras": cameras,
         "limits": {

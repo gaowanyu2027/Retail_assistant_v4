@@ -22,6 +22,10 @@
                     :disabled="!capClient.enabled" :title="capClient.reason || ''">
               本机摄像头{{ capClient.enabled ? '' : '（不可用）' }}
             </button>
+            <button type="button" @click="startRtspCamera"
+                    :disabled="!capRtsp.enabled" :title="capRtsp.reason || ''">
+              网络摄像头 RTSP{{ capRtsp.enabled ? '' : '（不可用）' }}
+            </button>
             <div v-if="cameraHint" class="camera-menu-hint">{{ cameraHint }}</div>
           </div>
         </div>
@@ -259,6 +263,10 @@ export default {
     },
     capClient() {
       const k = this.capKinds.client
+      return { enabled: !k || k.available !== false, reason: (k && k.reason) || '' }
+    },
+    capRtsp() {
+      const k = this.capKinds.rtsp
       return { enabled: !k || k.available !== false, reason: (k && k.reason) || '' }
     },
     capCamera() {
@@ -546,6 +554,25 @@ export default {
       } catch (e) {
         console.warn('[Camera] 视频源能力查询失败（菜单按默认可用渲染）:', e)
       }
+    },
+    // 网络摄像头（RTSP）：直传地址，由**服务端做 SSRF 校验**后再打开
+    async startRtspCamera() {
+      this.cameraMenuOpen = false
+      const url = window.prompt('输入网络摄像头地址（rtsp:// 或 rtsps://）', 'rtsp://')
+      if (!url) return
+      const clean = url.trim()
+      if (!/^rtsps?:\/\//i.test(clean)) {
+        window.updateStatus('warning', '只支持 rtsp:// 或 rtsps:// 地址')
+        return
+      }
+      this.cameraSourceDesc = clean
+      this.cameraActive = true
+      this.sourceType = 'webcam'
+      this.framesSeen = false
+      window.updateStatus('warning', '正在打开网络摄像头…')
+      const r = StreamManager.openSource({ kind: 'rtsp', url: clean })
+      if (!r.sent) window.updateStatus('warning', '正在建立连接，连上后自动补发…')
+      if (this.currentMode === 'emotion') this.updateEmoStatus(true)
     },
     // ==================== 视频控制 ====================
     async startServerCamera() {
