@@ -133,9 +133,11 @@ def init_schema():
             visit_count INT UNSIGNED NOT NULL DEFAULT 0,
             total_dwell_seconds DECIMAL(12,3) NOT NULL DEFAULT 0,
             heat_score DECIMAL(10,3) NOT NULL DEFAULT 0,
+            source VARCHAR(16) NOT NULL DEFAULT 'video',
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY uq_retail_period_zone (period_key, zone_id),
-            INDEX idx_retail_zone_time (zone_id, period_start, period_end)
+            INDEX idx_retail_zone_time (zone_id, period_start, period_end),
+            INDEX idx_retail_source (source)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
 
@@ -339,6 +341,25 @@ def init_schema():
                 "AFTER visit_count"
             )
 
+        # retail_stats.source：与 product_sales.source 同一约定（video=真实采集 /
+        # simulated=演示 / test=验证）。台账 A8：此前热度表没有来源字段，
+        # 演示数据（period_key 以 demo 开头）会被时段分析当成真实客流。
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema=%s AND table_name='retail_stats' AND column_name='source'",
+            (MYSQL_DB,),
+        )
+        if int(cur.fetchone()[0]) == 0:
+            cur.execute(
+                "ALTER TABLE retail_stats "
+                "ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'video' AFTER heat_score, "
+                "ADD INDEX idx_retail_source (source)"
+            )
+            # 回填历史数据：period_key 以 demo 开头的一律标为演示数据（同 product_sales 的迁法）
+            cur.execute(
+                "UPDATE retail_stats SET source='simulated' WHERE period_key LIKE 'demo%%'"
+            )
+
         cur.execute(
             "SELECT COUNT(*) FROM information_schema.columns "
             "WHERE table_schema=%s AND table_name='query_history' AND column_name='conversation_id'",
@@ -481,6 +502,23 @@ def import_roi_configs():
                 total += cur.rowcount
     conn.close()
     return total
+
+
+def get_roi_zone_ids() -> set[str]:
+    """返回已配置的区域 id 集合（server + local）。
+
+    用途：销量导入前的 zone_id 校验（台账 A14）。`shelf_a` 与 `shelf_A` 只差大小写，
+    落库后会变成两个区域 —— 销量进了"幽灵区域"，热度还在真区域上，
+    "看了不买 / 没看就买"的四象限诊断会直接反向。参照物以 `roi_config` 表为准
+    （启动时由 `import_roi_configs` 从 YAML 同步，运行时 API 新增的区域也在里面）。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT zone_id FROM roi_config")
+            return {str(r[0]).strip() for r in cur.fetchall() if r[0]}
+    finally:
+        conn.close()
 
 
 def insert_emotion_record(camera_id: str, emotion: str, conf: float):
@@ -949,8 +987,15 @@ def save_retail_stats(
     zones: dict,
     period_start: str | None = None,
     period_end: str | None = None,
+    source: str = "video",
 ):
-    """保存零售热度统计快照，同一分钟同一区域只保留最新值。"""
+    """保存零售热度统计快照，同一分钟同一区域只保留最新值。
+
+    source：数据来源标记 —— `video`=真实视频采集 / `simulated`=演示数据 / `test`=验证测试。
+    台账 A8：以前这张表**没有来源字段**，演示数据与真实采集混在同一张表里，
+    时段分析（`hourly_traffic` / `zone_depth`）据此给出的排班/陈列建议可能建立在假数据上。
+    现在按销量侧（`product_sales.source`）同样的约定显式标注。
+    """
     now = datetime.now()
     period_start = period_start or now.strftime("%Y-%m-%d %H:%M:%S")
     period_end = period_end or now.strftime("%Y-%m-%d %H:%M:%S")
@@ -963,8 +1008,8 @@ def save_retail_stats(
                     INSERT INTO retail_stats
                     (period_key, zone_id, zone_type, zone_label,
                      period_start, period_end, visit_count, deep_interest_count,
-                     total_dwell_seconds, heat_score)
-                    VALUES (%s, %s, 'shelf', %s, %s, %s, %s, %s, %s, %s)
+                     total_dwell_seconds, heat_score, source)
+                    VALUES (%s, %s, 'shelf', %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                         zone_label=VALUES(zone_label),
                         period_start=VALUES(period_start),
@@ -972,7 +1017,8 @@ def save_retail_stats(
                         visit_count=VALUES(visit_count),
                         deep_interest_count=VALUES(deep_interest_count),
                         total_dwell_seconds=VALUES(total_dwell_seconds),
-                        heat_score=VALUES(heat_score)
+                        heat_score=VALUES(heat_score),
+                        source=VALUES(source)
                     """,
                     (
                         period_key,
@@ -984,6 +1030,7 @@ def save_retail_stats(
                         z.get("deep_interest_count", 0),
                         z.get("total_dwell_seconds", 0),
                         z.get("heat_score", 0),
+                        source or "video",
                     ),
                 )
     finally:
@@ -1183,7 +1230,8 @@ def get_track_visit_paths(source: str | None = None, limit: int = 2000) -> list[
 
 
 def get_retail_stats_by_zone(period_key: str | None = None, hours: int = 1,
-                             until_key: str | None = None) -> list[dict]:
+                             until_key: str | None = None,
+                             source: str | None = None) -> list[dict]:
     """按区域聚合最近 N 小时视频热度（与销量比对用）。
 
     ⚠ period_key 有两种粒度，本函数**两种都要支持**：
@@ -1199,38 +1247,44 @@ def get_retail_stats_by_zone(period_key: str | None = None, hours: int = 1,
     `until_key`：可选的**上界**（同样按 period_key 字符串比较，因为它是 YYYYMMDDHHMM
     这种可直接字典序比较的格式）。用于"本小时只过了 N 分钟"时与历史**相同已过分钟数**
     对齐——否则会拿"5 分钟的数据"去比"昨天整小时"，得出 -93% 这种假暴跌。
+
+    `source`（台账 A8）：可选来源过滤 —— `"video"` 只看真实采集、`"simulated"` 只看演示
+    数据、`None`（默认）不过滤。调用方**必须自己决定**要不要把演示数据算进去，
+    分析类接口在混入非 video 数据时也要在结论里标注。
     """
     conn = get_connection()
+    _src_sql = " AND source=%s" if source else ""
+    _src_arg: tuple = (source,) if source else ()
     try:
         with conn.cursor() as cur:
             if period_key:
                 if len(period_key) >= 12:
                     cur.execute(
                         "SELECT zone_id, MAX(zone_label), MAX(visit_count), MAX(total_dwell_seconds), MAX(heat_score)"
-                        " FROM retail_stats WHERE period_key=%s GROUP BY zone_id",
-                        (period_key,),
+                        " FROM retail_stats WHERE period_key=%s" + _src_sql + " GROUP BY zone_id",
+                        (period_key, *_src_arg),
                     )
                 elif until_key:
                     # 小时粒度 + 截断上界：只取"到同一分钟为止"的快照
                     cur.execute(
                         "SELECT zone_id, MAX(zone_label), MAX(visit_count), MAX(total_dwell_seconds), MAX(heat_score)"
                         " FROM retail_stats WHERE period_key LIKE %s AND period_key <= %s"
-                        " GROUP BY zone_id",
-                        (period_key + "%", until_key),
+                        + _src_sql + " GROUP BY zone_id",
+                        (period_key + "%", until_key, *_src_arg),
                     )
                 else:
                     # 小时（或更短）粒度：前缀匹配该整点的所有分钟快照
                     cur.execute(
                         "SELECT zone_id, MAX(zone_label), MAX(visit_count), MAX(total_dwell_seconds), MAX(heat_score)"
-                        " FROM retail_stats WHERE period_key LIKE %s GROUP BY zone_id",
-                        (period_key + "%",),
+                        " FROM retail_stats WHERE period_key LIKE %s" + _src_sql + " GROUP BY zone_id",
+                        (period_key + "%", *_src_arg),
                     )
             else:
                 cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
                 cur.execute(
                     "SELECT zone_id, MAX(zone_label), MAX(visit_count), MAX(total_dwell_seconds), MAX(heat_score)"
-                    " FROM retail_stats WHERE period_end >= %s GROUP BY zone_id",
-                    (cutoff,),
+                    " FROM retail_stats WHERE period_end >= %s" + _src_sql + " GROUP BY zone_id",
+                    (cutoff, *_src_arg),
                 )
             rows = cur.fetchall()
     finally:

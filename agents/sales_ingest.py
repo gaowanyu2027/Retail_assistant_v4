@@ -86,6 +86,40 @@ def period_key_now(dt: datetime | None = None) -> str:
     return (dt or datetime.now()).strftime("%Y%m%d%H")
 
 
+def period_bounds(pk: str) -> tuple[str, str] | None:
+    """按 period_key 推导该时段的 [start, end]（**纯函数**，便于离线单测）。
+
+    台账 A9：补录历史批次时如果只给 period_key、不给时间边界，落库会**默认填导入时刻**，
+    于是"上周三 14 点"的销量被算进"最近 1 小时"，把当期报表带偏。
+    这里从 period_key 反推真实时段：
+      - `YYYYMMDDHH`   → 该小时 [HH:00:00, HH:59:59]
+      - `YYYYMMDDHHMM` → 该分钟 [MM:00, MM:59]
+    演示命名空间（`demo*`）与非法格式返回 None（由调用方决定怎么办）。
+    """
+    s = str(pk or "").strip()
+    if not s or s.startswith(DEMO_PREFIX) or not s.isdigit():
+        return None
+    fmt = None
+    if len(s) == 10:
+        fmt = "%Y%m%d%H"
+    elif len(s) == 12:
+        fmt = "%Y%m%d%H%M"
+    if fmt is None:
+        return None
+    try:
+        dt = datetime.strptime(s, fmt)
+    except ValueError:
+        return None
+    if len(s) == 10:
+        start = dt
+        end = dt.replace(minute=59, second=59)
+    else:
+        start = dt
+        end = dt.replace(second=59)
+    f = "%Y-%m-%d %H:%M:%S"
+    return start.strftime(f), end.strftime(f)
+
+
 def parse_sales_csv(text: str) -> list[dict]:
     """解析销量 CSV。
 
@@ -125,20 +159,51 @@ def parse_sales_csv(text: str) -> list[dict]:
     return rows
 
 
+def validate_zone_ids(zone_ids: list[str], known: set[str]) -> list[tuple[str, str]]:
+    """校验 zone_id 是否是已配置区域（**纯函数**，便于离线单测）。
+
+    台账 A14：`shelf_a` 与 `shelf_A` 只差一个字母大小写，落库后会变成两个区域 ——
+    销量落在"幽灵区域"上，热度却在真区域上，"看了不买/没看就买"的四象限诊断直接反向。
+
+    Returns: [(zone_id, 原因), ...]，空列表表示全部通过。
+    known 为空时不做校验（没有参照物时不能凭空拒绝，否则 ROI 还没配就完全导不进来）。
+    """
+    if not known:
+        return []
+    lower_map = {k.lower(): k for k in known}
+    bad: list[tuple[str, str]] = []
+    for zid in zone_ids:
+        if zid in known:
+            continue
+        hit = lower_map.get(str(zid).lower())
+        if hit:
+            bad.append((zid, f"与已配置区域 '{hit}' 仅大小写不同 → 会造出幽灵区域，请改用配置里的写法"))
+        else:
+            bad.append((zid, f"不在已配置区域里（已配置：{', '.join(sorted(known))}）"))
+    return bad
+
+
 def import_sales(records: list[dict], period_key: str | None = None,
-                 source: str = SOURCE_POS) -> dict:
+                 source: str = SOURCE_POS,
+                 period_start: str | None = None,
+                 period_end: str | None = None,
+                 allow_unknown_zones: bool = False) -> dict:
     """批量导入真实销量。
 
     Args:
         records: [{"zone_id", "sold_count", "sales_amount"}, ...]
-        period_key: 时段标识；缺省取当前整点（YYYYMMDDHH）
+        period_key: 时段标识；缺省取当前整点（YYYYMMDDHH）。
+            **补录历史批次时边界会自动按它推导**（台账 A9），不会落到导入时刻。
         source: 来源标记，默认 pos（真实接入）；测试数据请显式传 SOURCE_TEST
+        period_start / period_end: 显式时段边界（一般不用传，留作兜底）
+        allow_unknown_zones: 允许导入未配置区域（默认 False，台账 A14 的校验）
 
     Returns:
-        {"imported": n, "period_key": pk, "source": source, "zones": [...]}
+        {"imported": n, "period_key": pk, "source": source, "zones": [...],
+         "period_start": ..., "period_end": ..., "unknown_zones": [...]}
 
     Raises:
-        ValueError: 记录为空 / 字段非法 / 试图写入演示命名空间
+        ValueError: 记录为空 / 字段非法 / 写入演示命名空间 / zone_id 不在已配置区域
     """
     import mysql_db
 
@@ -167,6 +232,26 @@ def import_sales(records: list[dict], period_key: str | None = None,
             raise ValueError(f"第 {i} 条记录出现负数：{r}")
         normalized.append({"zone_id": zone_id, "sold_count": sold, "sales_amount": amount})
 
+    # 台账 A14：zone_id 必须能对上已配置区域，否则销量会落到"幽灵区域"上
+    unknown: list[tuple[str, str]] = []
+    try:
+        known = mysql_db.get_roi_zone_ids()
+    except Exception:
+        known = set()                      # ROI 读不到就跳过校验（不能因此挡住导入）
+    if known:
+        unknown = validate_zone_ids([r["zone_id"] for r in normalized], known)
+        if unknown and not allow_unknown_zones:
+            detail = "；".join(f"{z}: {why}" for z, why in unknown)
+            raise ValueError(
+                f"zone_id 校验失败（{len(unknown)} 个）：{detail}。"
+                "确需导入未配置区域请显式传 allow_unknown_zones=True"
+            )
+
+    # 台账 A9：时段边界按 period_key 推导（补录历史批次不能算成"刚刚"）
+    bounds = period_bounds(pk)
+    start = period_start or (bounds[0] if bounds else None)
+    end = period_end or (bounds[1] if bounds else None)
+
     for r in normalized:
         mysql_db.save_product_sales(
             zone_id=r["zone_id"],
@@ -174,6 +259,8 @@ def import_sales(records: list[dict], period_key: str | None = None,
             sold_count=r["sold_count"],
             sales_amount=r["sales_amount"],
             source=source,
+            period_start=start,
+            period_end=end,
         )
 
     return {
@@ -181,4 +268,7 @@ def import_sales(records: list[dict], period_key: str | None = None,
         "period_key": pk,
         "source": source,
         "zones": [r["zone_id"] for r in normalized],
+        "period_start": start,
+        "period_end": end,
+        "unknown_zones": [z for z, _ in unknown],
     }

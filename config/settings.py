@@ -290,8 +290,14 @@ EMOTION_RECENT_MAX = 200
 EMOTION_RECENT_DEFAULT_LIMIT = 20
 # 表情置信度过滤阈值
 EMOTION_CONF_THRESHOLD = 0.3
-# 表情趋势最少样本数
+# 表情趋势最少样本数（**总数**下界，历史参数）
 EMOTION_TREND_MIN_SAMPLES = 10
+# 表情趋势「前后半段各自」的最少样本数：总数门槛 = 2×该值（默认 40）。
+# 只有总数下界时，10 个样本会被劈成两半各 5 个 —— 一个 sad 就能把结论推成"明显下降"（台账 A19）。
+EMOTION_TREND_MIN_PER_HALF = int(os.environ.get("EMOTION_TREND_MIN_PER_HALF", "20"))
+# 趋势显著性门槛：两段正向率之差的两比例 z 检验临界值（1.96 ≈ 95%）。
+# 达不到就只能报"基本稳定/在随机波动范围内"，不能报"明显下降"。
+EMOTION_TREND_Z_THRESHOLD = float(os.environ.get("EMOTION_TREND_Z_THRESHOLD", "1.96"))
 # 情绪变化大阈值
 EMOTION_DELTA_LARGE = 0.1
 # 情绪变化小阈值
@@ -320,6 +326,23 @@ EVENT_CROWD_THRESHOLD = 5
 EVENT_TRAJECTORY_CHECK_FRAMES = 90
 # 人群聚集事件去重窗口
 EVENT_CROWD_FRAME_WINDOW = 30
+
+# ==================== 新分析模块口径（客流计数 / 空货架） ====================
+# ⚠ 这几个参数是「口径」不是「调参」：以前它们写死在代码里，且单位是**帧**，
+#   于是在 fps≠30 的源上数字会系统性错（A17/A18 台账条目）。
+# 门口客流「离开判定」：进店轨迹连续未出现多少**秒**算离店。
+# 默认 1.0 秒 = 原来写死的 30 帧在 30fps 下的等价行为（口径不变，只是不再随 fps 漂移）。
+FOOTFALL_EXIT_MISSING_SECONDS = float(
+    os.environ.get("FOOTFALL_EXIT_MISSING_SECONDS", "1.0")
+)
+# 空货架判定窗口（秒）：只统计最近这段时间内的到访人数
+EMPTY_SHELF_WINDOW_SECONDS = float(os.environ.get("EMPTY_SHELF_WINDOW_SECONDS", "300"))
+# 空货架判定最少观察时长（秒）：观察不足时**不下结论**（否则刚启动每个货架都报"需补货"）
+EMPTY_SHELF_MIN_OBSERVE_SECONDS = float(
+    os.environ.get("EMPTY_SHELF_MIN_OBSERVE_SECONDS", "60")
+)
+# 空货架判定阈值：窗口内到访**人数**低于该值视为可能空置
+EMPTY_SHELF_MIN_VISITS = int(os.environ.get("EMPTY_SHELF_MIN_VISITS", "3"))
 
 # ==================== API配置 ====================
 # FastAPI 监听地址

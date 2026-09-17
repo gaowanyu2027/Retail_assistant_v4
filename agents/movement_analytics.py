@@ -8,6 +8,9 @@
 - 置信度 confidence(A→B) = A→B 出现的轨迹数 / 访问过 A 的轨迹数（A 之后去 B 的比例）
 - 提升度可选（后续扩展）
 
+⚠ **两种指标都按"轨迹"去重**（同一条轨迹里重复走 A→B 只算一次）。
+原实现累加的是"转移发生次数"，分母却是轨迹数 → 支持度会超过 100%（台账 A16）。
+
 数据源：track_visit_paths（视频管线自动落库 / 测试模拟数据）
 """
 import json
@@ -29,27 +32,59 @@ def analyze_movement_paths(source: str | None = None, limit: int = 2000, top: in
     import mysql_db
 
     paths = mysql_db.get_track_visit_paths(source=source, limit=limit)
-    total = len(paths)
+    pairs, zone_flow, total = _aggregate_paths(paths)
 
-    # 转移计数：count[(A,B)]；A 的访问次数：from_count[A]
-    trans = Counter()
-    from_count = Counter()
+    summary = _summarize(pairs, total)
+    return {
+        "total_paths": total,
+        "top_pairs": pairs[:top],
+        "zone_flow": zone_flow,
+        "summary": summary,
+        # 口径自描述：这三种指标都是**按轨迹**算的（同一轨迹内重复转移只算一次），
+        # 免得下游把 count 误当成"发生次数"
+        "counting": "per_trajectory",
+    }
+
+
+def _aggregate_paths(paths: list[dict]) -> tuple[list[dict], dict, int]:
+    """把动线明细聚合成 A→B 关联（**纯函数**，便于离线单测）。
+
+    ⚠ 口径（台账 A16）：三种指标的分子分母都按**轨迹数**去重，不是"转移发生次数"：
+    - support(A→B)     = 出现过 A→B 的轨迹数 / 总轨迹数      → 天然 ≤ 1
+    - confidence(A→B)  = 出现过 A→B 的轨迹数 / 访问过 A 的轨迹数
+    - visits(A)        = 访问过 A 的轨迹数
+    原实现直接累加转移次数（一条轨迹里逛 A→B→A→B 会记两次），
+    而分母用的是轨迹数 —— 于是**支持度能超过 100%**，与文档写的口径也不一致。
+    """
+    total = len(paths)
+    trans = Counter()          # (A,B) → 出现过该转移的**轨迹数**（同轨迹重复只算一次）
+    visit_count = Counter()    # zone → 访问过该区域的**轨迹数**
     zone_label: dict[str, str] = {}
+
     for p in paths:
         zones = [z for z in (p.get("path") or []) if isinstance(z, dict) and z.get("zone_id")]
-        for i in range(len(zones) - 1):
-            a = zones[i]["zone_id"]
-            b = zones[i + 1]["zone_id"]
-            zone_label[a] = zones[i].get("zone_label") or zone_label.get(a, a)
-            zone_label[b] = zones[i + 1].get("zone_label") or zone_label.get(b, b)
-            if a != b:  # 同区连续访问不算转移
-                trans[(a, b)] += 1
-                from_count[a] += 1
+        if not zones:
+            continue
+        seen_zones: set[str] = set()
+        seen_trans: set[tuple[str, str]] = set()
+        for i, z in enumerate(zones):
+            zid = z["zone_id"]
+            zone_label[zid] = z.get("zone_label") or zone_label.get(zid, zid)
+            seen_zones.add(zid)
+            if i + 1 < len(zones):
+                nxt = zones[i + 1]["zone_id"]
+                if zid != nxt:                  # 同区连续访问不算转移
+                    seen_trans.add((zid, nxt))
+        for zid in seen_zones:
+            visit_count[zid] += 1
+        for key in seen_trans:
+            trans[key] += 1
 
     # 置信度排序
     pairs = []
     for (a, b), cnt in trans.items():
-        conf = cnt / from_count[a] if from_count[a] else 0
+        denom = visit_count.get(a, 0)
+        conf = cnt / denom if denom else 0
         pairs.append({
             "from_zone": a, "from_label": zone_label.get(a, a),
             "to_zone": b, "to_label": zone_label.get(b, b),
@@ -59,9 +94,9 @@ def analyze_movement_paths(source: str | None = None, limit: int = 2000, top: in
         })
     pairs.sort(key=lambda x: (x["confidence"], x["count"]), reverse=True)
 
-    # 每区域最常去的下一站
+    # 每区域最常去的下一站（含"只进不出"的区域，如出口：visits 有值、top_next 为空）
     zone_flow = {}
-    for a in from_count:
+    for a in visit_count:
         nexts = defaultdict(int)
         for (fa, fb), cnt in trans.items():
             if fa == a:
@@ -69,20 +104,14 @@ def analyze_movement_paths(source: str | None = None, limit: int = 2000, top: in
         top_next = sorted(nexts.items(), key=lambda x: x[1], reverse=True)[:3]
         zone_flow[a] = {
             "label": zone_label.get(a, a),
-            "visits": from_count[a],
+            "visits": visit_count[a],
             "top_next": [
                 {"zone_id": z, "label": zone_label.get(z, z), "count": c}
                 for z, c in top_next
             ],
         }
 
-    summary = _summarize(pairs, total)
-    return {
-        "total_paths": total,
-        "top_pairs": pairs[:top],
-        "zone_flow": zone_flow,
-        "summary": summary,
-    }
+    return pairs, zone_flow, total
 
 
 def _summarize(pairs: list[dict], total: int) -> str:
