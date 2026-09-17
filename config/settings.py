@@ -408,6 +408,12 @@ VIDEO_SOURCE_ALLOW_CLIENT_URL = os.environ.get("VIDEO_SOURCE_ALLOW_CLIENT_URL", 
 # 旧别名 `start_file` 是否也强制目录白名单（=1 严格；置 0 可临时回滚）
 # 前端已全部改用 `open_source`，所以默认就收紧；留开关只为万一要回滚。
 VIDEO_LEGACY_START_FILE_STRICT = os.environ.get("VIDEO_LEGACY_START_FILE_STRICT", "1") == "1"
+# 「打开超时」看门狗（秒）：客户端要求打开视频源后，这么多秒内**一帧都没产出**就报错并停止。
+# 为什么要它：首帧前失败/卡住是最常见的故障形态（依赖缺失、模型加载慢或失败、源不可达），
+# 而"处理线程崩溃"这条通道只能覆盖崩溃，覆盖不了"线程还活着但一直不出画面"。
+# 默认给到 120 秒是**故意宽松**：容器里 YOLO 冷启动 + 首次推理实测可能接近 60 秒，
+# 设太小会把"正常但慢"误判成失败。
+VIDEO_OPEN_TIMEOUT_SECONDS = int(os.environ.get("VIDEO_OPEN_TIMEOUT_SECONDS", "120"))
 
 # ==================== 视频上传（POST /api/videos）====================
 # 台账 B11：原来"无大小限制、无内容校验、同名静默覆盖"——上传会造出**可播放的视频源**，

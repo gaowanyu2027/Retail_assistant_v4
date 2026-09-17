@@ -16,6 +16,12 @@ opencv-python>=4.8.0        # 图像处理
 numpy>=1.24.0               # 数值计算
 scipy>=1.10.0               # 科学计算（马氏距离等）
 filterpy>=1.4.5             # 卡尔曼滤波
+# lap：ultralytics **跟踪器**（ByteTrack/BoT-SORT）的线性分配求解器，本项目的
+# `detect_and_track` 走的就是这条路径。它**没被 ultralytics 声明为硬依赖**，
+# 而是运行时检测缺失后尝试 `AutoUpdate` 自己 pip 安装 —— 容器内是非 root，
+# 装不了，于是处理线程在**首帧之前**就抛 ModuleNotFoundError 退出，
+# 表现为"点了打开摄像头一直转圈"（实测踩过）。必须在这里显式声明。
+lap>=0.5.12                 # 目标跟踪（ultralytics 跟踪器依赖）
 
 # --- Web 框架 ---
 fastapi>=0.100.0            # FastAPI 后端
