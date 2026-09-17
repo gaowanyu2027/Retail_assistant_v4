@@ -5,6 +5,21 @@
  * - 提供 resize() 供外部在布局稳定后校正尺寸（Vue 挂载瞬间宽度为 0 时图表会塌缩成 100px）
  * - echarts 未加载（CDN 不可用）时优雅降级，不影响页面其他功能
  */
+
+/**
+ * HTML 转义（台账 B5）。
+ *
+ * ECharts 的 `tooltip.formatter` 返回的是 **HTML 字符串**，而里面会拼进
+ * `zone_label`（区域名可由任意已登录账号通过 `PUT /api/zones` 修改）——
+ * 不转义就是**存储型 XSS**：改个区域名，别人打开看板就中招。
+ * 注意：只在"要输出 HTML"的地方用；纯文本渲染不需要（也不该）走这里。
+ */
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c]);
+}
+
 const ChartManager = {
     chart: null,
     domId: null,
@@ -100,10 +115,11 @@ const ChartManager = {
                 axisPointer: { type: 'shadow' },
                 formatter: function(params) {
                     const i = params[0].dataIndex;
-                    return `${params[0].name}<br/>
-                        热度分: <b>${scores[i].toFixed(1)}</b><br/>
-                        到访: ${visits[i]} 人次<br/>
-                        总停留: ${dwells[i].toFixed(0)} 秒`;
+                    // ⚠ params[0].name 就是区域名（可被用户改写）→ 必须转义，否则是存储型 XSS（台账 B5）
+                    return `${escapeHtml(params[0].name)}<br/>
+                        热度分: <b>${Number(scores[i] || 0).toFixed(1)}</b><br/>
+                        到访: ${Number(visits[i] || 0)} 人次<br/>
+                        总停留: ${Number(dwells[i] || 0).toFixed(0)} 秒`;
                 }
             },
             grid: { left: 8, right: 20, top: 10, bottom: 30 },

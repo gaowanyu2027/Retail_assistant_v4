@@ -1213,7 +1213,7 @@ export default {
             <span style="float:right">评分: ${a.score}/100</span>
           </div>
           <div class="alert-detail">
-            ${(a.reasons || []).join('；')}
+            ${this.escapeHtml((a.reasons || []).join('；'))}
             ${a.frame_id ? ` | 帧: ${a.frame_id}` : ''}
           </div>
         </div>
@@ -1242,7 +1242,7 @@ export default {
             人员 #${a.person_id}
             <span style="float:right">评分: ${a.score}/100</span>
           </div>
-          <div class="alert-detail">${(a.reasons || []).join('；')}</div>
+          <div class="alert-detail">${this.escapeHtml((a.reasons || []).join('；'))}</div>
         </div>
       `)
       const sus = (suspiciousTracks || []).slice(0, 5).map(t => `

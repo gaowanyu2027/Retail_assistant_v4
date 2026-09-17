@@ -878,15 +878,45 @@ from fastapi import Depends, HTTPException, Request  # noqa: E402
 from config.settings import AUTH_ENABLED  # noqa: E402
 
 
-def token_from_request(request: Request) -> str | None:
-    """从 Cookie / Authorization: Bearer 提取**会话令牌**（不含 URL 凭据）。"""
-    tok = request.cookies.get(COOKIE_NAME)
-    if tok:
-        return tok
+def token_candidates_from_request(request: Request) -> list[tuple[str, str]]:
+    """按**优先级**返回候选凭据 [(来源, 令牌), ...]。
+
+    台账 B13：原实现是"Cookie 命中就直接返回，Bearer 根本不看" —— 于是浏览器里
+    一个**别的应用/旧会话留下的垃圾 Cookie** 会让同请求里**有效的** Bearer 令牌失效（401）。
+    改成返回候选列表、由调用方逐个尝试解析：
+    `Authorization` 是**显式**凭据，优先；Cookie 是**隐式**凭据，兜底。
+    """
+    out: list[tuple[str, str]] = []
     auth = request.headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return None
+        tok = auth[7:].strip()
+        if tok:
+            out.append(("bearer", tok))
+    cookie_tok = request.cookies.get(COOKIE_NAME)
+    if cookie_tok:
+        out.append(("cookie", cookie_tok))
+    return out
+
+
+def token_from_request(request: Request) -> str | None:
+    """从 Cookie / Authorization: Bearer 提取**会话令牌**（不含 URL 凭据）。
+
+    只取优先级最高的那一个；要"任一凭据有效即通过"请用 `token_candidates_from_request`。
+    """
+    cands = token_candidates_from_request(request)
+    return cands[0][1] if cands else None
+
+
+def auth_source_from_request(request: Request) -> str | None:
+    """返回本次请求**实际使用**的凭据来源：`"bearer"` / `"cookie"` / `None`。
+
+    用途（台账 B4）：改状态的**兼容 GET** 别名要拒绝"仅靠 Cookie"的调用 ——
+    浏览器顶层导航会自动带上 Cookie（`SameSite=Lax` 不管 GET），这就是 CSRF 面；
+    而 `Authorization` 头是跨站页面**无法设置**的，所以要求 Bearer 即可关掉这个面。
+    （是否有效已由中间件确认，这里只看"带的哪种凭据"。）
+    """
+    cands = token_candidates_from_request(request)
+    return cands[0][0] if cands else None
 
 
 def user_from_request(request: Request) -> dict | None:
@@ -899,9 +929,11 @@ def user_from_request(request: Request) -> dict | None:
     user = getattr(request.state, "user", None)
     if user:
         return user
-    session_token = token_from_request(request)
-    if session_token:
-        return get_session(session_token)
+    # 逐个候选尝试：垃圾 Cookie 不能把有效的 Bearer 挡掉（台账 B13）
+    for _src, tok in token_candidates_from_request(request):
+        user = get_session(tok)
+        if user:
+            return user
     ticket = request.query_params.get("ticket")
     if ticket:
         return consume_ticket(ticket)
@@ -1034,23 +1066,37 @@ def _scope_headers(scope) -> dict[str, str]:
     return out
 
 
+def token_candidates_from_scope(scope) -> list[tuple[str, str]]:
+    """ASGI scope 层的候选凭据（优先级同 `token_candidates_from_request`，台账 B13）。
+
+    WebSocket 说明：浏览器 WebSocket API 不支持自定义请求头，
+    但同源 Cookie 会在握手时自动携带，因此浏览器端无需在 URL 里带凭据。
+    """
+    out: list[tuple[str, str]] = []
+    headers = _scope_headers(scope)
+    auth = headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        tok = auth[7:].strip()
+        if tok:
+            out.append(("bearer", tok))
+    cookie = headers.get("cookie") or ""
+    for part in cookie.split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            if k.strip() == COOKIE_NAME and v.strip():
+                out.append(("cookie", v.strip()))
+                break
+    return out
+
+
 def token_from_scope(scope) -> str | None:
     """ASGI scope 层取**会话令牌**（Cookie / Authorization: Bearer，不含 URL 凭据）。
 
     WebSocket 说明：浏览器 WebSocket API 不支持自定义请求头，
     但同源 Cookie 会在握手时自动携带，因此浏览器端无需在 URL 里带凭据。
     """
-    headers = _scope_headers(scope)
-    cookie = headers.get("cookie") or ""
-    for part in cookie.split(";"):
-        if "=" in part:
-            k, v = part.split("=", 1)
-            if k.strip() == COOKIE_NAME:
-                return v.strip()
-    auth = headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return None
+    cands = token_candidates_from_scope(scope)
+    return cands[0][1] if cands else None
 
 
 def _scope_query(scope) -> dict:
@@ -1066,9 +1112,11 @@ def user_from_scope(scope) -> dict | None:
     优先级：Cookie / Bearer（会话）→ `?ticket=`（一次性票据）。
     `?token=`（URL 里的主会话令牌）**默认拒绝**，理由见 user_from_request。
     """
-    session_token = token_from_scope(scope)
-    if session_token:
-        return get_session(session_token)
+    # 逐个候选尝试：垃圾 Cookie 不能把有效的 Bearer 挡掉（台账 B13）
+    for _src, tok in token_candidates_from_scope(scope):
+        user = get_session(tok)
+        if user:
+            return user
     qs = _scope_query(scope)
     if qs.get("ticket"):
         return consume_ticket(qs["ticket"][0])
@@ -1120,7 +1168,12 @@ class AuthMiddleware:
             # 公开路径也尽量解析登录态：供 /api/health 这类端点按「是否已登录」
             # 返回不同粒度（匿名只给最小信息，避免设备/推理环境指纹外泄）。
             # 注意：这里只认 Cookie / Bearer，**不消费**一次性票据（避免无谓消耗）。
-            user = get_session(token_from_scope(scope))
+            # 逐个候选尝试（台账 B13）：垃圾 Cookie 不该把有效的 Bearer 挡掉
+            user = None
+            for _src, tok in token_candidates_from_scope(scope):
+                user = get_session(tok)
+                if user:
+                    break
             if user:
                 scope.setdefault("state", {})["user"] = user
             _set_request_actor(user)
