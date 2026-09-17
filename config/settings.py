@@ -390,8 +390,8 @@ VIDEO_UPLOAD_SUBDIR = os.environ.get("VIDEO_UPLOAD_SUBDIR", "videos")
 # ---- 视频源安全校验（台账 B1 / B6 的收口）----
 # **永久封禁**（任何白名单都不放行）：环回、链路本地（含云元数据 169.254.169.254）、
 # 组播、保留、未指定地址 —— 这些要么打自己、要么打云的凭据服务，没有正当视频源场景。
-# 私网默认**允许**：门店摄像头本来就在内网（config/cameras.yaml 里就有 192.168.10.20），
-# 一刀切封掉会把正常用法打死。
+# 私网默认**允许**：门店摄像头本来就在内网（生产形态就是一条 `rtsp://192.168.x.x/...`，
+# 见 config/cameras.yaml 里注释掉的 cam_door_02 示例），一刀切封掉会把正常用法打死。
 VIDEO_SOURCE_ALLOW_PRIVATE = os.environ.get("VIDEO_SOURCE_ALLOW_PRIVATE", "1") == "1"
 # 公网默认**拒绝**：公网拉流的正当性低得多，且是 SSRF 的主战场
 VIDEO_SOURCE_ALLOW_PUBLIC = os.environ.get("VIDEO_SOURCE_ALLOW_PUBLIC", "0") == "1"
