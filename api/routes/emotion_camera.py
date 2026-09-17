@@ -16,14 +16,14 @@
 import asyncio
 import time
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from database import (
     init_db, get_statistic, get_latest_records,
     get_record_count, cleanup_old_records,
 )
 from api.routes.stream import get_emotion_camera_status, stop_emotion_camera
-from api.security import require_perm
+from api.security import auth_source_from_request, require_perm
 
 router = APIRouter(tags=["emotion_camera"])
 
@@ -106,21 +106,62 @@ async def emotion_summary(camera_id: str = "camera_entrance", hours: int = 1):
 # ⚠ 权限门禁必须**在别名上再加一次**：别名是「直接调用」主函数的
 # （`return await start_emotion_camera()`），这种调用**不经过 FastAPI 的依赖注入**，
 # 所以主函数签名上的 Depends 对别名完全无效 —— 只给主函数加会被绕过。
+#
+# ⚠ CSRF（台账 B4，已修）：旧别名是 **GET**，而 Cookie 是 `SameSite=Lax` ——
+# 顶层 GET 导航（诱导管理员点一个链接）会带上 Cookie，等于"点链接就能停掉采集/启动采集"。
+# 处理方式：
+#   ① 新增 **POST** 别名作为对外推荐入口（跨站 POST 不会带 Lax Cookie，天然免疫）；
+#   ② 旧 GET 别名保留可用，但**只接受 `Authorization: Bearer`**（跨站页面无法设置该头），
+#      仅靠 Cookie 调用一律 405 并给出替代写法。脚本/小程序走 Bearer，不受影响。
+
+
+def _reject_cookie_only(request: Request, action: str) -> None:
+    """兼容 GET 别名守卫：拒绝"仅靠 Cookie"的调用（CSRF 面），并告知替代写法。"""
+    if auth_source_from_request(request) == "bearer":
+        return
+    raise HTTPException(
+        status_code=405,
+        detail=(
+            f"改状态的操作不允许用 GET + Cookie 调用（存在 CSRF 面）：{action}。"
+            f"请改用 POST /api/emotion_camera/{action} 或规范资源接口 "
+            f"(POST/DELETE /api/emotion-cameras)；"
+            f"若必须用 GET，请改用 Authorization: Bearer <token> 调用。"
+        ),
+    )
+
+
+@router.post("/emotion_camera/start", include_in_schema=False)
+async def start_emotion_camera_legacy_post(_: dict = Depends(require_perm("system:manage"))):
+    """兼容别名：POST /api/emotion_camera/start（推荐写法）"""
+    return await start_emotion_camera()
+
+
+@router.post("/emotion_camera/stop", include_in_schema=False)
+async def stop_emotion_camera_api_legacy_post(_: dict = Depends(require_perm("system:manage"))):
+    """兼容别名：POST /api/emotion_camera/stop（推荐写法）"""
+    return await asyncio.to_thread(stop_emotion_camera)
+
 
 @router.get("/emotion_camera/start", include_in_schema=False)
-async def start_emotion_camera_legacy(_: dict = Depends(require_perm("system:manage"))):
-    """兼容别名：GET /api/emotion_camera/start（旧路径）"""
+async def start_emotion_camera_legacy(
+    request: Request, _: dict = Depends(require_perm("system:manage"))
+):
+    """兼容别名：GET /api/emotion_camera/start（旧路径，仅限 Bearer 调用）"""
+    _reject_cookie_only(request, "start")
     return await start_emotion_camera()
 
 
 @router.get("/emotion_camera/stop", include_in_schema=False)
-async def stop_emotion_camera_api_legacy(_: dict = Depends(require_perm("system:manage"))):
-    """兼容别名：GET /api/emotion_camera/stop（旧路径）
+async def stop_emotion_camera_api_legacy(
+    request: Request, _: dict = Depends(require_perm("system:manage"))
+):
+    """兼容别名：GET /api/emotion_camera/stop（旧路径，仅限 Bearer 调用）
 
-    ⚠ 待办：这是个**改状态的 GET**（会真的停掉管线并写库）。Cookie 为 SameSite=Lax，
-    顶层 GET 导航会携带 Cookie，因此存在 CSRF 面（诱导已登录管理员打开该 URL 即可停止分析）。
-    应改为 POST/DELETE（`DELETE /api/emotion-cameras` 已存在），或校验 Origin。
+    台账 B4：它是个**改状态的 GET** —— 会真的停掉管线并写库；
+    在 `SameSite=Lax` 下顶层 GET 导航会携带 Cookie，诱导管理员点链接即可停止分析。
+    现在仅接受 `Authorization: Bearer`（跨站页面设置不了该头），仅靠 Cookie 一律 405。
     """
+    _reject_cookie_only(request, "stop")
     return await asyncio.to_thread(stop_emotion_camera)
 
 
