@@ -311,6 +311,11 @@ export default {
       const label = src.name || src.path || src.id || src.kind || '视频源'
       if (msg.state === 'opening') {
         window.updateStatus('warning', `正在打开 ${label}…` + (msg.replaced ? '（已替换原视频源）' : ''))
+        // 保险：服务端说"正在打开浏览器采帧"时，确保上行通道 `/api/ws/client` 已连接。
+        // 漏了这一步就是"永久转圈"（服务端等帧、前端没通道），所以这里再兜一次。
+        if (src.kind === 'client' && !StreamManager.clientWs) {
+          StreamManager.startClientStream()
+        }
       } else if (msg.state === 'running') {
         this.framesSeen = true
         const modeLabel = this.currentMode === 'retail' ? '货架' : '出入口'
@@ -603,6 +608,19 @@ export default {
     },
     async startLocalCamera() {
       try {
+        // 先给出**可操作**的失败原因，别让用户对着转圈猜。
+        // 浏览器只在"安全上下文"（https 或 localhost/127.0.0.1）下才提供 mediaDevices；
+        // 用 http://局域网IP:8000 打开时它是 undefined，直接调会抛 TypeError。
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          const why = window.isSecureContext
+            ? '当前浏览器不支持摄像头采集（navigator.mediaDevices 不可用）'
+            : '当前页面不是安全上下文：请用 http://127.0.0.1:8000 或 https 打开（浏览器只在 localhost/https 下允许访问摄像头）'
+          window.updateStatus('error', why)
+          if (this.currentMode === 'retail') {
+            this.answerHtml = `<p style="color:var(--accent-red)">${this.escapeHtml(why)}</p>`
+          }
+          return
+        }
         const devices = await navigator.mediaDevices.enumerateDevices()
         const cameras = devices.filter(d => d.kind === 'videoinput')
         let deviceId = undefined
@@ -729,8 +747,17 @@ export default {
         }
         captureAndSend()
       } catch (e) {
+        // 失败原因必须**显示在视频面板上**（以前只写进聊天区的 answerHtml，
+        // 用户盯着视频区只看到"正在打开…"，等于没有反馈）
+        const name = (e && e.name) || ''
+        const hint = name === 'NotAllowedError'
+          ? '浏览器拒绝了摄像头权限：请点地址栏的摄像头图标允许后重试'
+          : name === 'NotFoundError' ? '没有检测到摄像头设备'
+          : name === 'NotReadableError' ? '摄像头被其他程序占用（关掉占用它的软件后重试）'
+          : (e && e.message) || '未知错误'
+        window.updateStatus('error', `无法访问本机摄像头：${hint}`)
         if (this.currentMode === 'retail') {
-          this.answerHtml = `<p style="color:var(--accent-red)">无法访问摄像头: ${this.escapeHtml(e.message)}</p>`
+          this.answerHtml = `<p style="color:var(--accent-red)">无法访问摄像头: ${this.escapeHtml(hint)}</p>`
         }
         console.error('[Camera] 错误:', e)
       }
