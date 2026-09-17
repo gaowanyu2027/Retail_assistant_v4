@@ -328,6 +328,12 @@ python run.py --port 8000
 > **视频源打不开时先跑体检**：`python tools/check_video_sources.py --user root --password '你的密码'`
 > 会把配置里的每台摄像头**真开一遍**，逐台报告"出没出画面 / 卡在哪一步 / 报什么错误码"
 > （容器里 `webcam` 这类物理设备必然不可用，它会直接说明原因）。
+>
+> **服务器看不到物理摄像头时，用推帧工具把画面"喂"进来**：
+> `python tools/push_camera_frames.py --source 0 --user root --password '你的密码'`
+> （`--source` 可以是本机设备号 `0`、视频文件路径、或 `rtsp://…`）。
+> 原理是走已有的上行通道 `/api/ws/client`（浏览器「本地摄像头」用的就是它），
+> 所以**摄像头在哪台机器上不重要，能跑这个脚本、能连到服务端就行**。
 
 启动后终端应看到：
 

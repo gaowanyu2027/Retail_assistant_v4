@@ -113,6 +113,22 @@ def _ws_username(websocket) -> "str | None":
     except Exception:
         return None
 
+
+def _ws_alive(ws) -> bool:
+    """这条 WS 是否还处于连接状态（用于回收"已断开的归属者"）。
+
+    ⚠ 为什么需要：`_client_camera_owner_ws` 是**独占**标记，正常只在连接关闭的
+    finally 里释放。但如果那条连接以非正常方式失效（标签页卡死、网络断、异常路径），
+    标记就可能一直留着 —— 之后任何人点「本地摄像头」都只会收到"已有其他用户正在使用"，
+    而界面上看不出该找谁释放（实测踩过：一次失败的尝试把模式占住了）。
+    这里在占用检查前先探一次连接状态，断开的直接回收。
+    """
+    try:
+        from starlette.websockets import WebSocketState
+        return ws is not None and getattr(ws, "client_state", None) == WebSocketState.CONNECTED
+    except Exception:
+        return ws is not None
+
 # 客户端帧队列
 _client_frames: deque = deque(maxlen=CLIENT_FRAME_QUEUE_MAXLEN)
 _client_frame_lock = threading.Lock()
@@ -1017,11 +1033,20 @@ async def video_stream(websocket: WebSocket):
                     uname = _ws_username(websocket)
                     with _lock:
                         owner_ws = _client_camera_owner_ws
+                    # 归属者若已断开，先回收：不能让一条"幽灵连接"永久占着这个模式，
+                    # 否则用户只会看到"已有其他用户正在使用"，却不知道该找谁释放
+                    if owner_ws is not None and owner_ws is not websocket and not _ws_alive(owner_ws):
+                        print("[WS] 回收已断开的「本机摄像头」归属（原归属连接已不在）")
+                        with _lock:
+                            _client_camera_owner = None
+                            _client_camera_owner_ws = None
+                        owner_ws = None
                     if owner_ws is not None and owner_ws is not websocket:
                         await websocket.send_json({
                             "type": "status", "status": "error",
                             "message": "已有其他用户正在使用「本机摄像头」模式，请稍后重试；"
-                                       "多人同时观看请使用「服务器摄像头」。",
+                                       "多人同时观看请使用「服务器摄像头」。"
+                                       "（若那是你之前失效的连接，刷新/关闭那个页面即可释放）",
                         })
                         continue
                     if cap:
