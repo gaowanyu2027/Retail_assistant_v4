@@ -499,38 +499,54 @@ async def health_ready():
     degraded: list[str] = []
     detail: dict[str, str] = {}
 
-    # ① MySQL：致命依赖，真执行一次查询（不用 mysql_available()——它只看环境变量，
-    #    正是当初"假绿灯"的根源）
-    try:
-        import mysql_db
-        conn = mysql_db.get_connection()
+    # ⚠ 下面两处探测都是**同步阻塞 IO**，而本端点是 `async def`：
+    #   直接调用会占住事件循环。实测（E13）：Qdrant 不可用时，容器健康检查
+    #   （compose 里每 30s 打一次本端点）会让**每次**探测阻塞事件循环约 4 秒 ——
+    #   表现为视频帧停顿 3.96s、同时刻 /api/health 尖峰 3.6s，且严格每 34s 复现一次。
+    #   所以两个探测一律 `to_thread`，并**并发**执行（总耗时取两者较大值而非相加）。
+    def _probe_mysql() -> tuple[bool, str]:
+        """致命依赖：真执行一次查询（不用 mysql_available()——它只看环境变量，
+        正是当初"假绿灯"的根源）。"""
         try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-            critical["mysql"] = True
-        finally:
-            conn.close()
-    except Exception as e:
-        critical["mysql"] = False
-        # 只给异常类型，不回显主机名/凭据等细节
-        detail["mysql"] = type(e).__name__
+            import mysql_db
+            conn = mysql_db.get_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                return True, ""
+            finally:
+                conn.close()
+        except Exception as e:
+            # 只给异常类型，不回显主机名/凭据等细节
+            return False, type(e).__name__
 
-    # ② Qdrant：非致命。嵌入式模式（未配 QDRANT_URL）不算降级。
-    try:
-        import vector_memory
-        qurl = (getattr(vector_memory, "QDRANT_URL", "") or "").rstrip("/")
-        if qurl:
+    def _probe_qdrant() -> tuple[bool, str]:
+        """非致命依赖。返回 (是否降级, detail)。嵌入式模式（未配 QDRANT_URL）不算降级。"""
+        try:
+            import vector_memory
+            qurl = (getattr(vector_memory, "QDRANT_URL", "") or "").rstrip("/")
+            if not qurl:
+                return False, "embedded"
             import httpx
             r = httpx.get(f"{qurl}/collections", timeout=3.0)
             if r.status_code >= 400:
-                degraded.append("qdrant")
-                detail["qdrant"] = f"HTTP {r.status_code}"
-        else:
-            detail["qdrant"] = "embedded"
-    except Exception as e:
+                return True, f"HTTP {r.status_code}"
+            return False, ""
+        except Exception as e:
+            return True, type(e).__name__
+
+    (mysql_ok, mysql_detail), (qdrant_bad, qdrant_detail) = await asyncio.gather(
+        asyncio.to_thread(_probe_mysql),
+        asyncio.to_thread(_probe_qdrant),
+    )
+    critical["mysql"] = mysql_ok
+    if mysql_detail:
+        detail["mysql"] = mysql_detail
+    if qdrant_bad:
         degraded.append("qdrant")
-        detail["qdrant"] = type(e).__name__
+    if qdrant_detail:
+        detail["qdrant"] = qdrant_detail
 
     # ③ Redis：非致命。代码当前尚未读写 Redis（缓存层待接入），
     #    因此**不做探测**——探一个没人用的依赖只会制造噪音。
