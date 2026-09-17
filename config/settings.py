@@ -409,6 +409,22 @@ VIDEO_SOURCE_ALLOW_CLIENT_URL = os.environ.get("VIDEO_SOURCE_ALLOW_CLIENT_URL", 
 # 前端已全部改用 `open_source`，所以默认就收紧；留开关只为万一要回滚。
 VIDEO_LEGACY_START_FILE_STRICT = os.environ.get("VIDEO_LEGACY_START_FILE_STRICT", "1") == "1"
 
+# ==================== 视频上传（POST /api/videos）====================
+# 台账 B11：原来"无大小限制、无内容校验、同名静默覆盖"——上传会造出**可播放的视频源**，
+# 这三件事合起来就是"随便传个同名的东西把演示视频换掉 / 把磁盘写满"。
+# 单文件大小上限（MB）。默认 500：比演示视频大得多，又能挡住"写满磁盘"。
+VIDEO_UPLOAD_MAX_MB = int(os.environ.get("VIDEO_UPLOAD_MAX_MB", "500"))
+# 允许的上传扩展名白名单（与前端 accept 对齐）
+VIDEO_UPLOAD_ALLOWED_EXT = [
+    e.strip().lower() for e in os.environ.get(
+        "VIDEO_UPLOAD_ALLOWED_EXT", ".mp4,.avi,.mov,.mkv,.webm,.flv,.wmv").split(",")
+    if e.strip()
+]
+# 同名文件冲突策略：rename=自动改名（默认，不破坏已有文件）/ reject=拒绝 / overwrite=覆盖（不推荐）
+VIDEO_UPLOAD_NAME_CONFLICT = os.environ.get("VIDEO_UPLOAD_NAME_CONFLICT", "rename").lower()
+# 是否按**文件头魔数**校验容器格式（扩展名可随便改，魔数改不了）
+VIDEO_UPLOAD_VERIFY_MAGIC = os.environ.get("VIDEO_UPLOAD_VERIFY_MAGIC", "1") == "1"
+
 # ==================== 本地语音唤醒模型配置 ====================
 # sherpa-onnx 推理设备：cpu / cuda
 SHERPA_ONNX_PROVIDER = os.environ.get("SHERPA_ONNX_PROVIDER", "cpu")

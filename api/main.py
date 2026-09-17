@@ -574,44 +574,95 @@ async def health_ready():
 
 
 @app.post("/api/videos")
-async def upload_video_file(file: UploadFile = FastAPIFile(...)):
-    """上传视频文件 — 创建视频资源（POST /api/videos）"""
+async def upload_video_file(file: UploadFile = FastAPIFile(...),
+                            _uploader: dict = Depends(require_perm("system:manage"))):
+    """上传视频文件 — 创建视频资源（POST /api/videos）
+
+    ⚠ 台账 B11 修的就是这个端点，四道约束（缺一不可）：
+
+    1. **权限**：上传会造出**可播放的视频源**，与"设备注册/采集启停"同级 →
+       要求 `system:manage`（此前**没有任何权限校验**，任意已登录账号都能传）；
+    2. **大小上限** `VIDEO_UPLOAD_MAX_MB`：边写边计数，超限立刻停并删掉半成品
+       （原来是无限流写入，把磁盘写满即可让整个服务挂掉）；
+    3. **内容校验**：除了扩展名白名单，还按**文件头魔数**判断是不是真的视频容器
+       （扩展名随便改，魔数改不了）；
+    4. **同名策略**：默认**自动改名**（`demo.mp4` → `demo_1.mp4`），
+       不再静默覆盖已有文件（原来同名上传会把演示视频替换掉，事后无从察觉）。
+    """
+    from video_sources import (
+        SourceError, detect_video_container, resolve_name_conflict, safe_upload_name,
+    )
+    from config.settings import (
+        VIDEO_UPLOAD_ALLOWED_EXT, VIDEO_UPLOAD_MAX_MB, VIDEO_UPLOAD_NAME_CONFLICT,
+        VIDEO_UPLOAD_VERIFY_MAGIC,
+    )
+
     if not file.filename:
         raise HTTPException(status_code=400, detail="未选择文件")
 
-    allowed_ext = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
-    # 仅保留文件名（去掉路径部分），防止目录穿越
-    safe_name = file.filename.replace("\\", "/").split("/")[-1].strip()
-    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", safe_name)
-    if not safe_name:
-        raise HTTPException(status_code=400, detail="文件名无效")
-
-    ext = os.path.splitext(safe_name)[1].lower()
-    if ext not in allowed_ext:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的文件类型 '{ext}'，允许: {', '.join(allowed_ext)}")
+    try:
+        safe_name = safe_upload_name(file.filename, VIDEO_UPLOAD_ALLOWED_EXT)
+    except SourceError as e:
+        raise HTTPException(status_code=400, detail=f"{e.message}（{e.code}）")
 
     videos_dir = Path(__file__).resolve().parent.parent / "data" / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
-    save_path = videos_dir / safe_name
+    try:
+        save_path = resolve_name_conflict(videos_dir, safe_name, VIDEO_UPLOAD_NAME_CONFLICT)
+    except SourceError as e:
+        raise HTTPException(status_code=409, detail=f"{e.message}（{e.code}）")
 
-    # 分块写入，避免大文件一次性读入内存
+    max_bytes = max(1, VIDEO_UPLOAD_MAX_MB) * 1024 * 1024
     total_size = 0
-    with open(save_path, "wb") as f:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-            total_size += len(chunk)
+    head = b""
+    try:
+        # 分块写入，避免大文件一次性读入内存
+        with open(save_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                if not head:
+                    head = chunk[:64]
+                total_size += len(chunk)
+                if total_size > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(f"文件超过大小上限 {VIDEO_UPLOAD_MAX_MB} MB"
+                                f"（已写入 {total_size / 1048576:.1f} MB）。"
+                                f"如确需更大文件，请调大 VIDEO_UPLOAD_MAX_MB。"),
+                    )
+                f.write(chunk)
+    except HTTPException:
+        save_path.unlink(missing_ok=True)      # 别留半成品文件
+        raise
+    except Exception as e:
+        save_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"写入失败：{type(e).__name__}")
+
+    if not total_size:
+        save_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="上传内容为空")
+
+    if VIDEO_UPLOAD_VERIFY_MAGIC:
+        container = detect_video_container(head)
+        if container is None:
+            save_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=415,
+                detail=("文件内容不是可识别的视频容器（已按扩展名放行的文件也要过魔数校验）。"
+                        "确认是正常视频仍被拒时可置 VIDEO_UPLOAD_VERIFY_MAGIC=0。"),
+            )
+        container_name = container
+    else:
+        container_name = "unchecked"
 
     try:
         import mysql_db
         # 同步 DB 写入丢线程池，避免阻塞事件循环
         await asyncio.to_thread(
             mysql_db.save_video_record,
-            filename=safe_name,
+            filename=save_path.name,
             file_path=str(save_path.resolve()),
             file_size=total_size,
             source="upload",
@@ -621,13 +672,20 @@ async def upload_video_file(file: UploadFile = FastAPIFile(...)):
         print(f"[MySQL] 视频记录写入失败: {e}")
 
     file_size_mb = total_size / (1024 * 1024)
+    renamed = save_path.name != safe_name
 
     return {
         "status": "ok",
-        "filename": safe_name,
+        "filename": save_path.name,
         "path": str(save_path.resolve()),
         "size_mb": round(file_size_mb, 2),
-        "message": f"文件已上传，可通过 WebSocket 发送播放指令",
+        "container": container_name,
+        # 同名时自动改名了要说清楚，否则前端以为"东西没传上去"
+        "renamed": renamed,
+        "original_filename": safe_name if renamed else None,
+        "message": ("文件已上传"
+                    + (f"（同名文件已存在，另存为 {save_path.name}）" if renamed else "")
+                    + "，可通过 WebSocket 发送播放指令"),
         "ws_action": {
             "action": "start_file",
             "file_path": str(save_path.resolve()),
