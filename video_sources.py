@@ -39,7 +39,16 @@ import os
 import re
 from pathlib import Path
 
-from config.settings import DATA_DIR, PROJECT_ROOT, VIDEO_ALLOWED_DIRS, VIDEO_UPLOAD_SUBDIR
+from config.settings import (
+    DATA_DIR,
+    PROJECT_ROOT,
+    VIDEO_ALLOWED_DIRS,
+    VIDEO_SOURCE_ALLOW_HTTP,
+    VIDEO_SOURCE_ALLOW_PRIVATE,
+    VIDEO_SOURCE_ALLOW_PUBLIC,
+    VIDEO_SOURCE_ALLOWED_SCHEMES,
+    VIDEO_UPLOAD_SUBDIR,
+)
 
 # ---- 统一的 kind 取值 ----
 KIND_CAMERA = "camera"
@@ -176,9 +185,12 @@ def normalize(source, camera_ids: list[str] | None = None) -> dict:
         raw = str(cam.get("source") or "")
         cls = _classify_camera_source(raw)
         if cls == "url":
+            # B1 收口：服务端配置的地址同样要过协议/主机校验（root 门槛 + 纵深防御）
+            safe_url = guard_url(raw, client_supplied=False)
             return {"kind": kind, "legacy_action": "start_file",
-                    "params": {"file_path": raw},
-                    "echo": {"kind": kind, "id": cam_id, "name": cam.get("name"), "via": "url", "source": raw}}
+                    "params": {"file_path": safe_url},
+                    "echo": {"kind": kind, "id": cam_id, "name": cam.get("name"),
+                             "via": "url", "source": mask_credentials(safe_url)}}
         if cls == "device":
             dev = device_support()
             if not dev["supported"]:
@@ -188,14 +200,8 @@ def normalize(source, camera_ids: list[str] | None = None) -> dict:
                     "params": {"camera_id": idx},
                     "echo": {"kind": KIND_DEVICE, "id": cam_id, "name": cam.get("name"), "index": idx}}
         # 文件型：相对路径按**项目根**解析（与 multi_stream 的约定一致）
-        p = Path(raw)
-        full = (p if p.is_absolute() else PROJECT_ROOT / p)
-        if not full.exists():
-            raise SourceError(
-                "file_not_found",
-                f"摄像头 {cam_id} 的视频文件在服务端不存在: {full}"
-                f"（容器里常见原因：文件被 .dockerignore 排除、或没有挂载进来）",
-            )
+        # 服务端配置可信，但仍拒绝 UNC 并要求文件存在（B1 的"借用服务端身份"面）
+        full = guard_path(raw, client_supplied=False)
         return {"kind": kind, "legacy_action": "start_file",
                 "params": {"file_path": str(full)},
                 "echo": {"kind": kind, "id": cam_id, "name": cam.get("name"), "via": "file", "source": str(full)}}
@@ -238,19 +244,7 @@ def normalize(source, camera_ids: list[str] | None = None) -> dict:
         raw = str(source.get("path") or source.get("file_path") or "").strip()
         if not raw:
             raise SourceError("bad_request", "kind=file 需要 path")
-        p = Path(raw)
-        full = (p if p.is_absolute() else PROJECT_ROOT / p).resolve()
-        roots = allowed_dirs()
-        if not _inside(full, roots):
-            raise SourceError(
-                "file_not_allowed",
-                f"路径不在允许的目录内（这是刻意限制：修复前该接口能打开容器内任意文件）。"
-                f"允许: {', '.join(str(r) for r in roots)}",
-            )
-        if not full.exists():
-            raise SourceError("file_not_found", f"文件不存在: {full}")
-        if full.suffix.lower() not in _VIDEO_EXT:
-            raise SourceError("bad_request", f"不支持的视频扩展名: {full.suffix}")
+        full = guard_path(raw, client_supplied=True)     # 统一走守卫（UNC/控制字符/白名单/存在性）
         return {"kind": kind, "legacy_action": _LEGACY[kind],
                 "params": {"file_path": str(full)}, "echo": {"kind": kind, "path": str(full)}}
 
@@ -268,6 +262,158 @@ def echo_for_legacy(action: str, msg: dict) -> dict:
     if action == "start_client_camera":
         return {"kind": KIND_CLIENT}
     return {}
+
+
+# ==================== 源安全校验（台账 B1 / B6 的收口）====================
+#
+# 两条路径，同一个洞：**用户给的字符串被服务端当成视频源直接打开**。
+# - **B1**：`POST /api/cameras` 注册的 `source`（root 门槛，属纵深防御）
+# - **B6**：WS `start_file` / `open_source` 的路径（**任意登录账号**，本次复现实证）
+#
+# 修复前的实测（platform 账号，非 root）：
+#     start_file /app/mmpose/demo/resources/demo.mp4  → ★ 读到画面
+#     start_file /app/data/../mmpose/.../demo.mp4     → ★ 读到画面（`..` 也没拦）
+#     不存在的路径                                     → "无法打开视频源: <路径>"（存在性探针）
+#
+# 设计取舍（写清楚，别当成遗漏）：
+# - **环回 / 链路本地（含云元数据 169.254.169.254）/ 组播 / 保留 / 未指定** —— **永久封禁**，
+#   任何白名单都不放行（这些地址要么打自己、要么打云的凭据服务，没有正当视频源场景）；
+# - **私网**（192.168/10/172.16…）—— 默认**允许**：门店摄像头本来就在内网，一刀切封掉等于把
+#   正常用法打死（本项目 `config/cameras.yaml` 里就有一台 `rtsp://192.168.10.20`）；
+# - **公网** —— 默认**拒绝**（`VIDEO_SOURCE_ALLOW_PUBLIC=1` 可开）：公网拉流的正当性低得多；
+# - **客户端给的路径**必须落在白名单目录内；**服务端配置的路径**只做"存在 + 非 UNC"检查
+#   —— root 本来就有更大权限，这里防的是"借用服务端身份"（SSRF/UNC），不是防 root 读文件。
+#
+# ⚠ 已知局限：DNS 在守卫处解析一次，真正 open 时 cv2 会**再解析一次** → 理论上存在
+#   DNS 重绑定窗口。彻底解决要在 open 时用"已解析的 IP"，本次未做（成本/收益不划算）。
+
+def mask_credentials(text: str) -> str:
+    """日志/回执里脱敏 URL 中的凭据（`rtsp://user:pass@host` → `rtsp://***:***@host`）。
+
+    修复前 `rtsp://admin:密码@192.168.1.64/...` 会**明文进日志与错误回执**。
+    """
+    s = str(text or "")
+    return re.sub(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/@\s]*@", r"\1***:***@", s)
+
+
+def _classify_ip(ip) -> str:
+    """把 IP 分成 blocked / private / public（IPv4-mapped IPv6 先还原，否则可绕过）。"""
+    import ipaddress
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if (ip.is_loopback or ip.is_link_local or ip.is_multicast
+            or ip.is_reserved or ip.is_unspecified
+            or (isinstance(ip, ipaddress.IPv6Address) and ip.is_site_local)):
+        return "blocked"
+    return "private" if ip.is_private else "public"
+
+
+def guard_url(url: str, *, client_supplied: bool = False) -> str:
+    """校验流地址（rtsp/rtsps，可选 http(s)）。失败抛 `SourceError`。"""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    s = str(url or "").strip()
+    if not s:
+        raise SourceError("bad_request", "流地址为空")
+    if len(s) > 512:
+        raise SourceError("bad_request", "流地址过长（>512）")
+    if any(ch in s for ch in "\r\n\t "):
+        raise SourceError("bad_request", "流地址含空白或控制字符")
+    if "\\" in s:
+        raise SourceError("unc_not_allowed", "不接受含反斜杠的地址（UNC 路径会让服务端外带 NTLM 凭据）")
+
+    parsed = urlparse(s)
+    scheme = (parsed.scheme or "").lower()
+    if not scheme:
+        raise SourceError("bad_request", "流地址缺少协议头")
+    if scheme in ("http", "https"):
+        if not VIDEO_SOURCE_ALLOW_HTTP:
+            raise SourceError("unsupported_scheme",
+                              f"暂不接受 {scheme}:// 视频源（可用 VIDEO_SOURCE_ALLOW_HTTP=1 开启）")
+    elif scheme not in VIDEO_SOURCE_ALLOWED_SCHEMES:
+        raise SourceError("unsupported_scheme",
+                          f"不支持的协议 {scheme!r}；允许: {', '.join(VIDEO_SOURCE_ALLOWED_SCHEMES)}")
+
+    host = parsed.hostname
+    if not host:
+        raise SourceError("bad_request", f"流地址缺少主机名: {mask_credentials(s)}")
+
+    # 主机名可能解析到多个地址：**每一个**都要过检查
+    try:
+        infos = socket.getaddrinfo(host, None)
+        ips = sorted({info[4][0] for info in infos})
+    except Exception as e:
+        raise SourceError("dns_failed", f"主机名无法解析: {host}（{type(e).__name__}）")
+    if not ips:
+        raise SourceError("dns_failed", f"主机名没有解析到任何地址: {host}")
+
+    for raw_ip in ips:
+        cls = _classify_ip(ipaddress.ip_address(raw_ip))
+        if cls == "blocked":
+            raise SourceError(
+                "host_blocked",
+                f"目标 {host} 解析到被禁止的地址 {raw_ip}："
+                f"环回/链路本地(含云元数据 169.254.169.254)/组播/保留地址一律不允许",
+            )
+        if cls == "private" and not VIDEO_SOURCE_ALLOW_PRIVATE:
+            raise SourceError("host_blocked",
+                              f"目标 {host} 解析到私网地址 {raw_ip}，当前配置不允许（VIDEO_SOURCE_ALLOW_PRIVATE=0）")
+        if cls == "public" and not VIDEO_SOURCE_ALLOW_PUBLIC:
+            raise SourceError("host_blocked",
+                              f"目标 {host} 解析到公网地址 {raw_ip}，默认拒绝公网视频源"
+                              f"（如确需请设 VIDEO_SOURCE_ALLOW_PUBLIC=1）")
+    return s
+
+
+def guard_path(path: str, *, client_supplied: bool) -> Path:
+    """校验文件路径。失败抛 `SourceError`。
+
+    `client_supplied=True` 时（= 来自客户端的路径，台账 B6）必须落在白名单目录内；
+    `False`（= 服务端 config/cameras.yaml 里的路径，台账 B1）只做 UNC/存在性/扩展名检查。
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        raise SourceError("bad_request", "文件路径为空")
+    if len(raw) > 512:
+        raise SourceError("bad_request", "文件路径过长（>512）")
+    if any(ch in raw for ch in "\r\n\t\x00"):
+        raise SourceError("bad_request", "文件路径含控制字符")
+    if raw.startswith("\\\\") or raw.startswith("//"):
+        raise SourceError("unc_not_allowed",
+                          "不接受 UNC 路径（\\\\host\\share）：服务端会主动去认证并外带 NTLM 凭据")
+
+    p = Path(raw)
+    full = (p if p.is_absolute() else PROJECT_ROOT / p).resolve()
+    if client_supplied:
+        roots = allowed_dirs()
+        if not _inside(full, roots):
+            raise SourceError(
+                "file_not_allowed",
+                f"路径不在允许的目录内（这是刻意限制：修复前该接口能打开容器内**任意**文件）。"
+                f"允许: {', '.join(str(r) for r in roots)}",
+            )
+    if not full.exists():
+        raise SourceError("file_not_found", f"文件不存在: {full}")
+    if full.suffix.lower() not in _VIDEO_EXT:
+        raise SourceError("bad_request", f"不支持的视频扩展名: {full.suffix or '(无)'}")
+    return full
+
+
+def guard_source(source: str, *, client_supplied: bool = False) -> str:
+    """统一入口：校验一个"摄像头 source"字符串，返回规范化后的值。
+
+    设备型（`webcam` / 纯数字）没有路径与主机风险，直接放行。
+    """
+    s = str(source or "").strip()
+    if not s or s.lower() == "webcam" or s.isdigit():
+        return s
+    low = s.lower()
+    if low.startswith(("rtsp://", "rtsps://", "http://", "https://")):
+        return guard_url(s, client_supplied=client_supplied)
+    return str(guard_path(s, client_supplied=client_supplied))
+
 
 
 # ==================== 能力发现（供前端渲染菜单）====================

@@ -813,12 +813,17 @@ async def video_stream(websocket: WebSocket):
     try:
         # 统一状态回执里要带的"源描述符"（open_source 或老动作入口都会设置）
         source_echo: dict = {}
+        # 本消息的源是否**已经过 `video_sources.normalize()` 校验**（含"服务端配置可信、
+        # 客户端路径走白名单"的区分）。⚠ 必须是**局部变量**，不能用 msg 里的字段 ——
+        # 否则客户端自己塞一个 `_validated:true` 就能绕过老别名的白名单校验。
+        source_prescreened = False
         while True:
             try:
                 raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT_SECONDS)
                 msg = json.loads(raw)
                 action = msg.get("action", "")
                 mode = msg.get("mode", "retail")
+                source_prescreened = False        # 每条消息都重置（见上方注释）
 
                 # 兼容前端发送 {type:"ping"} 的心跳格式
                 if action == "ping" or msg.get("type") == "ping":
@@ -863,6 +868,9 @@ async def video_stream(websocket: WebSocket):
                     # 翻译成老动作后**继续往下走**，复用既有启动分支
                     action = plan["legacy_action"]
                     msg = {**msg, **plan["params"], "action": action}
+                    # 标记"已经过统一入口校验"：避免下面的老分支用**客户端规则**再校验一次
+                    # （那会把服务端配置的可信路径，比如仓库内的演示视频，误判为越界）
+                    source_prescreened = True
 
                 elif action in ("start_webcam", "start_file", "start_client_camera"):
                     # 老入口（向后兼容）：也回一条统一状态，方便前端逐步迁移
@@ -941,6 +949,29 @@ async def video_stream(websocket: WebSocket):
 
                 elif action == "start_file":
                     file_path = msg.get("file_path", "")
+                    # 台账 B6 收口：老别名以前接受**任意路径** —— 实测 platform（非 root）账号
+                    # 就能读到白名单外的容器内媒体文件，还能拿报错文案当**存在性探针**。
+                    # 前端已全部改用 `open_source`（新入口本来就有白名单），故这里默认收紧；
+                    # `VIDEO_LEGACY_START_FILE_STRICT=0` 可临时回滚（留开关只为应急）。
+                    import video_sources
+                    from config.settings import VIDEO_LEGACY_START_FILE_STRICT
+                    # ⚠ 只在"这条消息不是从 open_source 翻译过来的"时才校验 ——
+                    # 否则服务端配置的可信路径会被客户端规则二次拒绝（已踩过）。
+                    if VIDEO_LEGACY_START_FILE_STRICT and not source_prescreened:
+                        try:
+                            file_path = str(await asyncio.to_thread(
+                                video_sources.guard_path, file_path, client_supplied=True))
+                        except Exception as e:
+                            code = getattr(e, "code", "bad_request")
+                            message = (f"视频源不被允许[{code}]: "
+                                       f"{video_sources.mask_credentials(str(e))}")
+                            await websocket.send_json({
+                                "type": "status", "status": "error", "message": message,
+                            })
+                            await _emit_source_status(websocket, "error", source_echo,
+                                                      code=code, message=message)
+                            print(f"[WS] start_file 被拒 code={code}")
+                            continue
                     if cap:
                         cap.release()
                     # 同上：文件/RTSP 的打开一律丢线程池（RTSP 不可达时阻塞可达数十秒）
@@ -949,14 +980,15 @@ async def video_stream(websocket: WebSocket):
                         cap.release()
                         cap = None
                         # 文案用"视频源"而不是"视频文件"：这个分支同样服务于
-                        # 摄像头配置里的 `rtsp://…` 源（cv2 打开 URL 走的就是它）
+                        # 摄像头配置里的 `rtsp://…` 源（cv2 打开 URL 走的就是它）。
+                        # 凭据脱敏：`rtsp://user:pass@host` 不该出现在回执/日志里。
                         await websocket.send_json({
                             "type": "status", "status": "error",
-                            "message": f"无法打开视频源: {file_path}",
+                            "message": f"无法打开视频源: {video_sources.mask_credentials(file_path)}",
                         })
                         await _emit_source_status(
                             websocket, "error", source_echo, code="source_open_failed",
-                            message=f"无法打开视频源: {file_path}",
+                            message=f"无法打开视频源: {video_sources.mask_credentials(file_path)}",
                         )
                         continue
                     with _lock:
