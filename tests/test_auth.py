@@ -3,6 +3,8 @@
 关键手法：把 `api.security.AUTH_DB_PATH` 指向临时文件并清掉缓存的连接，
 就能在完全离线的情况下测真实的建表/迁移/会话逻辑（无需 MySQL）。
 """
+import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -24,10 +26,49 @@ from config.settings import (  # noqa: E402
 
 FMT = "%Y-%m-%d %H:%M:%S"
 
+_LAST_TMP = None                         # 最近一次用过的临时目录，_cleanup 时整目录删掉
+
+
+def _writable_tmp_dir():
+    """返回一个**确实可写**的临时目录。
+
+    为什么不直接用 `tempfile.mkdtemp()`：它内部用 `os.mkdir(path, 0o700)` 建目录，
+    在受限令牌/沙箱环境里进程对这种方式建出来的目录写不进去，SQLite 报
+    "unable to open database file"（看着像鉴权代码坏了，其实只是目录不可写）。
+    所以这里不直接用 mkdtemp，而是**逐个候选目录真实探测能否建库**：
+    系统临时目录 → 项目内 `data/_tmp_tests`（`data/` 已在 .gitignore 里）。
+    """
+    last_err = None
+    stamp = f"{os.getpid()}_{int(time.time() * 1000) % 1000000}"
+    for i, base in enumerate((Path(tempfile.gettempdir()), PROJECT_ROOT / "data" / "_tmp_tests")):
+        d = base / f"auth_test_{stamp}_{i}"
+        try:
+            d.mkdir(parents=True, exist_ok=True)      # 默认 mode，不要 0o700
+        except OSError as e:
+            last_err = e
+            continue
+        probe = d / "_probe.db"
+        try:
+            c = sqlite3.connect(str(probe))
+            c.execute("CREATE TABLE p(x)")
+            c.close()
+        except sqlite3.Error as e:
+            last_err = e
+            shutil.rmtree(d, ignore_errors=True)      # 这个候选不可用，试下一个
+            continue
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+        return d
+    raise RuntimeError(f"找不到可写的临时目录用于鉴权测试（最后一次错误：{last_err}）")
+
 
 def _fresh_db():
     """把鉴权库指到临时文件，返回路径（调用方负责清理）。"""
-    tmp = Path(tempfile.mkdtemp(prefix="auth_test_")) / "auth.db"
+    global _LAST_TMP
+    _LAST_TMP = _writable_tmp_dir()
+    tmp = _LAST_TMP / "auth.db"
     S.AUTH_DB_PATH = str(tmp)
     S._conn = None                       # 丢掉缓存的连接，否则会继续用旧库
     S.init_auth_db()
@@ -35,12 +76,16 @@ def _fresh_db():
 
 
 def _cleanup():
+    global _LAST_TMP
     try:
         if S._conn is not None:
             S._conn.close()
     except Exception:
         pass
     S._conn = None
+    if _LAST_TMP is not None:            # 连临时目录一起删，别在磁盘上留垃圾
+        shutil.rmtree(_LAST_TMP, ignore_errors=True)
+        _LAST_TMP = None
 
 
 # ---------------- 口令策略（B10） ----------------

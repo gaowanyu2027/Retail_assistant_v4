@@ -3,6 +3,7 @@
 这些都是**纯函数**，不需要起服务、不需要网络（只有主机名校验会走 DNS，
 其中 `localhost` 用例依赖系统把 localhost 解析到环回 —— 这是标准行为）。
 """
+import contextlib
 import ipaddress
 import sys
 from pathlib import Path
@@ -12,6 +13,36 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import video_sources as vs  # noqa: E402
+
+# 仓库自带的极小视频夹具（约 4 KB，可解码）。
+# ⚠ 不要改回 `mmpose/demo/resources/demo.mp4` 或 `data/sources/*.mp4`：
+#   前者在 .gitignore 的 `mmpose/` 里、后者整个 `data/` 被忽略 —— **全新 clone / CI
+#   上都不存在**，用例会"假失败"（看起来像守卫坏了，其实是测试依赖了本地才有的文件）。
+FIXTURE = PROJECT_ROOT / "tests" / "assets" / "tiny.mp4"
+
+
+def _rel(p: Path) -> str:
+    """转成仓库相对路径，统一正斜杠（跨平台一致）。"""
+    return p.relative_to(PROJECT_ROOT).as_posix()
+
+
+@contextlib.contextmanager
+def _allowlisted_media(name: str = "_guard_fixture.mp4"):
+    """在**允许目录**（data/sources）里临时放一个真视频，用完删掉。
+
+    `data/` 被 .gitignore 忽略，所以这类用例必须运行时自己造文件。
+    """
+    d = PROJECT_ROOT / "data" / "sources"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / name
+    f.write_bytes(FIXTURE.read_bytes())
+    try:
+        yield f
+    finally:
+        try:
+            f.unlink()
+        except OSError:
+            pass
 
 
 def _expect_reject(fn, code: str | None = None):
@@ -100,9 +131,12 @@ def test_client_path_must_be_in_allowlist():
 
 def test_configured_path_is_not_allowlist_limited():
     """服务端配置的路径（root 可信）不受白名单约束，但必须存在且非 UNC。"""
-    full = _expect_pass(lambda: vs.guard_path("mmpose/demo/resources/demo.mp4",
-                                              client_supplied=False))
-    assert full.exists(), full
+    assert FIXTURE.is_file(), f"缺少测试夹具 {FIXTURE}（应为仓库内的极小 mp4）"
+    rel = _rel(FIXTURE)
+    full = _expect_pass(lambda: vs.guard_path(rel, client_supplied=False))
+    assert full.exists() and full == FIXTURE.resolve(), full
+    # 同一条路径换成"客户端提交"就必须被白名单拦下 —— B1/B6 两级策略的差异就在这一行
+    _expect_reject(lambda: vs.guard_path(rel, client_supplied=True), "file_not_allowed")
     _expect_reject(lambda: vs.guard_path("\\\\a\\b.mp4", client_supplied=False), "unc_not_allowed")
 
 
@@ -150,8 +184,9 @@ def test_client_url_kill_switch():
 
 
 def test_normalize_file_kind_uses_guard():
-    src = _expect_pass(lambda: vs.normalize({"kind": "file", "path": "data/sources/demo.mp4"}))
-    assert src["legacy_action"] == "start_file"
+    with _allowlisted_media() as f:          # 允许目录内的真文件（运行时造，不入库）
+        src = _expect_pass(lambda: vs.normalize({"kind": "file", "path": _rel(f)}))
+        assert src["legacy_action"] == "start_file"
     _expect_reject(lambda: vs.normalize({"kind": "file", "path": "../secret.mp4"}),
                    "file_not_allowed")
 
