@@ -52,6 +52,7 @@ langgraph-checkpoint==4.2.0
 langgraph-prebuilt==1.1.0
 langgraph-sdk==0.4.4
 langsmith==0.12.6
+lap==0.5.13
 loguru==0.7.3
 MarkupSafe==3.0.3
 matplotlib==3.11.2
@@ -78,7 +79,7 @@ pydantic==2.13.5
 pydantic-settings==2.15.0
 pydantic_core==2.46.5
 PyJWT==2.14.0
-PyMySQL==1.2.0
+PyMySQL==1.2.3
 pyparsing==3.3.2
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.3

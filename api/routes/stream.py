@@ -38,6 +38,7 @@ from config.settings import (
     VIDEO_CAMERA_WIDTH,
     VIDEO_FPS,
     VIDEO_IDLE_SLEEP_SECONDS,
+    VIDEO_OPEN_TIMEOUT_SECONDS,
     WS_FPS_LOG_INTERVAL,
     WS_METADATA_INTERVAL,
     WS_POLL_SLEEP_SECONDS,
@@ -817,6 +818,8 @@ async def video_stream(websocket: WebSocket):
         # 客户端路径走白名单"的区分）。⚠ 必须是**局部变量**，不能用 msg 里的字段 ——
         # 否则客户端自己塞一个 `_validated:true` 就能绕过老别名的白名单校验。
         source_prescreened = False
+        # 「打开超时」看门狗起点（见无帧分支）：None 表示还没开始计时
+        open_watchdog_t0 = None
         while True:
             try:
                 raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT_SECONDS)
@@ -1096,7 +1099,57 @@ async def video_stream(websocket: WebSocket):
             frame_b64 = _latest_frame_b64
             result_to_send = _latest_result
 
+            # ⚠ 控制类消息（error / finished）必须**先于**"没有帧就 continue"处理。
+            # 实测踩过的坑：处理线程可能在产出**第一帧之前**就异常退出（依赖缺失、
+            # 模型加载失败、源打不开都是这一类），此时 `_latest_frame_b64` 恒为 None，
+            # 若把错误分支放在下面那个判断之后，它就**永远不会执行** ——
+            # 客户端只看到"正在打开"，然后一直转圈，没有任何提示。
+            # （当初验证者是在"第 30 帧抛异常"的场景下测的，那时已有帧，恰好绕过了这个盲区。）
+            if isinstance(result_to_send, dict):
+                if result_to_send.get("type") == "error":
+                    await websocket.send_json({
+                        "type": "status", "status": "error",
+                        "message": f"视频分析异常已终止：{result_to_send.get('message', '')}",
+                    })
+                    await _emit_source_status(
+                        websocket, "error", source_echo, code="pipeline_error",
+                        message=f"视频分析异常已终止：{result_to_send.get('message', '')}",
+                    )
+                    _stop_internal()
+                    _latest_result = None
+                    _latest_frame_b64 = None
+                    continue
+
+                if result_to_send.get("type") == "finished":
+                    await websocket.send_json({
+                        "type": "status", "status": "finished",
+                        "message": "视频播放完毕",
+                    })
+                    await _emit_source_status(websocket, "finished", source_echo,
+                                              code="finished", message="视频播放完毕")
+                    _stop_internal()
+                    _latest_result = None
+                    _latest_frame_b64 = None
+                    continue
+
             if frame_b64 is None or result_to_send is None:
+                # 「打开超时」看门狗：到点了还没有**任何一帧**产出，客户端不该无限等下去。
+                # 首帧前失败/卡住是最常见的故障形态（依赖缺失、模型加载慢/失败、源不可达），
+                # 上面那条通道能覆盖"崩溃"，这条覆盖"线程还活着但一直不出画面"。
+                if _active.get("running") and _last_pushed_frame_id < 0:
+                    if open_watchdog_t0 is None:
+                        open_watchdog_t0 = _time.time()
+                    elif _time.time() - open_watchdog_t0 > VIDEO_OPEN_TIMEOUT_SECONDS:
+                        await _emit_source_status(
+                            websocket, "error", source_echo, code="open_timeout",
+                            message=(f"打开超时：{VIDEO_OPEN_TIMEOUT_SECONDS} 秒内没有产出画面，"
+                                     f"已停止。请检查视频源是否可用（或看服务端日志里的具体报错）。"),
+                        )
+                        _stop_internal()
+                        open_watchdog_t0 = None
+                        continue
+                else:
+                    open_watchdog_t0 = None
                 if _last_pushed_frame_id >= 0:
                     await websocket.send_json({
                         "type": "status", "status": "stopped",
@@ -1104,34 +1157,6 @@ async def video_stream(websocket: WebSocket):
                     })
                     _last_pushed_frame_id = -1
                 await asyncio.sleep(WS_POLL_SLEEP_SECONDS)
-                continue
-
-            # 处理线程异常退出的通知通道（由 _guard_processing_thread 写入）：
-            # 必须显式告知客户端，否则画面只是"卡住"，用户完全不知道发生了什么。
-            if result_to_send.get("type") == "error":
-                await websocket.send_json({
-                    "type": "status", "status": "error",
-                    "message": f"视频分析异常已终止：{result_to_send.get('message', '')}",
-                })
-                await _emit_source_status(
-                    websocket, "error", source_echo, code="pipeline_error",
-                    message=f"视频分析异常已终止：{result_to_send.get('message', '')}",
-                )
-                _stop_internal()
-                _latest_result = None
-                _latest_frame_b64 = None
-                continue
-
-            if result_to_send.get("type") == "finished":
-                await websocket.send_json({
-                    "type": "status", "status": "finished",
-                    "message": "视频播放完毕",
-                })
-                await _emit_source_status(websocket, "finished", source_echo,
-                                          code="finished", message="视频播放完毕")
-                _stop_internal()
-                _latest_result = None
-                _latest_frame_b64 = None
                 continue
 
             new_frame_id = result_to_send.get("frame_id", -1)
