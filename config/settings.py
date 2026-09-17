@@ -211,6 +211,28 @@ CHAT_VECTOR_SEARCH_LIMIT = 20
 VECTOR_EMBED_MAX_CHARS = 500
 # 向量搜索默认返回条数
 VECTOR_SEARCH_DEFAULT_LIMIT = 10
+# ---- 向量层熔断（与 db_engine 的 MySQL 熔断同思路）----
+# 连续失败该次数后进入冷却窗口，窗口内**直接降级为关键词检索**，不再发起网络调用。
+# 为什么必须做：Qdrant 停掉时实测并发 40 个向量检索 → 中位 86s、最大 120s，
+# 且把**与向量无关**的接口（同样走 to_thread）拖到 52s —— 坏依赖吃光了线程池。
+VECTOR_BREAKER_FAILS = int(os.environ.get("VECTOR_BREAKER_FAILS", "3"))
+# 冷却时长（秒）：到期后放一次探测，成功即复位
+VECTOR_BREAKER_COOLDOWN_SECONDS = float(
+    os.environ.get("VECTOR_BREAKER_COOLDOWN_SECONDS", "15")
+)
+# ---- 向量层舱壁（bulkhead）：限制**同时**进入向量层的调用数 ----
+# 为什么光有熔断不够（实测教训）：40 个请求在**同一瞬间**到达时，它们会在熔断
+# 打开**之前**就全部通过入口守卫 —— 实测"熔断已生效"但 40 并发的中位延迟仍是
+# 108s、旁路接口仍被拖到 78s。熔断管的是"后续请求"，管不住"同一瞬间的突发"。
+# 真正要限制的是"有多少个线程池 worker 被这个**可选**依赖占住"：向量层是增强能力，
+# 不该占用超过个位数的 worker。
+VECTOR_BULKHEAD_MAX_CONCURRENT = int(
+    os.environ.get("VECTOR_BULKHEAD_MAX_CONCURRENT", "2")
+)
+# 拿不到许可时的等待上限（秒）：等到就正常执行，等不到就**直接降级**（不排队）
+VECTOR_BULKHEAD_WAIT_SECONDS = float(
+    os.environ.get("VECTOR_BULKHEAD_WAIT_SECONDS", "2.0")
+)
 # 人脸检测置信度阈值
 FACE_DETECT_CONF = 0.4
 # 人脸脱敏合规开关：开启（SANITIZE_FACES=1）后推帧/展示时对人脸区域打码
