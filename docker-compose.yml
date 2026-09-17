@@ -55,7 +55,10 @@ services:
       mysql:
         condition: service_healthy
       qdrant:
-        condition: service_started
+        # 原来是 service_started（进程起来就往下走）→ 改成等**真正就绪**：
+        # 否则 backend 会在 Qdrant 还没 ready 时就开始服务，首批语义检索失败降级
+        # （几秒后自愈）—— 演示时表现为「刚开始问问题没有记忆」，很难联想到启动顺序。
+        condition: service_healthy
     ports:
       - "8000:8000"
     # Docker Desktop（Windows/Mac）自带 host.docker.internal；
@@ -159,6 +162,18 @@ services:
     #   - "127.0.0.1:6333:6333"
     volumes:
       - qdrant-docker:/qdrant/storage
+    healthcheck:
+      # ⚠ qdrant 镜像里**没有 curl / wget / python**，只有 bash（实测），
+      #   所以用 bash 的 /dev/tcp 手发一个 HTTP 请求，并要求 `/readyz` 返回 **200**。
+      #   为什么不只看"端口能连上"：那是 E7 批评过的"只证明进程活着"——
+      #   `/readyz` 200 才代表"它已经能对外服务"（索引/存储就绪）。
+      #   注意 printf 里的 `\\r\\n`：YAML 双引号会把 `\\` 还原成 `\`，
+      #   shell 收到 `printf "GET /readyz HTTP/1.0\r\n\r\n"` → 输出真正的 CRLF。
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3 && head -1 <&3 | grep -q 200' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   # ---------------- Redis（常驻：本项目的缓存层） ----------------
   # 定位：项目的**缓存层**，纳入 compose 统一管理（此前是游离的 `docker run` 容器）。
