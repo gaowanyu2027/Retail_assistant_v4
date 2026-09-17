@@ -394,31 +394,42 @@ curl http://localhost:8000/api/health/ready
 ### 镜像与依赖版本（可复现性）
 
 钉版本的原则：**只钉"实测确认过的"版本**，不猜——基础镜像钉错方向可能比本地存储更旧，
-Qdrant 这类有存储格式的组件会直接拒绝启动。
+Qdrant 这类有存储格式的组件会直接拒绝启动；而乱写一个不存在的 tag 会让你下次 `compose up` 直接失败。
+所以下面每个 digest/tag 都是**从本地在跑的镜像或构建缓存里读出来的真值**。
 
-| 项 | 现状 | 实测方式 |
+| 项 | 现状 | 真值来源 |
 |---|---|---|
-| `mysql` | `mysql:8.0.46`（已钉） | 容器内 `SELECT VERSION()` |
-| `qdrant` | `qdrant/qdrant:v1.19.0`（已钉） | 容器内 `GET /` 返回的 `version` |
-| `redis` | `redis:7.4-alpine`（钉到小版本） | 容器内 `redis-server --version` → 7.4.10 |
-| `backend` | 本项目 `retail-assistant:v4`（多阶段构建） | — |
-| `python:3.13-slim` / `node:22-alpine` | **未钉补丁版本** | — |
+| `mysql` | `mysql:8.0.46@sha256:7dcddc01…`（tag + digest） | 容器内 `SELECT VERSION()` |
+| `qdrant` | `qdrant/qdrant:v1.19.0@sha256:057ee3a8…` | 容器内 `GET /` 的 `version` |
+| `redis` | `redis:7.4-alpine@sha256:e7723ff7…` | 容器内 `redis-server --version` → 7.4.10 |
+| `backend` 基础镜像 | `python:3.13-slim@sha256:9d2e5553…`、`node:22-alpine@sha256:c610fcdf…` | BuildKit 缓存里"本次构建实际拉取"的记录 |
+| `backend` Python 依赖 | `requirements.lock.txt`（122 个包全部钉版本） | 容器内 `pip freeze` |
 
-需要**完全可复现**（连补丁版本都不漂）时，改成钉 digest：
+`tag@digest` 的含义：**拉取以 digest 为准** —— 既能一眼看出版本，又不依赖该 tag 是否还在、
+也不怕 tag 被悄悄改指向。这才是真正可复现。
+
+**Python 依赖的两条安装路径**（`Dockerfile` 里的 `USE_LOCK` 开关）：
 
 ```powershell
-# 取每个镜像的 digest（对已拉取的镜像执行，结果可直接写进 docker-compose.yml）
-docker inspect --format '{{index .RepoDigests 0}}' mysql:8.0.46
-docker inspect --format '{{index .RepoDigests 0}}' qdrant/qdrant:v1.19.0
-docker inspect --format '{{index .RepoDigests 0}}' redis:7.4-alpine
-# 形如 mysql@sha256:xxxx，把 image 行写成 「mysql:8.0.46@sha256:xxxx」
+docker compose build backend                  # 默认：按 requirements.txt 的版本下界解析（及时拿到上游修 bug）
+docker compose build backend --build-arg USE_LOCK=1   # 精确：按 requirements.lock.txt 逐包钉死
 ```
 
-> **诚实边界：Python 依赖仍未锁定。** `requirements.txt` 用的是版本**下界**（`>=`），
-> 所以同一个 Dockerfile 在不同时间构建，装到的 `fastapi/pydantic` 等小版本可能不同。
-> 要锁死需要生成 lock（`pip freeze` 必须在**容器内**跑，宿主机环境与镜像不一致，
-> 拿宿主机的 freeze 当锁反而是错的），因此**没有**提交一份来路不明的 lock 文件。
-> 目前的风险面已被 CI 的单测兜住一部分（`unit` job 每次都真装真跑）。
+想生成/更新锁文件时**必须在容器内**执行（宿主机环境与镜像不一致，拿宿主机的 `pip freeze`
+当锁是错的）：
+
+```powershell
+docker compose exec -T backend python -m pip freeze > requirements.lock.txt
+```
+
+需要**连基础镜像的补丁版本也钉住**时（本仓库已用 digest 钉了），可用同样的方式取：
+
+```powershell
+# 经典镜像库里有的（如 mysql/qdrant/redis）
+docker inspect --format '{{index .RepoDigests 0}}' mysql:8.0.46
+# 只存在于 BuildKit 构建缓存里的基础镜像（如 python/node）
+docker buildx du --verbose | Select-String -Pattern 'pulled from .*(python|node)'
+```
 >
 > 实测：停 MySQL 后 readiness 立即 503、恢复后**自动回 200（无需重启 backend）**。
 
