@@ -352,6 +352,15 @@ const StreamManager = {
      */
     openSource(source) {
         this.reconnectAction = { action: 'open_source', params: { source } };
+        // ⚠ kind=client（浏览器采帧）必须**同时**把上行通道 `/api/ws/client` 打开：
+        // 服务端只负责"起管线并等帧"，帧要靠这条 WS 送上去。
+        // 原先只有老入口 `startClientCamera()` 里调了 `startClientStream()`，
+        // 迁移到统一入口 `open_source` 时这一步被漏掉 → 服务端一直等帧、
+        // 前端每帧都被 `sendClientFrame` 静默丢掉 → 界面永久停在"正在打开 client…"
+        // （实测踩过：端点级测试自己连了这条 WS，所以只测服务端时看不出来）。
+        if (source && source.kind === 'client') {
+            this.startClientStream();
+        }
         const sent = this.sendAction('open_source', { source });
         return { sent };
     },
@@ -395,7 +404,16 @@ const StreamManager = {
     sendClientFrame(frameBlob) {
         if (this.clientWs && this.clientWs.readyState === WebSocket.OPEN) {
             this.clientWs.send(frameBlob);
+            this.clientDroppedFrames = 0;
+            return true;
         }
+        // ⚠ 不能静默丢帧：这条通道没建立时，服务端会永远停在"正在打开"，
+        // 而界面上一点提示都没有（实测踩过）。连续丢若干帧后给一次明确提示。
+        this.clientDroppedFrames = (this.clientDroppedFrames || 0) + 1;
+        if (this.clientDroppedFrames === 10 && typeof window !== 'undefined' && window.updateStatus) {
+            window.updateStatus('error', '本机摄像头画面未能上传：上行通道未连接，请刷新页面重试');
+        }
+        return false;
     },
 
     closeClientStream() {
