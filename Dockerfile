@@ -13,7 +13,9 @@
 # ============================================================
 
 # ---------- 阶段 1：构建前端（Vue3 + Vite） ----------
-FROM node:22-alpine AS frontend
+# 基础镜像钉 **digest**（台账 E6）：digest 取自"本机构建时实际拉取的那一个"（BuildKit 缓存记录），
+# 所以 registry 里必然存在；只写 tag 只能保证次版本不漂，补丁版本仍会变。
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS frontend
 WORKDIR /build
 # 先只拷依赖清单，命中 Docker 层缓存（源码变更不会重装依赖）
 COPY frontend-vue/package.json frontend-vue/package-lock.json ./
@@ -22,7 +24,8 @@ COPY frontend-vue/ ./
 RUN npm run build
 
 # ---------- 阶段 2：Python 运行时 ----------
-FROM python:3.13-slim AS runtime
+# 同样钉 digest（见上）；digest 与上面 node 一样取自本机构建缓存记录
+FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285 AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -73,8 +76,22 @@ RUN groupadd -g ${APP_GID} appgroup \
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PYTORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
 COPY requirements.txt ./
-RUN pip install --no-deps --index-url ${PYTORCH_CPU_INDEX} torch torchvision \
-    && pip install --index-url ${PIP_INDEX_URL} -r requirements.txt
+COPY requirements.lock.txt ./
+# 两条安装路径（台账 E6）：
+#   默认（USE_LOCK=0）：按 requirements.txt 的**版本下界**解析 —— 装到的版本会随时间漂，
+#     但能及时拿到上游修 bug 的版本；日常开发用这条。
+#   `--build-arg USE_LOCK=1`：按 **requirements.lock.txt** 精确安装（122 个包全部钉死），
+#     与"已实测跑通的那一版镜像"逐包一致 —— 要复现问题/交付部署时用这条。
+# 锁文件必须在**容器内** `pip freeze` 生成：宿主机环境与镜像不一致，拿宿主机的 freeze 当锁是错的。
+# `--no-deps`：锁文件已是完整依赖闭包，不需要再解析（更快、也不会被上游新版本带偏）。
+ARG USE_LOCK=0
+RUN if [ "$USE_LOCK" = "1" ]; then \
+        pip install --no-deps --index-url ${PIP_INDEX_URL} \
+                    --extra-index-url ${PYTORCH_CPU_INDEX} -r requirements.lock.txt ; \
+    else \
+        pip install --no-deps --index-url ${PYTORCH_CPU_INDEX} torch torchvision \
+        && pip install --index-url ${PIP_INDEX_URL} -r requirements.txt ; \
+    fi
 
 # 应用代码
 COPY . .
