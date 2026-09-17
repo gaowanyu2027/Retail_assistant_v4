@@ -364,6 +364,24 @@ VIDEO_ALLOWED_DIRS = [
 # 上传视频落盘的子目录（必须与 `POST /api/videos` 的保存位置一致，供 kind=upload 映射）
 VIDEO_UPLOAD_SUBDIR = os.environ.get("VIDEO_UPLOAD_SUBDIR", "videos")
 
+# ---- 视频源安全校验（台账 B1 / B6 的收口）----
+# **永久封禁**（任何白名单都不放行）：环回、链路本地（含云元数据 169.254.169.254）、
+# 组播、保留、未指定地址 —— 这些要么打自己、要么打云的凭据服务，没有正当视频源场景。
+# 私网默认**允许**：门店摄像头本来就在内网（config/cameras.yaml 里就有 192.168.10.20），
+# 一刀切封掉会把正常用法打死。
+VIDEO_SOURCE_ALLOW_PRIVATE = os.environ.get("VIDEO_SOURCE_ALLOW_PRIVATE", "1") == "1"
+# 公网默认**拒绝**：公网拉流的正当性低得多，且是 SSRF 的主战场
+VIDEO_SOURCE_ALLOW_PUBLIC = os.environ.get("VIDEO_SOURCE_ALLOW_PUBLIC", "0") == "1"
+# 允许的流协议（不含 http/https —— 那两个单独用 VIDEO_SOURCE_ALLOW_HTTP 控制）
+VIDEO_SOURCE_ALLOWED_SCHEMES = [
+    s.strip().lower() for s in
+    os.environ.get("VIDEO_SOURCE_ALLOWED_SCHEMES", "rtsp,rtsps").split(",") if s.strip()
+]
+VIDEO_SOURCE_ALLOW_HTTP = os.environ.get("VIDEO_SOURCE_ALLOW_HTTP", "0") == "1"
+# 旧别名 `start_file` 是否也强制目录白名单（=1 严格；置 0 可临时回滚）
+# 前端已全部改用 `open_source`，所以默认就收紧；留开关只为万一要回滚。
+VIDEO_LEGACY_START_FILE_STRICT = os.environ.get("VIDEO_LEGACY_START_FILE_STRICT", "1") == "1"
+
 # ==================== 本地语音唤醒模型配置 ====================
 # sherpa-onnx 推理设备：cpu / cuda
 SHERPA_ONNX_PROVIDER = os.environ.get("SHERPA_ONNX_PROVIDER", "cpu")

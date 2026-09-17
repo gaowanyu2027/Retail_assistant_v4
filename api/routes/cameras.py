@@ -84,6 +84,15 @@ async def add_camera(req: CameraCreate,
     _TYPE_VALID = ("indoor_shelf", "entrance", "checkout")
     if req.type not in _TYPE_VALID:
         raise HTTPException(status_code=422, detail=f"未知摄像头类型: {req.type}（可选: {list(_TYPE_VALID)}）")
+    # 台账 B1 收口：`source` 以前**完全不校验**，服务端会拿它去 cv2.VideoCapture() ——
+    # 等于让调用方把服务端当跳板（内网端口探测 / 云元数据 / UNC 外带 NTLM / 任意文件）。
+    # 这里统一过 source_guard：协议白名单 + 环回与链路本地永久封禁 + 私网可配 + 拒绝 UNC。
+    try:
+        import video_sources
+        source = video_sources.guard_source(req.source, client_supplied=False)
+    except Exception as e:
+        code = getattr(e, "code", "bad_request")
+        raise HTTPException(status_code=422, detail=f"视频源不被允许[{code}]: {e}")
     valid = [m for m in req.modules if m in _c(req.type) and m in list_registered_modules()]
     invalid = [m for m in req.modules if m not in valid]
     # 构造并挂到注册表（新增摄像头）—— id 用最大数字后缀递增，避免删除后碰撞覆盖
@@ -95,7 +104,7 @@ async def add_camera(req: CameraCreate,
             max_n = max(max_n, int(m.group(1)))
     cam_id = "cam_" + str(max_n + 1).zfill(2)
     from agents.module_registry import Camera
-    new_cam = Camera(cam_id, req.name, req.type, req.source, valid)
+    new_cam = Camera(cam_id, req.name, req.type, source, valid)
     reg._cameras[cam_id] = new_cam
     return {
         "ok": True, "camera_id": cam_id,

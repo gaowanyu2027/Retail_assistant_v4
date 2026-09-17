@@ -56,7 +56,9 @@ class _StreamThread(threading.Thread):
     def run(self):
         cap = self._open()
         if not cap.isOpened():
-            print(f"[MultiStream] {self.cam_id} 打开视频源失败: {self.source}")
+            import video_sources as _vs
+            print(f"[MultiStream] {self.cam_id} 打开视频源失败: "
+                  f"{_vs.mask_credentials(str(self.source))}")
             return
         # 独立 tracker + ROI（每路一份，数据隔离）
         from api.dependencies import get_roi_manager
@@ -69,7 +71,9 @@ class _StreamThread(threading.Thread):
         # 绑定 module_registry 的该摄像头（喂数据）
         cam = self.registry.get_camera(self.cam_id)
 
-        print(f"[MultiStream] {self.cam_id} 分析线程启动 [{self.source}]")
+        import video_sources as _vs2
+        print(f"[MultiStream] {self.cam_id} 分析线程启动 "
+              f"[{_vs2.mask_credentials(str(self.source))}]")
         t0 = time.time()
         while not self._stop.is_set():
             ok, frame = cap.read()
