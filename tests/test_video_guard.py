@@ -27,12 +27,14 @@ def _rel(p: Path) -> str:
 
 
 @contextlib.contextmanager
-def _allowlisted_media(name: str = "_guard_fixture.mp4"):
-    """在**允许目录**（data/sources）里临时放一个真视频，用完删掉。
+def _allowlisted_media(name: str = "_guard_fixture.mp4", subdir: str = "data/sources"):
+    """在**允许目录**里临时放一个真视频，用完删掉。
 
+    `subdir` 要选对：`file` 类型查的是白名单目录，`upload` 类型查的是**上传目录**
+    （`VIDEO_UPLOAD_SUBDIR`，默认 `data/videos`）—— 放错了会得到 file_not_found 这种假失败。
     `data/` 被 .gitignore 忽略，所以这类用例必须运行时自己造文件。
     """
-    d = PROJECT_ROOT / "data" / "sources"
+    d = PROJECT_ROOT / subdir
     d.mkdir(parents=True, exist_ok=True)
     f = d / name
     f.write_bytes(FIXTURE.read_bytes())
@@ -192,8 +194,19 @@ def test_normalize_file_kind_uses_guard():
 
 
 def test_normalize_upload_only_filename():
-    """upload 只接受文件名；路径穿越会被 basename 化后判为不存在（不会放行）。"""
-    _expect_reject(lambda: vs.normalize({"kind": "upload", "id": "../../etc/passwd.mp4"}))
+    """upload 只接受文件名：路径穿越会被 basename 化，**必须仍落在上传目录内**。
+
+    ⚠ 这里断言的是**语义**（路径被限制在上传目录内），不是"因为某文件恰好不存在所以被拒"。
+    原来写的是 `_expect_reject(../../etc/passwd.mp4)` —— 只要 `data/videos/passwd.mp4`
+    真的存在（例如有人上传过同名文件），这条用例就会失败，属于"依赖环境状态的假测试"
+    （实测被上传验证留下的一个文件触发过）。
+    """
+    with _allowlisted_media(name="passwd.mp4", subdir="data/videos") as f:
+        src = _expect_pass(lambda: vs.normalize({"kind": "upload", "id": "../../etc/passwd.mp4"}))
+        resolved = Path(src["params"]["file_path"]).resolve()
+        upload_root = f.parent.resolve()
+        assert resolved.parent == upload_root, f"路径逃出了上传目录：{resolved}"
+        assert resolved.name == "passwd.mp4", resolved
     _expect_reject(lambda: vs.normalize({"kind": "upload", "id": ""}), "bad_request")
 
 
