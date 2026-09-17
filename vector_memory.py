@@ -5,6 +5,7 @@
 import threading
 import atexit
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,10 @@ from qdrant_client import QdrantClient, models
 
 from config.settings import (
     PROJECT_ROOT,
+    VECTOR_BREAKER_COOLDOWN_SECONDS,
+    VECTOR_BREAKER_FAILS,
+    VECTOR_BULKHEAD_MAX_CONCURRENT,
+    VECTOR_BULKHEAD_WAIT_SECONDS,
     VECTOR_EMBED_MAX_CHARS,
     VECTOR_SEARCH_DEFAULT_LIMIT,
 )
@@ -45,6 +50,114 @@ QDRANT_PATH = Path(
 
 _client: QdrantClient | None = None
 _client_lock = threading.Lock()
+
+
+# ==================== 向量层熔断 ====================
+#
+# 与 `db_engine` 的 MySQL 熔断同思路（同一套阈值/冷却语义），原因也一模一样，
+# 但这里的危害**实测更大**：Qdrant 停掉后并发 40 个 `/api/chat/search`：
+#
+#     向量检索本身   中位 86.2s、最大 120s（超时），只有 29/40 成功
+#     **旁路接口**   `/api/chat/sessions`（与向量毫无关系、同样走 to_thread）
+#                    中位 8ms，但**最大被拖到 52.2s**
+#
+# 根因有两层：① 每次调用都要白等 `_embed`(Ollama, 60s) 与 Qdrant(30s) 的超时；
+# ② `_get_client()` 里的 `collection_exists()` 是**持 `_client_lock` 做的网络调用**，
+#    于是并发请求在锁上排队，把"依赖故障"放大成"线程池被吃光 → 全站排队"。
+#
+# 策略：连续失败 N 次后进入冷却窗口，窗口内**直接快速失败**（不发任何网络请求），
+# 冷却结束放一次探测，成功即复位。故障代价从"每次等超时"降到"首几次 + 之后瞬时"。
+#
+# ⚠ 范围说明：这里用**一个**熔断保护整个"向量能力"（Ollama 嵌入 + Qdrant 检索/写入），
+# 而不是每个依赖一个 —— 因为对调用方来说能力是同一个（不可用就退化为关键词/SQL），
+# 且两者任一挂掉，降级行为完全一致。若要更精细的区分（例如"嵌入挂了但检索还能用"），
+# 拆成两个熔断即可，接口不用改。
+_breaker_lock = threading.Lock()
+_breaker_fails = 0
+_breaker_until = 0.0
+# 舱壁：限制**同时**进入向量层的调用数（信号量 + 有上限的等待）
+_bulkhead = threading.BoundedSemaphore(VECTOR_BULKHEAD_MAX_CONCURRENT)
+
+
+class VectorUnavailable(RuntimeError):
+    """向量层熔断中：近期连续失败，冷却窗口内**不再尝试**（避免每次白等超时）。
+
+    与"Qdrant 返回错误"区分：那些是单次失败，会照常降级；
+    这个表示"我们已经知道它不可用"，直接走降级路径。
+    """
+
+
+def breaker_open() -> bool:
+    """熔断是否处于打开（冷却）状态。"""
+    with _breaker_lock:
+        return time.time() < _breaker_until
+
+
+def breaker_remaining() -> float:
+    """剩余冷却秒数（未熔断时为 0）。"""
+    with _breaker_lock:
+        return max(0.0, _breaker_until - time.time())
+
+
+def breaker_record(ok: bool) -> None:
+    """记录一次向量调用结果，用于维护熔断状态。"""
+    global _breaker_fails, _breaker_until
+    with _breaker_lock:
+        if ok:
+            _breaker_fails = 0
+            _breaker_until = 0.0
+            return
+        _breaker_fails += 1
+        if _breaker_fails >= VECTOR_BREAKER_FAILS and time.time() >= _breaker_until:
+            _breaker_until = time.time() + VECTOR_BREAKER_COOLDOWN_SECONDS
+            print(f"[Vector] 向量层连续失败 {_breaker_fails} 次，"
+                  f"熔断 {VECTOR_BREAKER_COOLDOWN_SECONDS:.0f}s"
+                  f"（期间直接降级为关键词检索，不再白等超时）")
+
+
+def breaker_reset() -> None:
+    """手动复位熔断（测试/运维用）。"""
+    global _breaker_fails, _breaker_until
+    with _breaker_lock:
+        _breaker_fails = 0
+        _breaker_until = 0.0
+
+
+def _breaker_guard(desc: str) -> None:
+    """冷却期内直接抛 `VectorUnavailable`（**不发任何网络请求**）。"""
+    remain = breaker_remaining()
+    if remain > 0:
+        raise VectorUnavailable(
+            f"向量层熔断中（{desc}），剩余冷却 {remain:.0f}s —— 直接降级，不等待超时"
+        )
+
+
+def _qdrant(desc: str, fn, *args, **kwargs):
+    """带**熔断 + 舱壁**的向量层调用（Ollama / Qdrant 都走它）。
+
+    两层保护各管一件事，缺一不可：
+    - **熔断**：管"稳态故障" —— 连续失败 N 次后，后续请求在冷却期内直接降级；
+    - **舱壁**：管"同一瞬间的突发" —— 熔断打开之前可能已有几十个请求同时涌入，
+      它们会一直占着线程池 worker 等超时（实测把**旁路接口**拖到 78s）。
+      这里限制同时进入的调用数，拿不到许可就**立即降级**而不是排队。
+
+    成功清零失败计数；失败累加，达到阈值即进入冷却。
+    """
+    _breaker_guard(desc)
+    if not _bulkhead.acquire(timeout=VECTOR_BULKHEAD_WAIT_SECONDS):
+        raise VectorUnavailable(
+            f"向量层并发已达上限（{VECTOR_BULKHEAD_MAX_CONCURRENT}，等 "
+            f"{VECTOR_BULKHEAD_WAIT_SECONDS:.1f}s 未获许可）—— {desc} 直接降级，不排队"
+        )
+    try:
+        out = fn(*args, **kwargs)
+    except Exception:
+        breaker_record(False)
+        raise
+    finally:
+        _bulkhead.release()
+    breaker_record(True)
+    return out
 
 
 def _close_client():
@@ -105,7 +218,9 @@ def _embed(text: str) -> list[float]:
     )
     if not clean_text:
         clean_text = "空"
-    resp = httpx.post(
+    resp = _qdrant(
+        "embed",
+        httpx.post,
         OLLAMA_EMBED_URL,
         json={"model": EMBED_MODEL, "prompt": _smart_slice(clean_text)},
         timeout=60,
@@ -122,6 +237,9 @@ def _embed(text: str) -> list[float]:
 
 def _get_client() -> QdrantClient:
     global _client
+    # 熔断冷却期内**连客户端都不建**（建客户端/探测 collection 都是网络调用，
+    # 而这正是 Qdrant 不可用时的第一个失败点）。
+    _breaker_guard("get_client")
     with _client_lock:
         if _client is None:
             if QDRANT_URL:
@@ -165,9 +283,9 @@ def upsert_message(
     而这条路径的检索结果会直接进入 LLM 上下文，是最隐蔽的泄露点。
     """
     vector = _embed(f"{title}\n{question}\n{answer}")
-    client = _get_client()
+    client = _qdrant("get_client", _get_client)
     with _client_lock:
-        client.upsert(
+        _qdrant("upsert", client.upsert,
             collection_name=COLLECTION_NAME,
             points=[
                 models.PointStruct(
@@ -190,9 +308,9 @@ def upsert_message(
 
 def delete_message(message_id: int):
     """从向量库删除一条消息。"""
-    client = _get_client()
+    client = _qdrant("get_client", _get_client)
     with _client_lock:
-        client.delete(
+        _qdrant("delete", client.delete,
             collection_name=COLLECTION_NAME,
             points_selector=models.PointIdsList(points=[int(message_id)]),
         )
@@ -218,9 +336,9 @@ def search_messages(query: str, limit: int = VECTOR_SEARCH_DEFAULT_LIMIT, owner:
     if not query:
         return []
     vector = _embed(query)
-    client = _get_client()
+    client = _qdrant("get_client", _get_client)
     with _client_lock:
-        response = client.query_points(
+        response = _qdrant("query_points", client.query_points,
             collection_name=COLLECTION_NAME,
             query=vector,
             limit=limit,
@@ -258,9 +376,9 @@ def upsert_session_summary(session_id: str, summary: str, keywords: str = "", ow
     """
     try:
         vector = _embed(f"{keywords}\n{summary}")
-        client = _get_client()
+        client = _qdrant("get_client", _get_client)
         with _client_lock:
-            client.upsert(
+            _qdrant("upsert", client.upsert,
                 collection_name=SESSION_SUMMARY_COLLECTION,
                 points=[
                     models.PointStruct(
@@ -282,9 +400,9 @@ def upsert_session_summary(session_id: str, summary: str, keywords: str = "", ow
 def delete_session_summary(session_id: str):
     """从摘要索引删除一条长期记忆。"""
     try:
-        client = _get_client()
+        client = _qdrant("get_client", _get_client)
         with _client_lock:
-            client.delete(
+            _qdrant("delete", client.delete,
                 collection_name=SESSION_SUMMARY_COLLECTION,
                 points_selector=models.PointIdsList(points=[_summary_point_id(session_id)]),
             )
@@ -303,9 +421,9 @@ def search_session_summaries(query: str, limit: int = 3, owner: str | None = Non
         return []
     try:
         vector = _embed(query)
-        client = _get_client()
+        client = _qdrant("get_client", _get_client)
         with _client_lock:
-            response = client.query_points(
+            response = _qdrant("query_points", client.query_points,
                 collection_name=SESSION_SUMMARY_COLLECTION,
                 query=vector,
                 limit=limit,

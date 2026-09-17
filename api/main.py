@@ -522,9 +522,15 @@ async def health_ready():
             return False, type(e).__name__
 
     def _probe_qdrant() -> tuple[bool, str]:
-        """非致命依赖。返回 (是否降级, detail)。嵌入式模式（未配 QDRANT_URL）不算降级。"""
+        """非致命依赖。返回 (是否降级, detail)。嵌入式模式（未配 QDRANT_URL）不算降级。
+
+        ⚠ 先看**熔断状态**：向量层已熔断（说明确实连不上）时直接报告降级，
+        不再发这次 3 秒的探测请求 —— 既省时间，也避免探针自己成为慢端点。
+        """
         try:
             import vector_memory
+            if vector_memory.breaker_open():
+                return True, f"breaker_open({vector_memory.breaker_remaining():.0f}s)"
             qurl = (getattr(vector_memory, "QDRANT_URL", "") or "").rstrip("/")
             if not qurl:
                 return False, "embedded"
