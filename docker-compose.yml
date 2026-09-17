@@ -124,7 +124,11 @@ services:
   # ---------------- MySQL（业务数据持久化） ----------------
   mysql:
     logging: *default-logging
-    image: mysql:8.0
+    # 台账 E6：钉到**实测在跑的版本**（宿主机 `SELECT VERSION()` → 8.0.46），
+    # 不再用 8.0 这种会随时间漂移的浮动 tag（同一份 compose 今天和半年后构建出不同环境）。
+    # `tag@digest` 形式：**拉取以 digest 为准**，既能一眼看出版本，又不依赖该 tag 是否还在，
+    # 也不会被 tag 悄悄改指向（这才是真正可复现）。
+    image: mysql:8.0.46@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
     restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
@@ -154,7 +158,14 @@ services:
   # ---------------- Qdrant（向量检索，Server 模式） ----------------
   qdrant:
     logging: *default-logging
-    image: qdrant/qdrant:latest
+    # 台账 E6：原来写 `qdrant/qdrant:latest` —— 那是**跨大版本浮动**，
+    # 同一份 compose 在不同时间会拉到不同大版本，改动不可复现。
+    # 这里钉到**容器内实测的版本**（HTTP `/` 返回 1.19.0）。
+    # ⚠ 升级方向是安全的（Qdrant 会前向迁移存储），但**不要钉到比本地存储更旧的版本**：
+    #   降级会直接拒绝启动。换版本前先确认在跑的是哪个：
+    #   docker compose exec -T qdrant bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333; printf "GET / HTTP/1.0\r\n\r\n" >&3; timeout 3 cat <&3' | tail -1
+    # `tag@digest`：拉取以 digest 为准（不依赖 tag 是否还在、也不怕 tag 被改指向）
+    image: qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
     restart: unless-stopped
     # 同上：向量库仅在 compose 网络内被 backend 访问。
     # 想在宿主机看 Qdrant 面板时取消注释（注意端口冲突）。
@@ -192,7 +203,9 @@ services:
   #     - 实时视频帧 / _active_camera：高频且体积大，进程内比走网络快。
   redis:
     logging: *default-logging
-    image: redis:7-alpine
+    # 台账 E6：钉到小版本（容器内 `redis-server --version` 实测 7.4.10）。
+    # `tag@digest`：拉取以 digest 为准（digest 来自本地在跑的镜像，registry 里必然存在）
+    image: redis:7.4-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     restart: unless-stopped
     command:
       # 作为缓存层要限制内存并用 LRU 淘汰，避免把宿主机内存吃光。

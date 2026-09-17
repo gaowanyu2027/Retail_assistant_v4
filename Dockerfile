@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # ============================================================
 # 智能零售分析系统 v4 — 后端镜像（多阶段构建）
 #
@@ -51,6 +50,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# ---------- 非 root 运行（台账 E2）----------
+# 容器被攻破时不该直接拿到 root：默认建一个普通用户，最后一律以它运行。
+# uid/gid 默认 1000，与常见 Linux 宿主用户一致 —— `./data`、`./config` 这类
+# bind mount 的属主通常就是 1000，uid 不一致时非 root 进程写不进挂载目录
+# （Windows/Docker Desktop 的 9p 挂载不校验属主，本地开发不受影响）。
+# 需要自定义时：`docker compose build --build-arg APP_UID=$(id -u)`。
+ARG APP_UID=1000
+ARG APP_GID=1000
+RUN groupadd -g ${APP_GID} appgroup \
+    && useradd -m -u ${APP_UID} -g ${APP_GID} -s /usr/sbin/nologin appuser
+
 # 依赖安装：torch/torchvision 走 CPU 源，避免拉到 CUDA 版（镜像会大 2~3 倍）。
 #
 # 这里用 --no-deps 是**构建提速**的关键：
@@ -82,6 +92,22 @@ RUN mkdir -p /app/data
 # 放在最后：避免使上方那层昂贵的 pip 安装层缓存失效。
 RUN mkdir -p /tmp/Ultralytics
 ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
+
+# 非 root 前必须把**运行期要写**的路径交给 appuser，否则这些功能会静默失效
+# （它们都只打一行日志，看起来像"配置没生效"，很难定位）：
+#   - /app/config/*.yaml   ROI 保存（`roi_manager.save_to_yaml`）、摄像头配置持久化
+#   - /app/data            SQLite 鉴权库 / 上传视频 / 录制文件（compose 里是 bind mount，
+#                          Linux 下要求宿主目录属主与 APP_UID 一致）
+#   - /app/qdrant_data     仅嵌入式向量模式用（compose 走 Server 模式不需要，留空目录兜底）
+#   - /tmp/Ultralytics     ultralytics 配置目录（判定依据就是"父目录可写"）
+#
+# ⚠ **只 chown 这几个目录，不要 `chown -R /app`**：那会把代码目录也变成可写，
+# 被攻破的进程就能改自己的代码（实测踩过：`/app/api` 变成可写）。
+RUN mkdir -p /app/qdrant_data \
+    && chown -R appuser:appgroup /app/config /app/data /app/qdrant_data /tmp/Ultralytics
+
+# 以非 root 运行（此后所有 RUN/CMD/HEALTHCHECK 都在该用户下）
+USER appuser
 
 EXPOSE 8000
 

@@ -104,7 +104,7 @@ pip install PyMySQL qdrant-client edge-tts
 
 ### 3. 配置环境变量
 
-系统从环境变量读取密钥与配置（**所有值均不在代码/仓库中硬编码**）。下面是完整清单，标注了**必选 / 可选**。
+系统从环境变量读取密钥与配置：**密钥不在代码与仓库中硬编码**（库名、上游地址等非密配置仍写在代码/编排里，例如 `mysql_db.MYSQL_DB`、`LLM_BASE_URL`）。下面是**常用清单**（不是全集——代码实际读取 50+ 个变量，完整项见 `.env.example` 与 `config/settings.py`），标注了**必选 / 可选**。
 
 > 提示：可用 Windows 用户环境变量（`$env:xxx`）或 `.env` 文件。若用 `.env`，请在项目根目录创建且**不要提交**（`gitignore` 已忽略 `.env`）；模板见下方 `.env.example`。
 
@@ -139,8 +139,13 @@ $env:baidu_map_sk   = "你的百度地图SK"
 | `QDRANT_PATH` | 本地嵌入向量库目录 | `qdrant_data/` | 仅嵌入式模式用 |
 | `SHERPA_ONNX_PROVIDER` | 本地语音推理设备 | `cpu` | 有 CUDA 可设 `cuda` |
 | `BAIDU_MCP_ENABLED` | 百度官方 MCP 叠加 | 空 | 设 `1` 启用 14 个通用地图工具 |
-| `LANGFUSE_PUBLIC_KEY` | Langfuse 可观测 Public Key | 空 | 两个 key 齐了才启用 Trace |
+| `LANGFUSE_PUBLIC_KEY` | Langfuse 可观测 Public Key | 空 | 与 Secret Key 齐了才启用 Trace |
 | `LANGFUSE_SECRET_KEY` | Langfuse 可观测 Secret Key | 空 | 同上 |
+| `LANGFUSE_HOST` | Langfuse 服务地址 | `https://cloud.langfuse.com`（SDK 默认） | **自托管时必填**：本机直跑用 `http://localhost:3000`，容器内用 `http://host.docker.internal:3000`；不填会静默上报到 Langfuse Cloud |
+
+> ⚠ **`MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `QDRANT_URL` 只在本机直跑时生效**：
+> `docker compose` 会用自己的 `environment` 段覆盖它们（连服务名 `mysql` / `qdrant`）。
+> 容器部署下要改这些，请改 `docker-compose.yml`，改 `.env` 没用。
 
 ```powershell
 # 可选：启用功能时再设（不设则用默认值）
@@ -152,6 +157,9 @@ $env:BAIDU_MCP_ENABLED      = "1"     # 百度 MCP
 #### `.env.example` 模板（可复制使用）
 
 > 复制为 `.env` 并填入真实值，**不要提交 `.env`**。
+> 下面只是**节选**；`.env.example` 里还有整段「登录鉴权（可选）」变量
+> （`AUTH_ENABLED` / `AUTH_ROOT_USERNAME` / `AUTH_SESSION_HOURS` / 登录限流三项 /
+> `AUTH_MIN_PASSWORD_LEN` / `AUTH_COOKIE_SECURE` / `AUTH_CORS_ORIGINS` / `AUTH_PUBLIC_DOCS` 等）。
 
 ```ini
 # ===== 必选 =====
@@ -172,6 +180,15 @@ baidu_map_sk=你的百度地图SK
 # BAIDU_MCP_ENABLED=1
 # LANGFUSE_PUBLIC_KEY=
 # LANGFUSE_SECRET_KEY=
+# LANGFUSE_HOST=http://localhost:3000
+
+# ===== 登录鉴权（可选，完整项见 .env.example）=====
+# AUTH_ENABLED=1
+# AUTH_ROOT_USERNAME=root
+# AUTH_ROOT_PASSWORD=            # ≥8 位且不在弱口令表里，否则回退随机口令
+# AUTH_SESSION_HOURS=12
+# AUTH_COOKIE_SECURE=0           # HTTPS 部署请置 1
+# AUTH_PUBLIC_DOCS=0             # 置 1 则 /docs 免登录
 ```
 
 #### Ollama（可选，向量召回用）
@@ -296,14 +313,17 @@ python run.py --port 8000
 访问：
 
 - 前端页面：http://localhost:8000
-- API 文档：http://localhost:8000/docs
+- API 文档：http://localhost:8000/docs （**默认需要登录**，见下方登录说明）
 
 > 前端为 **Vue 构建版**（`frontend-vue/dist`，v4 起为唯一浏览器前端）。若构建产物缺失或不完整，
 > 服务端会在终端打印告警并显示"前端未构建"提示页；此时执行 `cd frontend-vue && npx vite build` 重新构建即可。
 > 浏览器端若 Vue 加载失败（资源缺失/挂载超时/未处理异常），页面会提示刷新并在终端输出原因。
 >
-> **登录**：v4 起 `/api/*` 默认需要登录。首次启动时终端会打印自动创建的 root 账号与随机密码
-> （也可用环境变量 `AUTH_ROOT_PASSWORD` 预先指定）。
+> **登录**：v4 起 `/api/*` 与**接口文档**（`/docs`、`/redoc`、`/openapi.json`）默认都需要登录
+> （`AUTH_PUBLIC_DOCS=1` 可放开文档）。root 账号与随机密码**只在鉴权库里一个账号都没有时**
+> 才会自动创建并打印（即首次初始化 `data/auth.db`；已有账号时启动不再打印），
+> 也可用环境变量 `AUTH_ROOT_PASSWORD` 预先指定（需 ≥8 位且不在弱口令表，否则回退随机口令）。
+> 忘了密码用 `python tools/reset_password.py` 离线重置。
 
 启动后终端应看到：
 
@@ -326,23 +346,23 @@ copy .env.example .env      # 填入 dazuoye_api / mysql_root 等（.env 已被 
 
 ```powershell
 docker compose up -d --build
-docker compose logs -f backend     # 观察启动日志（首次会打印 root 账号与随机密码）
+docker compose logs -f backend     # 观察启动日志（root 口令只在鉴权库为空时打印一次）
 ```
 
-访问 **http://localhost:8000**。停止：`docker compose down`（数据在命名卷里，不会丢）。
+访问 **http://localhost:8000**。停止：`docker compose down`（MySQL/Qdrant/Redis 的数据在命名卷里，不会丢；应用侧的 `./data` 是 bind mount，`down` 不带 `-v` 同样保留）。
 
 ### 编排内容
 
 | 服务 | 镜像 | 宿主端口 | 说明 |
 |---|---|---|---|
-| `backend` | 本项目（多阶段构建） | **8000** | FastAPI + Agent + 前端静态资源 |
-| `mysql` | mysql:8.0 | 不发布 | 业务数据（`depends_on` + healthcheck 确保就绪后再起后端） |
-| `qdrant` | qdrant/qdrant | 不发布 | 向量检索（Server 模式，支持多进程） |
-| `redis` | redis:7-alpine | 不发布 | **常驻**（本项目的缓存层）。代码当前尚未读写 Redis，见下方「Redis 定位」 |
+| `backend` | 本项目（多阶段构建，**非 root 用户运行**） | **8000** | FastAPI + Agent + 前端静态资源 |
+| `mysql` | `mysql:8.0.46`（钉版本，见「镜像与依赖版本」） | `127.0.0.1:3306`（仅本机） | 业务数据（`depends_on` + healthcheck 确保就绪后再起后端） |
+| `qdrant` | `qdrant/qdrant:v1.19.0`（已钉，见「镜像与依赖版本」） | 不发布 | 向量检索（Server 模式，支持多进程） |
+| `redis` | `redis:7.4-alpine`（钉到小版本） | 不发布 | **常驻**（本项目的缓存层）。代码当前尚未读写 Redis，见下方「Redis 定位」 |
 
-> 只有 `backend` 对外发布端口。MySQL/Qdrant/Redis 仅在 compose 网络内被 backend 通过
-> 服务名访问，**不暴露到宿主机**——既避免端口冲突，也少一个攻击面。
-> 需要用 GUI 客户端连库时，取消 `docker-compose.yml` 里对应 `ports` 的注释即可（已限 `127.0.0.1`）。
+> **端口**：`backend` 发布 `8000`；`mysql` 为了用 Navicat 等 GUI 连库，按需发布为
+> **`127.0.0.1:3306`（只绑本机、不对局域网开放）**，不想要就把 `docker-compose.yml` 里那段 `ports` 注释掉；
+> `qdrant` / `redis` 的 `ports` 默认注释、仅在 compose 网络内通过服务名访问，要用 `redis-cli` 等调试时再取消注释。
 
 ### 健康检查：liveness 与 readiness 分开
 
@@ -354,8 +374,10 @@ docker compose logs -f backend     # 观察启动日志（首次会打印 root �
 就绪探针的判定策略（有意区分"致命"与"降级"）：
 
 - **MySQL 不可用 → 503**：业务数据读写全废，服务等于不能用
-- Qdrant / Redis 不可用 → 仍 200，但列入 `degraded`：向量召回退化为关键词、缓存未命中，
-  主链路（问答 / 报表 / 鉴权）不受影响，不该因此判死
+- Qdrant 不可用 → 仍 200，但列入 `degraded`：向量召回退化为关键词，主链路
+  （问答 / 报表 / 鉴权）不受影响，不该因此判死
+- `redis` **不参与探测、也不会出现在 `degraded` 里**：代码当前尚未读写 Redis（缓存层待接入），
+  为它探测等于自欺（详见下方「Redis 定位」）
 - CV 引擎未初始化 → 列入 `degraded`（容器内没有摄像头属预期）
 
 ```powershell
@@ -368,13 +390,42 @@ curl http://localhost:8000/api/health/ready
 > **为什么必须两个都有**：本项目实际发生过"MySQL 口令没传进容器 → 后端静默回退 SQLite
 > → `/api/health` 依然 200 healthy → 编排与看板全以为正常，但业务数据一条都读不到"。
 > liveness 探针**天然发现不了**这类问题。修好后该场景会立刻变 `unavailable`。
+
+### 镜像与依赖版本（可复现性）
+
+钉版本的原则：**只钉"实测确认过的"版本**，不猜——基础镜像钉错方向可能比本地存储更旧，
+Qdrant 这类有存储格式的组件会直接拒绝启动。
+
+| 项 | 现状 | 实测方式 |
+|---|---|---|
+| `mysql` | `mysql:8.0.46`（已钉） | 容器内 `SELECT VERSION()` |
+| `qdrant` | `qdrant/qdrant:v1.19.0`（已钉） | 容器内 `GET /` 返回的 `version` |
+| `redis` | `redis:7.4-alpine`（钉到小版本） | 容器内 `redis-server --version` → 7.4.10 |
+| `backend` | 本项目 `retail-assistant:v4`（多阶段构建） | — |
+| `python:3.13-slim` / `node:22-alpine` | **未钉补丁版本** | — |
+
+需要**完全可复现**（连补丁版本都不漂）时，改成钉 digest：
+
+```powershell
+# 取每个镜像的 digest（对已拉取的镜像执行，结果可直接写进 docker-compose.yml）
+docker inspect --format '{{index .RepoDigests 0}}' mysql:8.0.46
+docker inspect --format '{{index .RepoDigests 0}}' qdrant/qdrant:v1.19.0
+docker inspect --format '{{index .RepoDigests 0}}' redis:7.4-alpine
+# 形如 mysql@sha256:xxxx，把 image 行写成 「mysql:8.0.46@sha256:xxxx」
+```
+
+> **诚实边界：Python 依赖仍未锁定。** `requirements.txt` 用的是版本**下界**（`>=`），
+> 所以同一个 Dockerfile 在不同时间构建，装到的 `fastapi/pydantic` 等小版本可能不同。
+> 要锁死需要生成 lock（`pip freeze` 必须在**容器内**跑，宿主机环境与镜像不一致，
+> 拿宿主机的 freeze 当锁反而是错的），因此**没有**提交一份来路不明的 lock 文件。
+> 目前的风险面已被 CI 的单测兜住一部分（`unit` job 每次都真装真跑）。
 >
 > 实测：停 MySQL 后 readiness 立即 503、恢复后**自动回 200（无需重启 backend）**。
 
 ### 日志轮转（避免吃满磁盘）
 
 四个服务都配了 `json-file` 驱动的轮转（`max-size: 50m` / `max-file: 5`，单服务约 250MB 封顶）。
-项目里有 211 处 `print()` 全走 stdout，而 Docker 默认**无大小上限**——叠加每 10 分钟一轮的
+项目里有约 240 处 `print()` 全走 stdout（实测口径：排除 vendored 与测试脚本），而 Docker 默认**无大小上限**——叠加每 10 分钟一轮的
 LLM 汇报与每 60 秒的销量目录扫描，长期运行会把宿主机磁盘逐步吃满，
 而磁盘满又会连带 MySQL 写入失败，属于"平时无感、出事很惨"。
 
@@ -480,7 +531,8 @@ docker stop mysql-main qdrant
 
 原因是**共享卷**：本编排复用同名卷（`mysql8_volume` / `qdrant-docker`），
 而**同一个卷被两个 MySQL 同时挂载会损坏数据文件**。
-（本编排不发布 3306/6333，所以这里不是端口冲突问题。）
+（本编排里 3306 只绑在 `127.0.0.1`、6333 默认不发布，所以这里主要不是端口冲突问题；
+但旧实例若用的是别的端口映射，仍可能撞上 `8000`。）
 
 复用卷的好处是**数据完整保留**，不用重新导。谨慎起见先备份：
 
