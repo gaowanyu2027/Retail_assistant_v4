@@ -14,13 +14,17 @@
           </button>
           <div v-show="cameraMenuOpen" id="camera-menu" class="camera-menu">
             <!-- 菜单按**服务端能力**渲染：不可用的项置灰并说明原因（不再让用户点了没反应） -->
+            <!-- 文案刻意带上定位，避免"服务器摄像头 vs 上传视频 vs 本机摄像头"三者被误读成同一件事：
+                 服务器摄像头 = 门店**固定机位**（配置在 cameras.yaml，持久；真实门店填 RTSP）
+                 本地摄像头   = **你眼前这台电脑**的摄像头（浏览器采集，不经服务端设备）
+                 上传视频     = **临时素材**（落 data/videos，可能被保留期清理） -->
             <button type="button" @click="selectCamera('webcam')"
                     :disabled="!capCamera.enabled" :title="capCamera.reason || ''">
-              服务器摄像头{{ capCamera.enabled ? '' : '（不可用）' }}
+              服务器摄像头（门店固定机位）{{ capCamera.enabled ? '' : '（不可用）' }}
             </button>
             <button type="button" @click="selectCamera('local')"
                     :disabled="!capClient.enabled" :title="capClient.reason || ''">
-              本机摄像头{{ capClient.enabled ? '' : '（不可用）' }}
+              本地摄像头（这台电脑）{{ capClient.enabled ? '' : '（不可用）' }}
             </button>
             <button type="button" @click="startRtspCamera"
                     :disabled="!capRtsp.enabled" :title="capRtsp.reason || ''">
@@ -29,7 +33,8 @@
             <div v-if="cameraHint" class="camera-menu-hint">{{ cameraHint }}</div>
           </div>
         </div>
-        <button id="btn-upload" class="btn btn-secondary" :disabled="cameraActive" @click="openFilePicker">上传视频</button>
+        <button id="btn-upload" class="btn btn-secondary" :disabled="cameraActive" @click="openFilePicker"
+                title="临时素材：上传一段视频播放/离线分析（存放在 data/videos，受保留期清理）">上传视频（临时素材）</button>
         <input type="file" id="file-input" accept="video/*" style="display:none" @change="onFileSelected">
         <button id="btn-stop" class="btn btn-danger" :disabled="!cameraActive" @click="stopVideo">停止</button>
         <button id="btn-voice" class="btn btn-success">🎤 语音输入</button>
@@ -283,7 +288,7 @@ export default {
     },
     cameraHint() {
       if (!this.capCamera.enabled) return '服务器摄像头不可用：' + this.capCamera.reason
-      if (!this.capClient.enabled) return '本机摄像头不可用：' + this.capClient.reason
+      if (!this.capClient.enabled) return '本地摄像头不可用：' + this.capClient.reason
       return ''
     },
   },
@@ -629,7 +634,7 @@ export default {
             const name = c.label || ('摄像头 ' + (i + 1))
             return `${i}: ${name}`
           })
-          const choice = prompt('选择本机摄像头：\n' + labels.join('\n'), '0')
+            const choice = prompt('选择本地摄像头（这台电脑）：\n' + labels.join('\n'), '0')
           if (choice === null) return
           const idx = parseInt(choice) || 0
           deviceId = cameras[Math.min(idx, cameras.length - 1)]?.deviceId
@@ -691,7 +696,7 @@ export default {
         this.cameraActive = true
         this.sourceType = 'local'
         drawLocalPreview()
-        window.updateStatus('online', '本机摄像头运行中')
+        window.updateStatus('online', '本地摄像头运行中（这台电脑）')
         if (this.currentMode === 'emotion') {
           this.updateEmoStatus(true)
         }
@@ -755,7 +760,7 @@ export default {
           : name === 'NotFoundError' ? '没有检测到摄像头设备'
           : name === 'NotReadableError' ? '摄像头被其他程序占用（关掉占用它的软件后重试）'
           : (e && e.message) || '未知错误'
-        window.updateStatus('error', `无法访问本机摄像头：${hint}`)
+        window.updateStatus('error', `无法访问本地摄像头：${hint}`)
         if (this.currentMode === 'retail') {
           this.answerHtml = `<p style="color:var(--accent-red)">无法访问摄像头: ${this.escapeHtml(hint)}</p>`
         }

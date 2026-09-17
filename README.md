@@ -324,6 +324,10 @@ python run.py --port 8000
 > 才会自动创建并打印（即首次初始化 `data/auth.db`；已有账号时启动不再打印），
 > 也可用环境变量 `AUTH_ROOT_PASSWORD` 预先指定（需 ≥8 位且不在弱口令表，否则回退随机口令）。
 > 忘了密码用 `python tools/reset_password.py` 离线重置。
+>
+> **视频源打不开时先跑体检**：`python tools/check_video_sources.py --user root --password '你的密码'`
+> 会把配置里的每台摄像头**真开一遍**，逐台报告"出没出画面 / 卡在哪一步 / 报什么错误码"
+> （容器里 `webcam` 这类物理设备必然不可用，它会直接说明原因）。
 
 启动后终端应看到：
 
