@@ -1,21 +1,39 @@
 # 摄像头配置 — 按标签(type)分配候选模块，按 modules 加载实际模块
 # type（标签）: indoor_shelf / entrance / checkout
 # modules: 该摄像头实际加载的分析模块（必须在标签候选池内，否则注册表校验警告）
+#
+# ⚠ source 的三种形态（这条注释是为了避免"服务器摄像头"被误当成普通文件播放）：
+#   - 相对路径   仓库内的视频文件（演示用；服务端可信，但仍要求文件存在）
+#   - rtsp://    真实门店里的网络摄像头（**生产形态**；容器/宿主机都要能网络可达该设备）
+#   - webcam     服务端所在机器的**物理摄像头**（容器内做不到：WSL2 没有 /dev/video*）
+# 改成 `source` 后重启后端生效；也可以用界面上的摄像头菜单临时切换，不改这里。
 cameras:
   cam_in_01:
     name: "1号店内货架摄像头"
     type: indoor_shelf
-    source: "mmpose/demo/resources/demo.mp4"
+    # 演示源：**30 秒 / 150 帧**（5fps）。
+    # ⚠ 不要换回 `mmpose/demo/resources/demo.mp4` —— 那个只有 5 帧（≈1 秒），
+    #   点开瞬间就"播放完毕"，看起来像坏了。
+    # 放在 data/sources/ 而不是 data/videos/：后者是录制输出目录，受 DB_RECORD_KEEP_DAYS
+    # 保留期（默认 30 天）按 mtime 清理，长期演示素材会被删掉。
+    source: "data/sources/long_demo.mp4"
     modules: [shelf_heat, anomaly_detect, empty_shelf]
 
   cam_door_02:
-    name: "2号店门口摄像头"
+    # ⚠ 示例配置：本机**没有接入**这台设备（地址不可达，点开会明确报 source_open_failed）。
+    # 保留它是为了展示"真实门店形态"——生产部署时把 source 换成门店里那台摄像头的 RTSP 地址即可，
+    # 例如 `rtsp://用户名:密码@设备IP:554/<设备手册给的路径>`（路径各厂商不同，以手册为准）。
+    name: "2号店门口摄像头（示例，未接入）"
     type: entrance
     source: "rtsp://192.168.10.20:554/stream"
     modules: [footfall]
 
   cam_check_03:
-    name: "3号收银台摄像头"
+    # ⚠ `webcam` = **服务端所在机器**的物理摄像头。
+    #   容器里不可用（WSL2 内核没有摄像头设备节点，Docker 无法直通）；
+    #   宿主机直跑（python run.py）时才可能打开。
+    #   想用"你眼前这台电脑"的摄像头，请用界面上的「本地摄像头」（浏览器采集）。
+    name: "3号收银台摄像头（服务端物理设备）"
     type: checkout
     source: "webcam"
     modules: [emotion_experience]
