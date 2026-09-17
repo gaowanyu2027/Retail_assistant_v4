@@ -13,8 +13,16 @@
             {{ cameraActive ? '切换摄像头' : '摄像头' }}
           </button>
           <div v-show="cameraMenuOpen" id="camera-menu" class="camera-menu">
-            <button type="button" @click="selectCamera('webcam')">服务器摄像头</button>
-            <button type="button" @click="selectCamera('local')">本机摄像头</button>
+            <!-- 菜单按**服务端能力**渲染：不可用的项置灰并说明原因（不再让用户点了没反应） -->
+            <button type="button" @click="selectCamera('webcam')"
+                    :disabled="!capCamera.enabled" :title="capCamera.reason || ''">
+              服务器摄像头{{ capCamera.enabled ? '' : '（不可用）' }}
+            </button>
+            <button type="button" @click="selectCamera('local')"
+                    :disabled="!capClient.enabled" :title="capClient.reason || ''">
+              本机摄像头{{ capClient.enabled ? '' : '（不可用）' }}
+            </button>
+            <div v-if="cameraHint" class="camera-menu-hint">{{ cameraHint }}</div>
           </div>
         </div>
         <button id="btn-upload" class="btn btn-secondary" :disabled="cameraActive" @click="openFilePicker">上传视频</button>
@@ -237,7 +245,39 @@ export default {
       })(),
       emoPieChart: null,
       retailEmoChart: null,
+      videoCaps: null,        // GET /api/video/sources 的能力描述（决定菜单可用性）
+      sourceState: '',        // 最近一次 source_status 的 state
     }
+  },
+  computed: {
+    // ---- 按服务端能力决定菜单可用性（不可用要**说明原因**，而不是点了没反应）----
+    capKinds() {
+      const map = {}
+      const kinds = (this.videoCaps && this.videoCaps.kinds) || []
+      kinds.forEach(k => { map[k.kind] = k })
+      return map
+    },
+    capClient() {
+      const k = this.capKinds.client
+      return { enabled: !k || k.available !== false, reason: (k && k.reason) || '' }
+    },
+    capCamera() {
+      const k = this.capKinds.camera
+      const cams = (this.videoCaps && this.videoCaps.cameras) || []
+      const usable = cams.filter(c => c.available !== false)
+      if (k && k.available === false) {
+        return { enabled: false, reason: k.reason || '服务端不支持摄像头来源' }
+      }
+      if (this.videoCaps && cams.length && !usable.length) {
+        return { enabled: false, reason: cams.map(c => `${c.name || c.id}: ${c.reason || '不可用'}`).join('；') }
+      }
+      return { enabled: true, reason: '' }
+    },
+    cameraHint() {
+      if (!this.capCamera.enabled) return '服务器摄像头不可用：' + this.capCamera.reason
+      if (!this.capClient.enabled) return '本机摄像头不可用：' + this.capClient.reason
+      return ''
+    },
   },
   mounted() {
     // 供 stream.js / voice.js 调用的全局函数（与原生 app.js 一致）
@@ -255,6 +295,32 @@ export default {
       if (el2) el2.textContent = faceCount
     }
     window.renderAnalysisReport = (seg) => this.renderAnalysisReport(seg)
+
+    // 统一源状态回执（A 档）：把 state/code 翻译成状态栏文案
+    StreamManager.onSourceStatus((msg) => {
+      this.sourceState = msg.state
+      const src = msg.source || {}
+      const label = src.name || src.path || src.id || src.kind || '视频源'
+      if (msg.state === 'opening') {
+        window.updateStatus('warning', `正在打开 ${label}…` + (msg.replaced ? '（已替换原视频源）' : ''))
+      } else if (msg.state === 'running') {
+        this.framesSeen = true
+        const modeLabel = this.currentMode === 'retail' ? '货架' : '出入口'
+        window.updateStatus('online', `${modeLabel}摄像头运行中（${label}）`)
+      } else if (msg.state === 'error') {
+        this.cameraActive = false
+        this.framesSeen = false
+        // code 是机器可读的：把它也显示出来，便于对着文档/日志定位
+        window.updateStatus('warning', `${msg.message || '视频源打开失败'}${msg.code ? ' [' + msg.code + ']' : ''}`)
+      } else if (msg.state === 'finished' || msg.state === 'stopped') {
+        this.cameraActive = false
+        this.framesSeen = false
+        window.updateStatus('offline', msg.message || '视频已停止')
+      }
+    })
+
+    // 视频输入能力发现：菜单据此渲染/置灰
+    this.loadVideoCaps()
 
     StreamManager.init('video-canvas')
     StreamManager.connect()
@@ -465,29 +531,45 @@ export default {
         cameraSelect.innerHTML = '<option value="">扫描失败</option>'
       }
     },
+    // ==================== 视频输入能力（A 档）====================
+    async loadVideoCaps() {
+      try {
+        const resp = await fetch('/api/video/sources')
+        if (!resp.ok) return
+        const caps = await resp.json()
+        this.videoCaps = caps
+        // 能力接口同时带回摄像头清单（含 kind / available / reason），作为 source 查询来源
+        if (Array.isArray(caps.cameras) && caps.cameras.length && !this.cameraList.length) {
+          this.cameraList = caps.cameras
+        }
+        console.log('[Camera] 视频源能力:', caps.kinds.map(k => `${k.kind}=${k.available}`).join(' '))
+      } catch (e) {
+        console.warn('[Camera] 视频源能力查询失败（菜单按默认可用渲染）:', e)
+      }
+    },
     // ==================== 视频控制 ====================
     async startServerCamera() {
       const cameraSelect = document.getElementById('camera-select')
       const wantId = cameraSelect ? cameraSelect.value : ''
-      if (!this.cameraList.length) await this.scanCameras()   // 保证拿得到 source
+      if (!this.cameraList.length) await this.scanCameras()
       const cam = this.cameraList.find(c => String(c.id) === String(wantId))
-      const source = cam ? cam.source : ''
-      const label = (cam && cam.name) || wantId || '服务器摄像头'
-
-      if (!cam && !source) {
+      if (!cam) {
         window.updateStatus('warning', '没有可用的服务器摄像头配置')
         return
       }
-      // 由 source 决定动作：文件/RTSP → start_file；webcam/数字 → start_webcam（设备号）
-      const pick = StreamManager.startServerSource(source)
-      this.cameraSourceDesc = pick.desc
+      // 能力端点已经告诉我们这台是否可用 → **直接说明原因**，不再"点了没反应"
+      if (cam.available === false) {
+        window.updateStatus('warning', `摄像头「${cam.name || cam.id}」不可用：${cam.reason || '未知原因'}`)
+        return
+      }
+      this.cameraSourceDesc = cam.name || cam.id
       this.cameraActive = true
       this.sourceType = 'webcam'
       this.framesSeen = false
-      // ⚠ 修复前这里直接写"运行中"—— 即使动作被丢弃或服务端报错也照样显示运行中，
-      //   用户看到界面在跑、画面却全黑，只能理解为"点了没反应"。
-      //   现在先显示"启动中…"，等服务端的 status 回执（失败会报错）或**第一帧**到达再确认。
-      window.updateStatus('warning', `${label} 正在启动…`)
+      window.updateStatus('warning', `${this.cameraSourceDesc} 正在启动…`)
+      // 统一入口：只发"服务端配置里的摄像头 id"，由服务端解析它的 source（文件/RTSP/设备）
+      const r = StreamManager.openSource({ kind: 'camera', id: cam.id })
+      if (!r.sent) window.updateStatus('warning', '正在建立连接，连上后自动补发…')
       if (this.currentMode === 'emotion') {
         this.updateEmoStatus(true)
       }
@@ -560,7 +642,7 @@ export default {
           this.localPreviewRaf = requestAnimationFrame(drawLocalPreview)
         }
 
-        StreamManager.startClientCamera()
+        StreamManager.openSource({ kind: 'client' })
         this.cameraActive = true
         this.sourceType = 'local'
         drawLocalPreview()
@@ -649,10 +731,13 @@ export default {
           return
         }
         const result = await resp.json()
-        StreamManager.startFile(result.path)
+        // 统一入口：只把**服务端返回的文件名**交给它（不再把服务器绝对路径发给前端/后端）
+        StreamManager.openSource({ kind: 'upload', id: result.filename })
+        this.cameraSourceDesc = result.filename || '上传视频'
         this.cameraActive = true
         this.sourceType = 'file'
-        window.updateStatus('online', '视频播放中')
+        this.framesSeen = false
+        window.updateStatus('warning', '上传完成，正在打开视频…')
         if (this.currentMode === 'emotion') this.updateEmoStatus(true)
       } catch (err) {
         console.error('[Upload] 错误:', err)

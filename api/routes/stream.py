@@ -17,7 +17,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from config.settings import (
     ADAPTIVE_FPS_FAST_RATIO,
@@ -626,6 +626,40 @@ def _processing_thread_retail(cap_source, processor, pop_skill, anom_skill, emo_
 
 # ==================== WebSocket 端点 ====================
 
+async def _emit_source_status(websocket, state: str, echo: dict | None = None,
+                              code: str | None = None, message: str | None = None, **extra):
+    """发送**统一状态回执** `source_status`（A 档）。
+
+    为什么与老的 `{"type":"status"}` 并存：老前端只认 status，新前端需要
+    **机器可读的 code** 与**源回显**（谁在跑、为什么失败）。两者同时发，迁移期零破坏。
+    """
+    payload = {"type": "source_status", "state": state, "source": echo or {}}
+    if code:
+        payload["code"] = code
+    if message:
+        payload["message"] = message
+    payload.update(extra)
+    try:
+        await websocket.send_json(payload)
+    except Exception as e:                      # 连接已断：不能影响主流程
+        print(f"[WS] source_status 发送失败: {e}")
+
+
+@router.get("/video/sources")
+async def list_video_sources():
+    """**视频输入能力发现**（A 档）：前端据此渲染菜单/置灰并说明原因。
+
+    返回每类来源是否可用（例如容器里"本机设备"必然不可用）、
+    已注册摄像头逐台的可用性与原因、以及上传/文件的限制。
+    """
+    import video_sources
+    try:
+        return await asyncio.to_thread(video_sources.capabilities)   # 含文件 stat，丢线程池
+    except Exception as e:
+        print(f"[VideoSource] 能力查询失败: {e}")
+        raise HTTPException(status_code=500, detail=f"视频源能力查询失败: {e}")
+
+
 @router.websocket("/ws/client")
 async def client_camera_stream(websocket: WebSocket):
     """接收浏览器本机摄像头 JPEG 二进制帧，交给主处理线程消费。"""
@@ -777,6 +811,8 @@ async def video_stream(websocket: WebSocket):
         _bg_thread_ref = bg_thread
 
     try:
+        # 统一状态回执里要带的"源描述符"（open_source 或老动作入口都会设置）
+        source_echo: dict = {}
         while True:
             try:
                 raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT_SECONDS)
@@ -788,6 +824,58 @@ async def video_stream(websocket: WebSocket):
                 if action == "ping" or msg.get("type") == "ping":
                     await websocket.send_json({"type": "pong", "ts": msg.get("ts", 0)})
                     continue
+
+                # ===== 统一视频输入入口（A 档）=====
+                # 客户端只发 {action:"open_source", source:{kind:...}}；这里把它**翻译**成
+                # 下面的老动作，复用既有的三条启动路径（不动管线，风险最小）。
+                # 校验/归一化逻辑全在 video_sources.normalize（含 B6 的目录白名单）。
+                if action == "open_source":
+                    src = msg.get("source")
+                    try:
+                        import video_sources
+                        _known = []
+                        try:
+                            from agents.module_registry import get_registry
+                            _known = [c.get("id") for c in get_registry().list_cameras()]
+                        except Exception:
+                            pass
+                        # 可能涉及文件系统 stat / 配置读取，丢线程池
+                        plan = await asyncio.to_thread(video_sources.normalize, src, _known)
+                    except Exception as e:
+                        code = getattr(e, "code", "bad_request")
+                        await websocket.send_json({
+                            "type": "source_status", "state": "error",
+                            "source": src if isinstance(src, dict) else {"kind": str(src)},
+                            "code": code, "message": str(e),
+                        })
+                        print(f"[WS] open_source 被拒 code={code}: {e}")
+                        continue
+                    with _lock:
+                        replaced = bool(_active.get("running"))
+                    source_echo = plan["echo"]
+                    await websocket.send_json({
+                        "type": "source_status", "state": "opening",
+                        "source": source_echo, "replaced": replaced,
+                        "message": f"正在打开来源（{plan['kind']}）…",
+                    })
+                    print(f"[WS] open_source kind={plan['kind']} -> {plan['legacy_action']}"
+                          f" replaced={replaced} echo={source_echo}")
+                    # 翻译成老动作后**继续往下走**，复用既有启动分支
+                    action = plan["legacy_action"]
+                    msg = {**msg, **plan["params"], "action": action}
+
+                elif action in ("start_webcam", "start_file", "start_client_camera"):
+                    # 老入口（向后兼容）：也回一条统一状态，方便前端逐步迁移
+                    try:
+                        import video_sources
+                        source_echo = video_sources.echo_for_legacy(action, msg)
+                    except Exception:
+                        source_echo = {}
+                    await websocket.send_json({
+                        "type": "source_status", "state": "opening",
+                        "source": source_echo, "deprecated": True,
+                        "message": "该动作为兼容旧客户端保留，建议改用 open_source",
+                    })
 
                 if action == "client_frame":
                     # 同 /ws/client：只接受归属者的帧（见 _client_camera_owner 注释）
@@ -801,7 +889,10 @@ async def video_stream(websocket: WebSocket):
                     camera_id = msg.get("camera_id", 0)
                     if cap:
                         cap.release()
-                    cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
+                    # ⚠ 丢线程池：VideoCapture 打开失败/源不可达时可能阻塞很久
+                    # （RTSP 尤甚），而这里在**事件循环**里 await —— 直接调会
+                    # 把整站拖停（HTTP/心跳/其他 WS 全部无响应）。
+                    cap = await asyncio.to_thread(cv2.VideoCapture, camera_id, cv2.CAP_DSHOW)
                     if not cap.isOpened():
                         cap.release()
                         cap = None
@@ -809,6 +900,10 @@ async def video_stream(websocket: WebSocket):
                             "type": "status", "status": "error",
                             "message": f"无法打开摄像头 #{camera_id}",
                         })
+                        await _emit_source_status(
+                            websocket, "error", source_echo, code="device_open_failed",
+                            message=f"无法打开摄像头 #{camera_id}",
+                        )
                         continue
                     try:
                         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*VIDEO_CAMERA_FOURCC))
@@ -848,7 +943,8 @@ async def video_stream(websocket: WebSocket):
                     file_path = msg.get("file_path", "")
                     if cap:
                         cap.release()
-                    cap = cv2.VideoCapture(file_path)
+                    # 同上：文件/RTSP 的打开一律丢线程池（RTSP 不可达时阻塞可达数十秒）
+                    cap = await asyncio.to_thread(cv2.VideoCapture, file_path)
                     if not cap.isOpened():
                         cap.release()
                         cap = None
@@ -858,6 +954,10 @@ async def video_stream(websocket: WebSocket):
                             "type": "status", "status": "error",
                             "message": f"无法打开视频源: {file_path}",
                         })
+                        await _emit_source_status(
+                            websocket, "error", source_echo, code="source_open_failed",
+                            message=f"无法打开视频源: {file_path}",
+                        )
                         continue
                     with _lock:
                         _active["source"] = "file"
@@ -953,6 +1053,8 @@ async def video_stream(websocket: WebSocket):
                         "message": "视频已停止，WebSocket 保持连接",
                         "segment_analysis": segment_analysis,
                     })
+                    await _emit_source_status(websocket, "stopped", source_echo,
+                                              message="视频已停止")
                     print("[WS] 视频已停止")
 
             except asyncio.TimeoutError:
@@ -979,6 +1081,10 @@ async def video_stream(websocket: WebSocket):
                     "type": "status", "status": "error",
                     "message": f"视频分析异常已终止：{result_to_send.get('message', '')}",
                 })
+                await _emit_source_status(
+                    websocket, "error", source_echo, code="pipeline_error",
+                    message=f"视频分析异常已终止：{result_to_send.get('message', '')}",
+                )
                 _stop_internal()
                 _latest_result = None
                 _latest_frame_b64 = None
@@ -989,6 +1095,8 @@ async def video_stream(websocket: WebSocket):
                     "type": "status", "status": "finished",
                     "message": "视频播放完毕",
                 })
+                await _emit_source_status(websocket, "finished", source_echo,
+                                          code="finished", message="视频播放完毕")
                 _stop_internal()
                 _latest_result = None
                 _latest_frame_b64 = None
@@ -998,7 +1106,15 @@ async def video_stream(websocket: WebSocket):
             if new_frame_id <= _last_pushed_frame_id:
                 await asyncio.sleep(WS_POLL_SLEEP_SECONDS)
                 continue
+            # 第一帧 = "源真的出画面了"的**唯一可信证据**：服务端成功时不另发回执，
+            # 前端因此不必猜（修复前靠"点击后写运行中"来撒谎）。
+            _first_frame = _last_pushed_frame_id < 0
             _last_pushed_frame_id = new_frame_id
+            if _first_frame:
+                await _emit_source_status(
+                    websocket, "running", source_echo,
+                    message="视频源已开始输出画面", frame_id=new_frame_id,
+                )
 
             msg_to_send = {
                 "type": "frame",

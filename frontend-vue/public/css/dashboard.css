@@ -161,6 +161,23 @@ body {
 .camera-menu button:hover {
     background: rgba(77,166,255,0.12);
 }
+/* 不可用的菜单项：明显置灰 + 给出原因（标题/提示行）——不要让用户点了没反应 */
+.camera-menu button:disabled {
+    color: var(--text-muted, #6b7a8d);
+    cursor: not-allowed;
+    opacity: .6;
+}
+.camera-menu button:disabled:hover {
+    background: transparent;
+}
+.camera-menu-hint {
+    padding: 7px 14px 9px;
+    max-width: 260px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--accent-orange, #d29922);
+    border-top: 1px solid var(--border);
+}
 
 .mode-switcher {
     display: flex;
