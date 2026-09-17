@@ -414,6 +414,80 @@ def guard_path(path: str, *, client_supplied: bool) -> Path:
     return full
 
 
+# ==================== 上传文件内容校验（台账 B11）====================
+# 扩展名是可以随便改的，文件头魔数不行。这里按容器签名做个"最低限度"的校验：
+# 目的不是解析视频，而是挡住"改个后缀就把任意文件塞进来当视频源"。
+_VIDEO_MAGIC: list[tuple[str, bytes, int]] = [
+    # (容器, 签名, 签名偏移)
+    ("mp4/mov", b"ftyp", 4),              # ISO BMFF：....ftyp
+    ("avi", b"AVI ", 8),                  # RIFF....AVI
+    ("mkv/webm", b"\x1a\x45\xdf\xa3", 0),  # EBML
+    ("flv", b"FLV", 0),
+    ("asf/wmv", b"\x30\x26\xb2\x75\x8e\x66\xcf\x11", 0),
+    ("mpeg-ts", b"\x47", 0),              # 188 字节包同步字节（宽松：单字节同步）
+]
+
+
+def detect_video_container(head: bytes) -> str | None:
+    """按文件头识别视频容器；识别不出返回 None（纯函数，便于离线单测）。
+
+    `mpeg-ts` 只认首字节 0x47，误判面较大，但它的目的是**放行**（宁可放过、不可错杀），
+    真正的防线是"不能是任意文件"：随便一个文本/脚本/压缩包都过不了这几条签名。
+    """
+    if not head:
+        return None
+    for name, sig, off in _VIDEO_MAGIC:
+        if head[off:off + len(sig)] == sig:
+            return name
+    return None
+
+
+def safe_upload_name(filename: str, allowed_ext: list[str] | None = None) -> str:
+    """把上传文件名净化成安全文件名（只留文件名、去路径、限字符集）。
+
+    与 API 层原有净化保持一致，额外做两件事：**去掉控制字符后的空名**判为无效、
+    并把扩展名统一小写（大小写混用会让同一目录出现 `A.MP4` 与 `a.mp4` 两个"不同"文件）。
+    """
+    import re as _re
+
+    raw = str(filename or "").replace("\\", "/").split("/")[-1].strip()
+    raw = _re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw)
+    if not raw:
+        raise SourceError("bad_request", "文件名无效")
+    stem, ext = os.path.splitext(raw)
+    ext = ext.lower()
+    if allowed_ext and ext not in allowed_ext:
+        raise SourceError(
+            "unsupported_type",
+            f"不支持的文件类型 '{ext or '(无扩展名)'}'，允许: {', '.join(allowed_ext)}",
+        )
+    if not stem:
+        raise SourceError("bad_request", "文件名缺少主体部分")
+    return f"{stem}{ext}"
+
+
+def resolve_name_conflict(directory: Path, name: str, policy: str = "rename") -> Path:
+    """处理同名冲突（台账 B11：原来直接 `open(..., "wb")` **静默覆盖**）。
+
+    - `rename`（默认）：`demo.mp4` → `demo_1.mp4`、`demo_2.mp4`……
+    - `reject`：抛 `SourceError("name_conflict")`，让调用方自己决定
+    - `overwrite`：保持旧行为（不推荐，仅供回滚）
+    """
+    target = directory / name
+    if not target.exists():
+        return target
+    if policy == "overwrite":
+        return target
+    if policy == "reject":
+        raise SourceError("name_conflict", f"同名文件已存在：{name}（策略=reject）")
+    stem, ext = os.path.splitext(name)
+    for i in range(1, 1000):
+        cand = directory / f"{stem}_{i}{ext}"
+        if not cand.exists():
+            return cand
+    raise SourceError("name_conflict", f"同名文件过多，无法自动改名：{name}")
+
+
 def guard_source(source: str, *, client_supplied: bool = False) -> str:
     """统一入口：校验一个"摄像头 source"字符串，返回规范化后的值。
 
