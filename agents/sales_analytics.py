@@ -205,9 +205,10 @@ def simulate_demo_sales():
         ("shelf_B", 45, 520.0),  # 低热度高销量
         ("shelf_C", 35, 310.0),  # 健康
     ]
-    mysql_db.save_retail_stats(period_key, demo_zones, start, end)
+    # 显式标记为演示数据（不依赖 period_key 前缀被猜出来）——热度侧以前没有来源字段，
+    # 演示数据会被时段分析当成真实客流，台账 A8 已补齐
+    mysql_db.save_retail_stats(period_key, demo_zones, start, end, source="simulated")
     for zone_id, sold, amount in demo_sales:
-        # 显式标记为演示数据（不依赖 period_key 前缀被猜出来）
         mysql_db.save_product_sales(zone_id, period_key, sold, amount, start, end,
                                     source="simulated")
     return len(demo_sales)

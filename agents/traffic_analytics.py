@@ -9,12 +9,66 @@
 """
 from datetime import datetime, timedelta
 
+# 真实采集来源（video=视频管线写入）；其余（simulated/test/demo）都算"非真实数据"
+REAL_SOURCE = "video"
 
-def hourly_traffic(hours: int = 24) -> dict:
+
+def source_breakdown(rows_by_source: dict, selected: str | None = None) -> dict:
+    """把「来源 → 行数」整理成可读的标注（**纯函数**，便于离线单测）。
+
+    台账 A8：热度表以前没有来源字段，演示数据会与真实采集混在一起被当成真实客流；
+    销量侧早就有 `product_sales.source`。这里按同一约定，把混入情况**显式标注**出来，
+    而不是悄悄过滤掉（过滤会让演示流程看不到数据，标注才是诚实的做法）。
+    """
+    rows_by_source = {str(k or "unknown"): int(v or 0) for k, v in (rows_by_source or {}).items()}
+    total = sum(rows_by_source.values())
+    real = rows_by_source.get(REAL_SOURCE, 0)
+    non_real = total - real
+    other = sorted(s for s in rows_by_source if s != REAL_SOURCE)
+    if selected:
+        note = (
+            f"（本次仅统计 source={selected} 的数据" 
+            + (f"；窗口内另有 {non_real} 条非真实采集数据被排除）" if non_real else "）")
+        )
+    elif non_real:
+        note = (
+            f" ⚠ 本时段统计含 {non_real} 条非真实采集数据（{'/'.join(other)}），"
+            f"仅用于功能演示，**不可作为经营决策依据**。"
+        )
+    else:
+        note = ""
+    return {
+        "rows_by_source": rows_by_source,
+        "total_rows": total,
+        "real_rows": real,
+        "non_real_rows": non_real,
+        "all_real": non_real == 0,
+        "selected_source": selected,
+        "note": note,
+    }
+
+
+def _fetch_source_rows(cur, cutoff: str) -> dict:
+    """统计窗口内 retail_stats 各来源的行数（用于标注）。"""
+    cur.execute(
+        "SELECT source, COUNT(*) FROM retail_stats WHERE period_end >= %s GROUP BY source",
+        (cutoff,),
+    )
+    return {r[0] or "unknown": int(r[1]) for r in cur.fetchall()}
+
+
+def hourly_traffic(hours: int = 24, source: str | None = None) -> dict:
     """按小时聚合客流。返回 {"hours": [{hour, visit_count, deep_interest_count,
-    total_dwell_seconds, heat_score}, ...], "peak": "...", "valley": "...", "summary": "..."}"""
+    total_dwell_seconds, heat_score}, ...], "peak": "...", "valley": "...", "summary": "...",
+    "source_breakdown": {...}}
+
+    `source`：可选来源过滤（`"video"`=只看真实采集）。**默认不过滤**，但返回值与结论里
+    会明确标注混入了多少条演示/测试数据（台账 A8）。
+    """
     import mysql_db
     cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    src_sql = " AND source=%s" if source else ""
+    src_arg: tuple = (source,) if source else ()
     conn = mysql_db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -37,14 +91,18 @@ def hourly_traffic(hours: int = 24) -> dict:
                 "          MAX(deep_interest_count) AS mx_deep,"
                 "          MAX(total_dwell_seconds) AS mx_dwell,"
                 "          MAX(heat_score) AS heat_score"
-                "   FROM retail_stats WHERE period_end >= %s"
+                "   FROM retail_stats WHERE period_end >= %s" + src_sql +
                 "   GROUP BY hr, zone_id"
                 " ) t GROUP BY hr ORDER BY hr",
-                (cutoff,),
+                (cutoff, *src_arg),
             )
             rows = cur.fetchall()
+            src_rows = _fetch_source_rows(cur, cutoff)     # 来源构成（不过滤，用于标注）
     finally:
         conn.close()
+
+    br = source_breakdown(src_rows, selected=source)
+    note = br["note"]
 
     hours_out = [{
         "hour": r[0], "visit_count": int(r[1] or 0),
@@ -55,7 +113,8 @@ def hourly_traffic(hours: int = 24) -> dict:
 
     if not hours_out:
         return {"hours": [], "peak": "暂无数据", "valley": "暂无数据",
-                "summary": "暂无客流时段数据（需运行视频采集）"}
+                "source_breakdown": br,
+                "summary": "暂无客流时段数据（需运行视频采集）" + note}
 
     # ⚠ 高低谷只在**有客流的时段**里选。
     # 断流/摄像头未启动时，视频管线同样会写下 visit_count=0 的行，与"那个时段
@@ -66,8 +125,10 @@ def hourly_traffic(hours: int = 24) -> dict:
     zero_cnt = len(hours_out) - len(active)
     if not active:
         return {"hours": hours_out, "peak": "暂无数据", "valley": "暂无数据",
+                "source_breakdown": br,
                 "summary": f"近 {hours} 小时无任何客流记录（{zero_cnt} 个小时为 0）。"
-                           "请先确认摄像头/视频源是否正常运行——统计值为 0 不代表真实客流。"}
+                           "请先确认摄像头/视频源是否正常运行——统计值为 0 不代表真实客流。"
+                           + note}
 
     peak = max(active, key=lambda h: h["visit_count"])
     valley = min(active, key=lambda h: h["visit_count"])
@@ -82,10 +143,12 @@ def hourly_traffic(hours: int = 24) -> dict:
         summary += (f" 另有 {zero_cnt} 个小时无客流记录——可能是未采集"
                     f"（设备未运行/断流），也可能确实无客人，已排除出高低谷判定，"
                     f"建议核对摄像头运行情况。")
+    summary += note
     return {"hours": hours_out,
             "peak": f"{peak['hour'][11:16]} ({peak['visit_count']} 人次)",
             "valley": f"{valley['hour'][11:16]} ({valley['visit_count']} 人次)",
             "zero_hours": zero_cnt,
+            "source_breakdown": br,
             "summary": summary}
 
 
@@ -118,7 +181,7 @@ def hourly_alerts(hours: int = 24) -> dict:
     }
 
 
-def zone_depth(hours: int = 1) -> dict:
+def zone_depth(hours: int = 1, source: str | None = None) -> dict:
     """区域"选购浓度"（深度兴趣占比）× 销量 四象限。
 
     快速路过 = visit - deep（停留<30s）。
@@ -127,10 +190,14 @@ def zone_depth(hours: int = 1) -> dict:
     - deep 占比高 + 销量低 → 看了不买（商品品质/价格问题）
     - deep 占比低 + 销量高 → 刚需高频品（拿完就走，补货+位置）
     - deep 占比低 + 销量低 → 纯路过（陈列/引流问题或通道）
+
+    `source`：可选来源过滤（`"video"`=只看真实采集）；默认不过滤但**标注**混入情况（台账 A8）。
     """
     import mysql_db
 
     cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    src_sql = " AND source=%s" if source else ""
+    src_arg: tuple = (source,) if source else ()
     conn = mysql_db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -139,8 +206,8 @@ def zone_depth(hours: int = 1) -> dict:
             cur.execute(
                 "SELECT zone_id, MAX(zone_label), MAX(visit_count),"
                 " MAX(deep_interest_count), MAX(total_dwell_seconds)"
-                " FROM retail_stats WHERE period_end >= %s GROUP BY zone_id",
-                (cutoff,),
+                " FROM retail_stats WHERE period_end >= %s" + src_sql + " GROUP BY zone_id",
+                (cutoff, *src_arg),
             )
             hot_rows = cur.fetchall()
             cur.execute(
@@ -149,8 +216,11 @@ def zone_depth(hours: int = 1) -> dict:
                 (cutoff,),
             )
             sales_rows = cur.fetchall()
+            src_rows = _fetch_source_rows(cur, cutoff)     # 来源构成（不过滤，用于标注）
     finally:
         conn.close()
+
+    br = source_breakdown(src_rows, selected=source)
 
     sales = {r[0]: int(r[1] or 0) for r in sales_rows}
     zones_out = []
@@ -170,7 +240,9 @@ def zone_depth(hours: int = 1) -> dict:
             "quadrant": quadrant, "diagnosis": diag,
         })
 
-    return {"zones": zones_out, "summary": _depth_summary(zones_out)}
+    return {"zones": zones_out,
+            "source_breakdown": br,
+            "summary": _depth_summary(zones_out) + br["note"]}
 
 
 def _depth_quadrant(visit: int, deep: int, depth_rate: float, sold: int, conversion: float):
@@ -268,7 +340,7 @@ def seed_traffic_demo() -> int:
                         "deep_interest_count": int(18 * f),   # 深度占比 ~51%
                         "total_dwell_seconds": int(2600 * f), "heat_score": 68},
         }
-        mysql_db.save_retail_stats(period_key, zones, start, end)
+        mysql_db.save_retail_stats(period_key, zones, start, end, source="simulated")
         count += 3
 
     # 最近时段销量（与深度特征对照）—— 显式标记为演示数据

@@ -2,6 +2,7 @@
 SKII-3：表情分析技能
 统计顾客情绪分布、正负情感趋势、分时段对比
 """
+import math
 from collections import defaultdict, deque
 from typing import Any
 from datetime import datetime
@@ -14,7 +15,9 @@ from config.settings import (
     EMOTION_RECENT_DEFAULT_LIMIT,
     EMOTION_RECENT_MAX,
     EMOTION_TIMELINE_MAX,
+    EMOTION_TREND_MIN_PER_HALF,
     EMOTION_TREND_MIN_SAMPLES,
+    EMOTION_TREND_Z_THRESHOLD,
 )
 
 # ===== 表情中文名 =====
@@ -76,11 +79,31 @@ class SkillEmotion:
         }
 
     def get_trend(self) -> dict[str, Any]:
-        """分前后半段情感趋势分析"""
-        if len(self._timeline) < EMOTION_TREND_MIN_SAMPLES:
-            return {"trend": "not_enough_data", "early_rate": 0, "late_rate": 0, "conclusion": "数据不足"}
+        """分前后半段情感趋势分析（含**每半段样本量门槛 + 显著性检验**）。
 
+        ⚠ 原实现只看总样本数（`EMOTION_TREND_MIN_SAMPLES=10`）就下结论：
+        10 个样本被劈成两半各 5 个，9 neutral + 1 sad 也能判成"情绪明显下降"（台账 A19）。
+        现在两条硬门槛：
+        1. 前后半段**各自**至少 `EMOTION_TREND_MIN_PER_HALF` 个样本；
+        2. 两段正向率之差要通过两比例 z 检验（|z| ≥ `EMOTION_TREND_Z_THRESHOLD`），
+           否则只能说"在随机波动范围内"，不给出方向性结论。
+        """
         total = len(self._timeline)
+        half_min = EMOTION_TREND_MIN_PER_HALF
+        need = max(EMOTION_TREND_MIN_SAMPLES, 2 * half_min)
+        if total < need:
+            return {
+                "trend": "not_enough_data",
+                "early_count": 0, "late_count": 0,
+                "early_rate": 0, "late_rate": 0, "delta": 0,
+                "z": 0.0, "significant": False,
+                "min_per_half": half_min,
+                "conclusion": (
+                    f"数据不足（趋势判定需要前后半段各至少 {half_min} 个表情样本，"
+                    f"当前共 {total} 个）"
+                ),
+            }
+
         mid = total // 2
         early_positive = 0
         late_positive = 0
@@ -97,23 +120,55 @@ class SkillEmotion:
         late_rate = late_positive / late_count if late_count else 0.0
         delta = late_rate - early_rate
 
-        if delta > EMOTION_DELTA_LARGE:
+        # 两比例 z 检验（不引入任何第三方依赖）：把"随机波动"和"真变化"分开
+        # ⚠ 必须用**合并比例**算标准误（标准两比例 z 检验）。若按每段各自的 p(1-p) 算，
+        #   当两段分别是 0% 和 100% 时两边方差都为 0 → 标准误塌成 0 →
+        #   "最显著的变化"反而被误判成"无变化"（实测踩过这个坑）。
+        pooled = (
+            (early_positive + late_positive) / (early_count + late_count)
+            if (early_count + late_count) else 0.0
+        )
+        se = math.sqrt(
+            pooled * (1 - pooled) * (1 / early_count + 1 / late_count)
+        ) if early_count and late_count else 0.0
+        z = delta / se if se > 1e-12 else 0.0
+        significant = abs(z) >= EMOTION_TREND_Z_THRESHOLD
+
+        if abs(delta) < 1e-9:
+            conclusion = "顾客情绪基本稳定，无明显变化"
+            trend = "flat"
+        elif not significant:
+            conclusion = (
+                f"顾客情绪基本稳定（前后半段正向率差 {delta:+.1%}，"
+                f"未达显著水平 z={z:.2f}，属随机波动范围）"
+            )
+            trend = "flat"
+        elif delta > EMOTION_DELTA_LARGE:
             conclusion = "顾客情绪明显好转，购物体验改善"
+            trend = "up"
         elif delta > EMOTION_DELTA_SMALL:
             conclusion = "顾客情绪略有改善"
+            trend = "up"
         elif delta < -EMOTION_DELTA_LARGE:
             conclusion = "顾客情绪明显下降，建议关注服务或环境"
+            trend = "down"
         elif delta < -EMOTION_DELTA_SMALL:
             conclusion = "顾客情绪轻微下降"
+            trend = "down"
         else:
             conclusion = "顾客情绪基本稳定，无明显变化"
+            trend = "flat"
 
         return {
+            "trend": trend,
             "early_count": early_count,
             "late_count": late_count,
             "early_rate": round(early_rate, 3),
             "late_rate": round(late_rate, 3),
             "delta": round(delta, 3),
+            "z": round(z, 3),
+            "significant": significant,
+            "min_per_half": half_min,
             "conclusion": conclusion,
             "timestamp": datetime.now().isoformat(),
         }
