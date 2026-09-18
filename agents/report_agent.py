@@ -58,6 +58,9 @@ class ReportState(TypedDict, total=False):
     emo: dict           # 表情快照
     trend: dict         # 表情趋势
     llm_failed: bool    # LLM 是否失败（决定走模板降级分支）
+    llm_skipped: bool   # 是否因"无变化"被成本门控跳过（台账 F5）
+    force_llm: bool     # 强制调用 LLM（绕过变化门控）
+    skip_reason: str    # 门控判定原因（用于日志/指标）
     quality: dict       # 数据可信度快照（门禁：区分「无数据」与「无客流」）
     summary: str        # 最终文案
     data: dict          # 最终结构化数据
@@ -187,7 +190,24 @@ def _node_collect(state: ReportState) -> dict:
 
 
 def _node_generate(state: ReportState) -> dict:
-    """节点 2：LLM 生成汇报文案；失败置 llm_failed，由条件边转模板分支。"""
+    """节点 2：LLM 生成汇报文案；失败置 llm_failed，由条件边转模板分支。
+
+    ⚠ **变化门控（台账 F5）**：定时汇报固定 10 分钟一轮 = 144 次/天/店，
+    而没有变化时那些调用只是把同样的数字重新措辞一遍 ✗。这里先比业务签名：
+    无变化 → 直接走**模板降级分支**（不调 LLM，仍有文字入库/推送 ✓）；
+    有变化 / 首次 / 可信度翻转 / 强制（异常突增）/ 静默超时 → 正常调 LLM ✓。
+    """
+    from agents.report_change_gate import get_report_gate, signature
+
+    gate = get_report_gate()
+    sig = signature(state.get("pop"), state.get("anom"), state.get("emo"), state.get("quality"))
+    force = bool(state.get("force_llm")) or state.get("report_type") == "surge"
+    should_call, reason = gate.decide(sig, force=force)
+    if not should_call:
+        gate.commit(sig, called_llm=False, reason=reason)
+        print(f"[Report] 跳过 LLM 汇报（成本门控）：{reason}")
+        return {"llm_failed": True, "llm_skipped": True, "skip_reason": reason}
+
     text = _try_llm_text(
         state.get("pop") or {},
         state.get("anom") or {},
@@ -196,9 +216,10 @@ def _node_generate(state: ReportState) -> dict:
         state.get("report_type", "regular"),
         state.get("quality"),
     )
+    gate.commit(sig, called_llm=bool(text), reason=reason)
     if text:
-        return {"summary": text, "llm_failed": False}
-    return {"llm_failed": True}
+        return {"summary": text, "llm_failed": False, "llm_skipped": False, "skip_reason": reason}
+    return {"llm_failed": True, "llm_skipped": False, "skip_reason": reason}
 
 
 def _route_after_generate(state: ReportState) -> str:
