@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "【手动运行】长会话记忆套件 —— 不跑在 CI 门禁里（代价高：约 30 轮真实 LLM 调用）。",
+    "用法：python evals/run_evals.py --file evals/cases_memory.json",
+    "",
+    "为什么要它：项目实现了『长会话摘要压缩』（AGENT_SUMMARY_MAX_TOKENS*TRIGGER_RATIO = 2800 tokens 触发，",
+    "保留最近 6 条，摘要上限 600 字）。但『实现了』不等于『不丢信息』——",
+    "这个套件专门验证：**压缩之后，早期说过的事实还在不在**。",
+    "压缩是否真的触发，用 LLM 指标里的 by_tag.summary 计数确认（run_evals 结束时会打印）。"
+  ],
+  "cases": [
+    {
+      "id": "mem_compress_01",
+      "mode": "multi",
+      "dialog": [
+        "记住一件事：我们这家店叫「星光店」，以后问到门店名就用这个名字回答。",
+        {"q": "1号货架现在客流怎么样？", "repeat": 26},
+        "我们门店叫什么名字？"
+      ],
+      "check_turn": 28,
+      "expect_keywords": ["星光店"],
+      "note": "28 轮以触发摘要压缩；压缩后仍须记住第 1 轮的关键事实（门店名）"
+    },
+    {
+      "id": "mem_compress_02",
+      "mode": "multi",
+      "dialog": [
+        "记住：本周的重点关注区域是「2号货架 - 饮料区」。",
+        {"q": "今天哪个区域最受欢迎？", "repeat": 26},
+        "我刚才让你重点关注哪个区域？"
+      ],
+      "check_turn": 28,
+      "expect_keywords_any": ["2号", "饮料"],
+      "note": "同上，但换成业务语义的关键事实（重点区域），检验摘要是否保留业务约定"
+    }
+  ]
+}
