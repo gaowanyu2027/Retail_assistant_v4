@@ -167,10 +167,16 @@ services:
     # `tag@digest`：拉取以 digest 为准（不依赖 tag 是否还在、也不怕 tag 被改指向）
     image: qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
     restart: unless-stopped
-    # 同上：向量库仅在 compose 网络内被 backend 访问。
-    # 想在宿主机看 Qdrant 面板时取消注释（注意端口冲突）。
-    # ports:
-    #   - "127.0.0.1:6333:6333"
+    # 向量库默认只在 compose 网络内被 backend 访问（`QDRANT_URL: http://qdrant:6333`）。
+    # **但宿主模式（`python run.py`，本项目的主力演示方式）必须能连到它**：
+    #   实测（2026-09-18 用户机）：qdrant 容器明明在跑，日志却一直刷
+    #     [Vector] 向量检索失败，仅用关键词召回: [WinError 10061] 目标计算机积极拒绝
+    #   原因就是端口没发布 —— 宿主进程连 127.0.0.1:6333 是空的。
+    # 所以默认发布到 **127.0.0.1**（只监听本地，不暴露到局域网），
+    # 让"宿主应用 + 容器数据库"这种混合用法也能用上向量召回。
+    # 宿主机 6333 已被占用时（会 bind 失败）可注释掉这两行 —— 容器化模式不受影响。
+    ports:
+      - "127.0.0.1:6333:6333"
     volumes:
       - qdrant-docker:/qdrant/storage
     healthcheck:
