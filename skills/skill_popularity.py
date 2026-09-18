@@ -78,10 +78,15 @@ class PopularitySkill:
         self._counted_visits: OrderedDict[tuple[int, str], None] = OrderedDict()
         self._counted_deep: OrderedDict[tuple[int, str], None] = OrderedDict()
         self._staff_ids: set[int] = set()                     # 已确认店员 track_id
+        # ⚠ 台账 D17：**访客数必须按人去重**，不能拿"区域到访次数"求和当访客数。
+        # 同一个人逛 A→B→C 三个货架会各自计一次到访（这是"区域到访次数"该有的口径），
+        # 但"访客"只有 1 人；原实现把两者算成同一个值（都是跨区域求和），
+        # 于是总访客 = 区域到访次数，一个人被重复计 3 次。
+        self._visitor_tracks: OrderedDict[int, None] = OrderedDict()   # 到访过货架区的**唯一**轨迹
         self._max_tracked = POPULARITY_MAX_TRACKED
 
     @staticmethod
-    def _remember(cache: OrderedDict, key: tuple[int, str], max_size: int):
+    def _remember(cache: OrderedDict, key, max_size: int):
         """有界记录：超限时淘汰最旧记录，保持 O(1) 均摊复杂度。"""
         if key not in cache:
             cache[key] = None
@@ -191,6 +196,8 @@ class PopularitySkill:
                     )
                     record["counted_visit"] = True
                     self.zone_stats[zone_id].visit_count += 1
+                    # 同一人的跨区域到访只算**一个访客**（台账 D17）
+                    self._remember(self._visitor_tracks, track.track_id, self._max_tracked)
                     if current_hour is not None:
                         self.zone_stats[zone_id].hourly_visits[current_hour] = (
                             self.zone_stats[zone_id].hourly_visits.get(current_hour, 0) + 1
@@ -309,9 +316,16 @@ class PopularitySkill:
         return {
             "zones": zones_data,
             "top_zone": top_zone,
-            "total_visitors": sum(z.visit_count for z in self.zone_stats.values()),
+            # ⚠ 台账 D17：三个数**口径不同，别再算成同一个值**：
+            #   total_visitors = 到访过货架区的**唯一人数**（同一个人逛 3 个货架仍算 1 人）
+            #   total_visits   = **区域到访次数**合计（同一个人逛 3 个货架算 3 次，用于区域热度排序）
+            #   total_staff    = 判定为店员的**唯一轨迹数**（同样按人去重）
+            # 原实现把 total_visitors 与 total_visits 都写成跨区域求和 → "总访客"一个人翻 3 倍。
+            "total_visitors": len(self._visitor_tracks),
             "total_visits": sum(z.visit_count for z in self.zone_stats.values()),
-            "total_staff": sum(z.staff_count for z in self.zone_stats.values()),
+            # 店员同样是"唯一轨迹数"：`_staff_ids` 本来就是按 track_id 去重的 set，
+            # 原来对它按区域求和（staff_count）会把一个店员在多区域重复计入
+            "total_staff": len(self._staff_ids),
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -330,3 +344,4 @@ class PopularitySkill:
         self._counted_visits.clear()
         self._counted_deep.clear()
         self._staff_ids.clear()
+        self._visitor_tracks.clear()      # 换源/重启会话时唯一访客集合也要清（台账 D17）
