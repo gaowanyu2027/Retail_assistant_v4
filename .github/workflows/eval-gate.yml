@@ -104,6 +104,52 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      # ------------------------------------------------------------------
+      # 预检：把"secret 没配/配错"与"代码回归"分开报
+      #
+      # 为什么需要（2026-09-18 实测教训，run #2/#4 都栽在这里）：
+      #   secret 没配时，`ChatOpenAI(api_key="")` 在 **Agent 构造**阶段就抛
+      #   "Missing credentials"，评测**一条用例都没跑**就退出码 2。
+      #   表现是 `Run evaluation gate` 只跑 9 秒就红，日志里只有一行异常，
+      #   看的人极容易误判成"代码回归"去乱改代码。
+      #   这里先做两次显式检查，把结论直接写在日志里（fail-loud）。
+      # ------------------------------------------------------------------
+      - name: Preflight — secret 与 DeepSeek 可用性
+        env:
+          dazuoye_api: ${{ secrets.DAZUOYE_API }}
+        run: |
+          python - <<'PY'
+          import os, sys, httpx
+          key = (os.environ.get("dazuoye_api") or "").strip()
+          if not key:
+              print("::error::仓库 secret DAZUOYE_API 未配置或为空 —— 这是**配置问题，不是代码问题**。"
+                    "请在 Settings → Secrets and variables → Actions 添加（值=DeepSeek Key）后重跑本 job。")
+              sys.exit(1)
+          print(f"secret 已注入：长度 {len(key)}，前缀 {key[:6]}…（不打印明文）")
+          try:
+              r = httpx.post(
+                  "https://api.deepseek.com/chat/completions",
+                  headers={"Authorization": f"Bearer {key}"},
+                  json={"model": "deepseek-chat",
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 1},
+                  timeout=30,
+              )
+          except Exception as e:
+              print(f"::error::DeepSeek 不可达：{type(e).__name__}: {e}")
+              sys.exit(1)
+          if r.status_code in (401, 403):
+              print(f"::error::DeepSeek Key 无效（HTTP {r.status_code}）—— 更新 secret DAZUOYE_API 后重跑。")
+              sys.exit(1)
+          if r.status_code == 402:
+              print("::error::DeepSeek 余额/额度不足（HTTP 402）—— 充值或更换 Key 后重跑。")
+              sys.exit(1)
+          if r.status_code != 200:
+              print(f"::warning::DeepSeek 预检返回 HTTP {r.status_code}（非鉴权类），继续跑评测：{r.text[:200]}")
+          else:
+              print("DeepSeek 预检通过（HTTP 200）")
+          PY
+
       - name: Run evaluation gate
         env:
           # 变量名必须与代码一致（见文件头的说明）
