@@ -4,8 +4,8 @@
   <a href="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml">
     <img src="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml/badge.svg?branch=main" alt="CI（单测门禁 + 评测门禁）">
   </a>
-  <img src="https://img.shields.io/badge/unit%20tests-105%20passed-2ea44f" alt="105 个单测用例">
-  <img src="https://img.shields.io/badge/eval%20cases-80-1f6feb" alt="80 条评测集">
+  <img src="https://img.shields.io/badge/unit%20tests-138%20passed-2ea44f" alt="138 个单测用例">
+  <img src="https://img.shields.io/badge/eval%20cases-85-1f6feb" alt="85 条评测集">
   <img src="https://img.shields.io/badge/python-3.13-3776AB" alt="Python 3.13">
   <img src="https://img.shields.io/badge/docker-compose-2496ED" alt="Docker Compose">
 </p>
@@ -24,7 +24,7 @@
 
 | # | 问题 | 结果 | 怎么验 |
 |---|---|---|---|
-| 1 | **评测不可信**：Agent 的行为（意图/工具选择/是否编造）靠"看起来对"没法防回归 | 自建 **80 条断言式评测集**（含**防幻觉负面断言**与多轮用例），接入 CI 双门禁，**不依赖 LLM 自评** | 见下方「Agent 侧证据」；`python evals/run_evals.py` |
+| 1 | **评测不可信**：Agent 的行为（意图/工具选择/是否编造）靠"看起来对"没法防回归 | 自建 **85 条断言式评测集**（含**防幻觉负面断言**与多轮用例），接入 CI 双门禁，**不依赖 LLM 自评** | 见下方「Agent 侧证据」；`python evals/run_evals.py` |
 | 2 | **外部依赖打嗝拖垮 Agent**：Qdrant 抖动时 40 并发把线程池吃光 | 熔断 + 舱壁后 `/api/chat/search` 中位延迟 **86.2s → 2.09s** | [`改进记录.md`](改进记录.md) 模块 C（A/B 脚本 + 原始数字） |
 | 3 | **数据不可信时 Agent 会自信地编结论**：断流写的 0 被当成"客流低谷"，演示数据混进真实时段分析 | 加可信度门禁 + 来源标注后，"高峰 19:00（270 人次）"这类结论会被明确标注**全部来自演示数据**（真实采集为 0） | 同模块 A8（`retail_stats` 加 `source` 列 + 实机 A/B） |
 | 4 | **成本不可见**：定时汇报固定 **10 分钟一轮 = 144 次/天/店**，但没人知道花了多少 | ① 新增 LLM 指标（用量/延迟/失败率/**按用途归因**）② 加**变化门控**：没变化就跳过 LLM 走模板，静默时段 **144 → ≤24 次/天（-83%）** | `GET /api/metrics/llm`（含 `report_gate`）；实测：单次汇报 317+94 tokens / 1.4s，无变化轮不花 token |
@@ -63,8 +63,8 @@ flowchart TB
     SK --> DQ
 
     subgraph OPS["质量门禁与交付"]
-        O1["评测门禁<br/>80 条断言式用例<br/>意图 / 工具选择 / 防幻觉"]
-        O2["单测门禁<br/>123 个用例 + Node 行为断言"]
+        O1["评测门禁<br/>85 条断言式用例<br/>意图 / 工具选择 / 防幻觉"]
+        O2["单测门禁<br/>138 个用例 + Node 行为断言"]
         O3["Docker Compose 四服务<br/>非 root · 镜像钉 digest · 依赖锁"]
         O4["健康检查 + LLM 指标<br/>liveness / readiness / 成本"]
     end
@@ -78,7 +78,7 @@ flowchart TB
 | 维度 | 现状 |
 |---|---|
 | **Agent** | **21 个模块**：意图路由 → LangGraph StateGraph 编排 → DeepSeek；工具含 SQL 查询、业务分析、地图 MCP、向量记忆；**LLM 用量/延迟/成本可观测**（按用途归因） |
-| **评测与质量** | **80 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **123** 个单测用例 + Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
+| **评测与质量** | **85 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **138** 个单测用例 + Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
 | **可靠性** | 向量层熔断 + 舱壁、外部依赖降级、**静默失败治理**（错误通道、看门狗）、健康检查 liveness/readiness 分离 |
 | **数据可信度** | 断流与真实零值分离、来源显式标注（`pos`/`simulated`/`test`/`video`）、问答链路带可信度门禁 |
 | **接口** | 约 **105** 个（13 个路由模块：问答 / 分析 / 报告 / 视频流 / 鉴权 / 地图 / 语音 / TTS） |
@@ -89,17 +89,21 @@ flowchart TB
 
 ## Agent 侧证据（面试最常被追问的三件事）
 
-### ① "你的 Agent 怎么评测？" —— 80 条**断言式**用例，不靠 LLM 自评
+### ① "你的 Agent 怎么评测？" —— 85 条**断言式**用例，不靠 LLM 自评
 
 | 断言维度 | 条数 | 防的是什么 |
 |---|---|---|
-| `expect_intent` 意图路由 | **80** | 问题被路由到错误的分析模板 |
-| `expect_tools` **工具选择** | **54** | 该调工具时不调 / 调错工具 |
+| `expect_intent` 意图路由 | **81** | 问题被路由到错误的分析模板 |
+| `expect_tools` **工具选择** | **14**（共 20 个工具名断言） | 该调工具时不调 / 调错工具 |
 | `expect_no_tools` | 3 | **不该调工具时乱调**（浪费 token + 慢） |
-| `expect_keywords` / `_any` 内容断言 | 37 / 41 | 答非所问、结论缺关键数据 |
+| `expect_keywords` / `_any` 内容断言 | 29 / 44 | 答非所问、结论缺关键数据 |
 | `expect_no_keywords` | 7 | **幻觉与越界表述**（说了不该说的） |
-| `dialog` + `check_turn` 多轮 | 6 | 上下文丢失、指代错误 |
+| `dialog` + `check_turn` 多轮 | 9 | 上下文丢失、指代错误 |
 | `preload_history` | 1 | 历史注入失效 |
+| `data_stale` **可信度门禁** | 2 | 摄像头没开时仍给出"到访 0 人次"这类**假业务结论** |
+
+> 计数口径：每个维度 = 声明了该字段的用例数（`evals/cases.json` 可直接核对）。
+> 另有 `evals/cases_memory.json` 的 **2 条长会话压缩用例**（约 30 次 LLM 调用，手动跑，不进 CI）。
 
 判定是**确定性断言**（实际调用工具 ⊇ 期望工具、关键词必须出现/禁止出现），
 失败即 CI 拦截 ✓ —— 这也是它能进 CI 门禁的前提。
@@ -148,8 +152,8 @@ docker compose up -d --build  # 起 backend + MySQL + Qdrant + Redis
 ## 如何复现上面那些数字
 
 ```powershell
-python tests/run_tests.py                          # 123 个单元用例（零依赖，CI 用的就是它）
-python evals/run_evals.py                          # 80 条断言式评测（意图/工具选择/防幻觉，需 MySQL + LLM Key）
+python tests/run_tests.py                          # 138 个单元用例（零依赖，CI 用的就是它）
+python evals/run_evals.py                          # 85 条断言式评测（意图/工具选择/防幻觉，需 MySQL + LLM Key）
 
 # LLM 用量与成本（Agent 侧指标；按用途归因 answer / report / summary / title）
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/metrics/llm
@@ -168,7 +172,7 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 
 ## 界面预览
 
-| 自然语言问答（含数据可信度提示） | 评测门禁（80 条断言式用例） |
+| 自然语言问答（含数据可信度提示） | 评测门禁（85 条断言式用例） |
 |---|---|
 | ![问答](docs/images/01-chat.png) | ![评测](docs/images/02-eval.png) |
 
@@ -191,7 +195,7 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 | 数据可信 | 无 | **可信度门禁** + **来源显式标注**（pos/simulated/test） |
 | 业务能力 | 仅当前统计 | **同期对比**（昨天/上周）+ 销量接入与**目录自动同步** |
 | CV | 单路 | **多摄像头模块化**（按标签加载、数据隔离、多路真并行） |
-| 质量 | 手动跑评测 | 80 条评测集 + **CI 门禁** + 压测驱动优化（QPS 6×） |
+| 质量 | 手动跑评测 | 85 条评测集 + **CI 门禁** + 压测驱动优化（QPS 6×） |
 
 ## 项目介绍
 
@@ -232,7 +236,7 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 ├── skills/                  # 热度、告警、表情 + 客流/空货架模块
 ├── frontend-vue/            # 浏览器前端（Vue3 + Vite，唯一前端）
 ├── miniprogram/             # 微信小程序端（问答/看板/监控/摄像头管理/语音）
-├── evals/                   # 自动化评测集（80 条）+ CI 门禁
+├── evals/                   # 自动化评测集（85 条）+ CI 门禁
 ├── benchmark/               # 并发压测脚本与报告
 ├── data/                    # 运行时数据：SQLite、鉴权库、销量投递目录、日志
 ├── 改进记录.md               # v3 → v4 改进记录（问题/做法/验证/收益）
