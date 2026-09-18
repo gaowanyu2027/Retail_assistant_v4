@@ -603,6 +603,12 @@ async def llm_usage_metrics(_admin: dict = Depends(require_perm("system:manage")
     )
     snap["model"] = LLM_MODEL
     snap["server_time"] = _t.strftime("%Y-%m-%d %H:%M:%S")
+    # 成本门控的效果（台账 F5）：跳过了多少次 LLM 汇报、为什么跳过
+    try:
+        from agents.report_change_gate import get_report_gate
+        snap["report_gate"] = get_report_gate().snapshot()
+    except Exception as e:
+        snap["report_gate"] = {"error": type(e).__name__}
     return snap
 
 
