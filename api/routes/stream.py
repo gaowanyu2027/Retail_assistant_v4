@@ -765,12 +765,32 @@ async def video_stream(websocket: WebSocket):
     _push_log_time = _time.time()
     _push_count = 0
 
-    def start_processing(cap_source, mode="retail", use_processor=None, use_event_detector=None):
-        """启动后台处理线程"""
+    def start_processing(cap_source, mode="retail", use_processor=None, use_event_detector=None,
+                         use_roi=None):
+        """启动后台处理线程
+
+        `use_roi`：本次会话该用哪套 ROI（服务端门店 ROI 或本地摄像头 ROI）。
+        ⚠ 台账 D16：**skill 与 processor 必须共用同一个 ROI 实例** —— 原因有两个：
+          1. ROI 多边形是按「当前帧尺寸 / 基准 640×480」缩放，而 `set_frame_size` 只有
+             processor 每帧会调；skill 若用另一个实例，缩放永远不更新（客户端帧被统一
+             缩放到 1280×720，skill 却按 640×480 判定）→ **人站在画面正中间也落在所有
+             多边形之外，访客/热度恒为 0**（实测复现：正中 (640,360) 判为 None）；
+          2. 面板（`/api/reports/popularity`）与落库读的都是 **skill 单例**，
+             共用实例才能保证"判定 / 展示 / 落库"三处口径一致。
+        """
         nonlocal bg_thread
         global _run_token, _latest_result, _latest_frame_b64, _bg_thread_ref
         target_processor = use_processor or processor
         target_event_detector = use_event_detector or event_detector
+        target_roi = use_roi or roi_mgr
+        if mode == "retail":
+            # 两个 skill 都是实时读 self.roi_manager（无缓存），所以直接换引用即可
+            if getattr(pop_skill, "roi_manager", None) is not target_roi:
+                pop_skill.roi_manager = target_roi
+                print(f"[WS] 热度 skill 切换到 ROI: {type(target_roi).__name__}"
+                      f"（区域数 {len(target_roi.get_shelf_zones())}）")
+            if getattr(anom_skill, "roi_manager", None) is not target_roi:
+                anom_skill.roi_manager = target_roi
         _stop_internal()
         if bg_thread and bg_thread.is_alive():
             bg_thread.join(timeout=2.0)
@@ -1059,7 +1079,8 @@ async def video_stream(websocket: WebSocket):
                         _client_camera_owner = uname
                         _client_camera_owner_ws = websocket
                     try:
-                        start_processing(None, mode, local_processor, local_event_detector)
+                        start_processing(None, mode, local_processor, local_event_detector,
+                                         use_roi=local_roi_mgr)
                     except Exception as e:
                         print(f"[WS] 浏览器摄像头处理启动失败: {e}")
                         with _lock:
