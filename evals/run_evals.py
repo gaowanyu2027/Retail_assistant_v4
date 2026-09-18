@@ -152,6 +152,9 @@ def _simulate_source(case: dict) -> None:
     data_quality.mark_frame(data_quality.SOURCE_EMOTION)
 
 
+_persist_err_counts: dict[str, int] = {}
+
+
 def _persist_turn(sid: str, q: str, answer: str, intent: str) -> None:
     """把本轮问答写进 query_history —— **对齐生产的写入路径**。
 
@@ -162,12 +165,20 @@ def _persist_turn(sid: str, q: str, answer: str, intent: str) -> None:
     不是产品缺陷（两者必须区分，否则会去改没坏的东西）。
 
     失败只告警：单轮用例不需要这张表，跨会话用例靠 `preload_history` 也能自备数据。
+    **同类错误只逐条打印 2 次**：CI 日志里曾因为表不存在而连打 16 遍同样一行，
+    把真正有用的输出淹没了（同一个错误刷屏属于"噪音型告警"，结束时有汇总）。
     """
     try:
         import mysql_db
         mysql_db.save_query_history(sid, q, answer, intent or "general", 0.9)
     except Exception as e:
-        print(f"[persist] 本轮写入 query_history 失败(跨会话断言可能失真): {e}")
+        key = f"{type(e).__name__}: {str(e)[:80]}"
+        n = _persist_err_counts.get(key, 0) + 1
+        _persist_err_counts[key] = n
+        if n <= 2:
+            print(f"[persist] 本轮写入 query_history 失败(跨会话断言可能失真): {e}")
+        elif n == 3:
+            print("[persist] 同类错误持续出现，后续不再逐条打印（结束时汇总）")
 
 
 def _run_turn(agent, q: str, sid: str, case: dict | None = None) -> dict:
@@ -391,6 +402,34 @@ def _print_env_banner() -> None:
         print(f"[env]   MySQL 连接失败: {type(e).__name__}: {e}")
 
 
+def _ensure_db_schema() -> None:
+    """跑评测前确保 MySQL **表结构**就绪（幂等）。
+
+    为什么必须做（2026-09-18 CI 实测的真实根因）：CI 的 MySQL service 用
+    `MYSQL_DATABASE: retail_assistant` **只建空库、不建表** —— 建表是应用启动时
+    `database.init_db()` → `mysql_db.init_schema()` 的职责，而评测脚本是**另起进程直连库**的。
+    于是 CI 里从第一条用例就开始报：
+
+        [persist] 本轮写入 query_history 失败: (1146, "Table 'retail_assistant.chat_session' doesn't exist")
+        ...
+        [CI-GATE] 评测异常: (1146, "Table 'retail_assistant.agent_tool_log' doesn't exist")
+
+    跑到 `his_01` 时 `query_tool_logs()` 抛异常 → 整轮 **exit code 2**（连挂两轮的真凶）。
+    本地一直没暴露，因为开发机的库早就被 app 初始化过了 —— 典型的"只在干净环境复现"的坑。
+
+    建表全部是 `CREATE TABLE IF NOT EXISTS`，幂等且只要几十毫秒。
+    """
+    try:
+        import mysql_db
+
+        mysql_db.init_schema()
+        print(f"[db] schema 已就绪（{mysql_db.MYSQL_DB}）")
+    except Exception as e:
+        # 不直接退出：让后续用例把"哪一条依赖 DB"逐个暴露出来，报告更有用
+        print(f"[db] 建表失败（依赖 DB 的用例接下来都会失败）: {type(e).__name__}: {e}")
+        _gha_annotate("error", "评测前建表失败", f"{type(e).__name__}: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agent 评测集跑分")
     parser.add_argument("--case", default=None,
@@ -410,6 +449,7 @@ def main():
 
     print(f"加载 {len(cases)} 条用例，装配 Agent（真实技能 + DeepSeek）...")
     _print_env_banner()
+    _ensure_db_schema()
     try:
         agent = get_agent()
     except Exception as e:
@@ -487,6 +527,11 @@ def main():
     # ===== CI 门禁：任一用例失败 → 非零退出码（供流水线拦截回归） =====
     passed = sum(1 for r in results if r["pass"])
     failed = [r for r in results if not r["pass"]]
+    if _persist_err_counts:
+        total = sum(_persist_err_counts.values())
+        print(f"\n[persist] 本轮共有 {total} 次 query_history 写入失败，按错误归类：")
+        for key, n in sorted(_persist_err_counts.items(), key=lambda kv: -kv[1]):
+            print(f"[persist]   {n:3d} 次  {key}")
     for r in failed[:15]:                     # 注解有数量上限，先报前 15 条
         _gha_annotate("error", f"eval 失败 {r['id']}",
                       f"问题: {r['question']}\n原因: {'; '.join(r['failures'])}\n"
