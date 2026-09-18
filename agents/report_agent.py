@@ -168,7 +168,7 @@ def _try_llm_text(pop: dict, anom: dict, emo: dict, trend: dict, report_type: st
             f"要求：{focus} 使用中性措辞，禁止使用偷窃、盗窃等法律定性词汇；"
             "若存在高风险告警必须注明\"建议人工复核\"。"
         )
-        resp = create_llm(temperature=0.3).invoke(prompt)
+        resp = create_llm(temperature=0.3, tag="report").invoke(prompt)
         text = (resp.content or "").strip() if isinstance(resp.content, str) else str(resp.content or "").strip()
         if text:
             return text

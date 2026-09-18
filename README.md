@@ -10,76 +10,119 @@
   <img src="https://img.shields.io/badge/docker-compose-2496ED" alt="Docker Compose">
 </p>
 
-面向线下门店的 AI Agent 落地系统：以摄像头为感知入口，把 CV 检测结果结构化落库，
-再由 LangGraph Agent 完成自然语言问答与运营归因，最终通过**网页与微信小程序双端**交付。
+面向线下门店的 **AI Agent 落地系统**：Agent 通过**工具调用**消费结构化经营数据，
+完成自然语言问答与运营归因，最终通过**网页与微信小程序双端**交付。
+
+> **这是 Agent 项目，不是 CV 项目。** 摄像头只是**感知层**（数据来源）——
+> 真正的工程重心在：**Agent 编排与工具调用**、**断言式评测与 CI 门禁**、
+> **数据可信度门禁（防 Agent 编结论）**、**外部依赖的熔断/舱壁**、**LLM 用量与成本可观测**。
 
 核心主张是**先保证数据可信、再给出结论**——设备故障与"真实零客流"被明确区分，
-销量来源（真实接入 / 演示 / 测试）显式标注，避免用不可信数据指导经营决策。
+数据来源（真实接入 / 演示 / 测试）显式标注，避免 Agent 用不可信数据给出自信的错误结论。
 
-### 三个能自己复现的硬数字
+### 四个能自己复现的硬数字（都是 Agent 侧问题）
 
 | # | 问题 | 结果 | 怎么验 |
 |---|---|---|---|
-| 1 | Qdrant 打嗝时，40 并发请求把线程池吃光 | 熔断 + 舱壁后 `/api/chat/search` 中位延迟 **86.2s → 2.09s** | [`改进记录.md`](改进记录.md) 模块 C（含 A/B 脚本与原始数字） |
-| 2 | 就绪探针里的**同步**依赖探测每 30s 阻塞事件循环 | 视频帧停顿 **3.96s → 0.09s**；`/api/health` 峰值 **3606ms → 26ms** | 同上（75s 连续观测 + `/api/health` 采样） |
-| 3 | 演示数据混进真实时段分析，且无来源标注 | 修复前"高峰 19:00（270 人次）"**全部来自演示数据**，真实采集为 0 | 同模块 A8；`retail_stats` 加 `source` 列 + 实机 A/B |
+| 1 | **评测不可信**：Agent 的行为（意图/工具选择/是否编造）靠"看起来对"没法防回归 | 自建 **80 条断言式评测集**（含**防幻觉负面断言**与多轮用例），接入 CI 双门禁，**不依赖 LLM 自评** | 见下方「Agent 侧证据」；`python evals/run_evals.py` |
+| 2 | **外部依赖打嗝拖垮 Agent**：Qdrant 抖动时 40 并发把线程池吃光 | 熔断 + 舱壁后 `/api/chat/search` 中位延迟 **86.2s → 2.09s** | [`改进记录.md`](改进记录.md) 模块 C（A/B 脚本 + 原始数字） |
+| 3 | **数据不可信时 Agent 会自信地编结论**：断流写的 0 被当成"客流低谷"，演示数据混进真实时段分析 | 加可信度门禁 + 来源标注后，"高峰 19:00（270 人次）"这类结论会被明确标注**全部来自演示数据**（真实采集为 0） | 同模块 A8（`retail_stats` 加 `source` 列 + 实机 A/B） |
+| 4 | **成本不可见**：定时汇报固定 **10 分钟一轮 = 144 次/天/店**，但没人知道花了多少 | 新增 LLM 指标（用量/延迟/失败率/**按用途归因**/可选成本估算）。实测定时汇报单次 **317+94 tokens / 1.4s** | `GET /api/metrics/llm`（见下方复现命令） |
 
-> 这类修复在本项目共 **51 条已修 / 35 条待修**，每条都按「问题 → 复现 → 根因 → 修复 → 验证 → 诚实边界」记录在
-> [`改进记录.md`](改进记录.md)（3400+ 行工程纪实，含**踩过的弯路**与未验证项标注）。
+> 这类修复在本项目共 **50+ 条已修 / 30+ 条待修**，每条都按「问题 → 复现 → 根因 → 修复 → 验证 → 诚实边界」记录在
+> [`改进记录.md`](改进记录.md)（4000+ 行工程纪实，含**踩过的弯路**与未验证项标注）。
 
 ## 架构
 
 ```mermaid
 flowchart TB
-    subgraph SRC["视频源：统一入口 open_source"]
-        S1["服务器摄像头<br/>文件 / RTSP / 服务端物理设备"]
-        S2["本地摄像头<br/>浏览器采帧"]
-        S3["上传视频 / 白名单文件"]
+    U["用户<br/>网页 / 微信小程序"] --> API["FastAPI · 约 105 个接口<br/>/api/chat · /api/reports · /api/analytics"]
+
+    subgraph AGENT["Agent 层（本项目的重心）"]
+        IR["intent_router<br/>规则 + 语义路由"]
+        MA["master_agent<br/>LangGraph StateGraph 编排"]
+        TL["工具集<br/>SQL 查询 / 业务分析 / 地图 MCP / 向量记忆"]
+        IR --> MA --> TL
     end
 
-    S2 -->|"二进制 JPEG · /api/ws/client"| CV
-    S1 --> CV
-    S3 --> CV
+    API --> IR
+    MA <--> LLM["DeepSeek LLM<br/>（用量/延迟/失败率可观测）"]
+    TL <--> VM["vector_memory · Qdrant<br/>熔断 + 舱壁"]
+    TL --> DQ["data_quality<br/>可信度门禁：把“断流 0”与“真没人”分开<br/>不可信就如实说，不让 Agent 编结论"]
 
-    subgraph CV["CV 管线 cv_engine"]
-        VP["video_processor<br/>YOLO 检测 + 跟踪 + 帧跳过 + 自适应帧率"]
-        TK["tracker<br/>轨迹状态 + ROI 区域判定"]
-        VP --> TK
-    end
-
-    TK --> SK["skills 分析<br/>货架热度 / 异常行为 / 人脸表情"]
-    TK --> MR["module_registry<br/>按机位类型加载模块<br/>每摄像头独立实例"]
-    SK --> DQ["data_quality<br/>可信度门禁<br/>把“断流 0”与“真没人”分开"]
-    SK --> DB[("MySQL<br/>retail_stats / alert_record<br/>product_sales / query_history")]
-    MR --> DB
-
-    DB --> AG["Agent 层 · 21 个模块<br/>intent_router → master_agent · LangGraph"]
-    DQ --> AG
-    AG <--> LLM["DeepSeek LLM"]
-    AG <--> VM["vector_memory<br/>Qdrant · 熔断 + 舱壁"]
-    AG --> API["FastAPI · 约 105 个接口<br/>/api/chat · /api/reports · /api/analytics"]
+    DQ --> DB[("MySQL<br/>retail_stats / alert_record<br/>product_sales / query_history")]
+    DB --> TL
     DB --> API
-    API --> FE["前端：Vue3 看板 + WebSocket 推流<br/>微信小程序"]
 
-    subgraph OPS["交付与运维"]
-        O1["健康检查<br/>liveness 与 readiness 分离"]
-        O2["GitHub Actions<br/>105 单测 + 80 条评测双门禁"]
-        O3["Docker Compose 四服务<br/>非 root 运行 · 镜像钉 digest · 依赖锁"]
+    subgraph PERCEPT["感知层（数据来源，详见下文「感知层」一节）"]
+        CV["cv_engine<br/>YOLO 检测 + 跟踪 + ROI"]
+        SK["skills<br/>热度 / 异常 / 表情"]
+        CV --> SK
+    end
+    SK --> DB
+    SK --> DQ
+
+    subgraph OPS["质量门禁与交付"]
+        O1["评测门禁<br/>80 条断言式用例<br/>意图 / 工具选择 / 防幻觉"]
+        O2["单测门禁<br/>123 个用例 + Node 行为断言"]
+        O3["Docker Compose 四服务<br/>非 root · 镜像钉 digest · 依赖锁"]
+        O4["健康检查 + LLM 指标<br/>liveness / readiness / 成本"]
     end
 ```
+
+> 想先看**感知层（CV）怎么接进来的**？见文末「感知层」一节 —— 它在本项目里的定位是
+> **数据来源**：`open_source` 统一入口 → CV 管线 → skills → 落库，之后就交给 Agent 了。
 
 ## 能力一览
 
 | 维度 | 现状 |
 |---|---|
-| **接口** | 约 **105** 个（13 个路由模块：视频流 / 分析 / 报告 / 问答 / 鉴权 / 地图 / 语音 / TTS） |
-| **CV 分析** | YOLO 行人检测 + 跟踪 + ROI 热度、异常行为告警、人脸表情识别；**按机位类型**加载模块（货架 / 门口 / 收银台三类候选池） |
-| **Agent** | **21 个模块**：意图路由 → LangGraph StateGraph 编排 → DeepSeek；工具含 SQL 查询、业务分析、地图 MCP、向量记忆 |
-| **数据层** | MySQL（业务）+ SQLite（鉴权 / 降级回退）+ Qdrant（向量，熔断 + 舱壁）+ Redis（常驻） |
+| **Agent** | **21 个模块**：意图路由 → LangGraph StateGraph 编排 → DeepSeek；工具含 SQL 查询、业务分析、地图 MCP、向量记忆；**LLM 用量/延迟/成本可观测**（按用途归因） |
+| **评测与质量** | **80 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **123** 个单测用例 + Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
+| **可靠性** | 向量层熔断 + 舱壁、外部依赖降级、**静默失败治理**（错误通道、看门狗）、健康检查 liveness/readiness 分离 |
 | **数据可信度** | 断流与真实零值分离、来源显式标注（`pos`/`simulated`/`test`/`video`）、问答链路带可信度门禁 |
-| **测试与门禁** | **105** 个 Python 单测用例（零依赖运行器，pytest 亦可）+ Node 行为断言 + **80** 条 LLM 评测集；CI 双门禁 |
-| **交付** | Docker Compose 四服务、**非 root** 容器、健康检查（ready 探真依赖）、镜像 `tag@digest`、`requirements.lock.txt` 精确重建 |
-| **安全** | 登录鉴权 + 双角色权限矩阵（26 个门禁点）、会话滑动续期、视频源 SSRF 守卫（环回/云元数据永久封禁）、上传四道约束、安全响应头 |
+| **接口** | 约 **105** 个（13 个路由模块：问答 / 分析 / 报告 / 视频流 / 鉴权 / 地图 / 语音 / TTS） |
+| **数据层** | MySQL（业务）+ SQLite（鉴权 / 降级回退）+ Qdrant（向量，熔断 + 舱壁）+ Redis（常驻） |
+| **安全** | 登录鉴权 + 双角色权限矩阵（26 个门禁点）、会话滑动续期、**工具调用的入参校验与 SSRF 守卫**、上传四道约束、安全响应头 |
+| **感知层（CV）** | YOLO 行人检测 + 跟踪 + ROI 热度、异常行为告警、人脸表情识别；按机位类型加载模块 |
+| **交付** | Docker Compose 四服务、**非 root** 容器、镜像 `tag@digest`、`requirements.lock.txt` 精确重建 |
+
+## Agent 侧证据（面试最常被追问的三件事）
+
+### ① "你的 Agent 怎么评测？" —— 80 条**断言式**用例，不靠 LLM 自评
+
+| 断言维度 | 条数 | 防的是什么 |
+|---|---|---|
+| `expect_intent` 意图路由 | **80** | 问题被路由到错误的分析模板 |
+| `expect_tools` **工具选择** | **54** | 该调工具时不调 / 调错工具 |
+| `expect_no_tools` | 3 | **不该调工具时乱调**（浪费 token + 慢） |
+| `expect_keywords` / `_any` 内容断言 | 37 / 41 | 答非所问、结论缺关键数据 |
+| `expect_no_keywords` | 7 | **幻觉与越界表述**（说了不该说的） |
+| `dialog` + `check_turn` 多轮 | 6 | 上下文丢失、指代错误 |
+| `preload_history` | 1 | 历史注入失效 |
+
+判定是**确定性断言**（实际调用工具 ⊇ 期望工具、关键词必须出现/禁止出现），
+失败即 CI 拦截 ✓ —— 这也是它能进 CI 门禁的前提。
+
+### ② "数据不对时 Agent 会不会胡说？" —— 可信度门禁（这是 LLM 特有的坑）
+
+- 摄像头断流写下的 `0` 与"真的没客人"**在数据库里长得一样** → 原实现据此给出"低谷时段安排陈列调整"的误导建议 ✗
+  现在：可信度门禁把两者分开，问答与汇报链路都会**如实回答"数据不可信/未采集"** ✓
+- 演示数据（`simulated`）与真实采集混在一张表 → 修复前"高峰 19:00（270 人次）"**全部来自演示数据**，
+  真实采集为 0 ✗ 现在：来源显式列 + 结论里标注 ✓
+
+### ③ "成本和延迟你怎么管？" —— LLM 指标（按用途归因）
+
+```powershell
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/metrics/llm
+```
+
+返回：`calls / errors / error_rate`、`prompt_tokens / completion_tokens`、
+延迟 `p50/p95/max`（最近 500 次有界窗口）、**`by_tag`（answer / report / summary / title）**、
+`by_model`、以及**可选** `cost_estimate`（只在配置了单价时给出 —— 价格会变，写死就是错的）。
+
+实测样本：定时汇报单次 **317 + 94 tokens / 1.4s**；而它**固定 10 分钟一轮 = 144 次/天/店** ——
+这就是"变化驱动汇报"（台账 F5）的降本依据。
 
 ## 快速开始（三步）
 
@@ -98,26 +141,37 @@ docker compose up -d --build  # 起 backend + MySQL + Qdrant + Redis
 ## 如何复现上面那些数字
 
 ```powershell
-python tests/run_tests.py                          # 105 个单元用例（零依赖，CI 用的就是它）
-python tools/check_video_sources.py --mint-session  # 把配置里每台摄像头真开一遍并报告结果
-python tools/push_camera_frames.py --source 0 --password '…'   # 跨机器送画面（容器看不到设备时的通用解）
-python evals/run_evals.py                          # 80 条 LLM 评测（需 MySQL + LLM Key）
+python tests/run_tests.py                          # 123 个单元用例（零依赖，CI 用的就是它）
+python evals/run_evals.py                          # 80 条断言式评测（意图/工具选择/防幻觉，需 MySQL + LLM Key）
+
+# LLM 用量与成本（Agent 侧指标；按用途归因 answer / report / summary / title）
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/metrics/llm
+
+# 视频源与画面链路（感知层排障，与本项目的 Agent 主线相对独立）
+python tools/check_video_sources.py --mint-session            # 逐台摄像头真开一遍
+python tools/push_camera_frames.py --source 0 --password '…'   # 跨机器送画面
+python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 track_id 数 vs 访客数
 ```
 
 - 逐条修复的**原始数字与 A/B 对照**： [`改进记录.md`](改进记录.md)（按模块归档 + 附四台账）
 - 压测报告： `benchmark/reports/`
-- 排障记录（真实故障复盘）： 摄像头打不开、`auth.db` 打不开、构建不可复现等
+- 排障记录（真实故障复盘）： 容器化后摄像头打不开、`auth.db` 打不开、构建不可复现等
 
-<!-- ===== 界面预览：拍好 4 张图放进 docs/images/ 后，把下面这段的注释去掉即可（清单见 docs/images/README.md） =====
+<!-- ===== 界面预览：把图放进 docs/images/ 后，删掉本行注释标记即可（拍图清单见 docs/images/README.md） =====
+
 ## 界面预览
 
-| 实时监控 | 自然语言问答 |
+| 自然语言问答（含数据可信度提示） | 评测门禁（80 条断言式用例） |
 |---|---|
-| ![监控](docs/images/01-monitor.png) | ![问答](docs/images/02-chat.png) |
+| ![问答](docs/images/01-chat.png) | ![评测](docs/images/02-eval.png) |
 
-| 热度与告警 | 动线与转化 |
+| 单测与 CI 双门禁 | 实时监控（感知层，可替换） |
 |---|---|
-| ![看板](docs/images/03-dashboard.png) | ![分析](docs/images/04-analytics.png) |
+| ![CI](docs/images/03-ci.png) | ![监控](docs/images/04-monitor.png) |
+
+| 经营看板（热度/告警/转化） | LLM 用量与成本指标 |
+|---|---|
+| ![看板](docs/images/05-dashboard.png) | ![指标](docs/images/06-metrics.png) |
 ===== -->
 
 ### v4 相对 v3 的主要变化
@@ -747,6 +801,37 @@ ollama pull qllama/bge-small-zh-v1.5
 ## 备注
 
 本项目默认使用单进程运行。本地 Qdrant 模式不支持多个 Python 进程同时打开同一个向量库目录；如果后续使用多进程或多机部署，需要切换为 Qdrant Server 模式。
+
+## 感知层（CV：数据来源）
+
+> **定位**：本项目的重心是 Agent 与工程化（见上文），CV 在这里的角色是**数据来源** ——
+> 把摄像头画面变成 Agent 能查询的结构化经营数据。这一节给需要深挖的人看。
+
+**数据流**：`open_source`（统一入口，一份描述符 + 一处校验）→ 帧 → YOLO 检测 + ByteTrack 跟踪
+→ ROI 区域判定 → skills（货架热度 / 异常行为 / 人脸表情）→ MySQL → **交给 Agent 查询**。
+
+| 项 | 说明 |
+|---|---|
+| 视频源 | 统一入口 `open_source({kind: camera｜device｜file｜upload｜client｜rtsp})`；协议白名单 + 目录白名单 + **SSRF 守卫**（环回/云元数据永久封禁、公网默认拒、私网放行）+ 凭据脱敏 |
+| 采集路径 | **服务端侧**（文件 / RTSP / 服务端物理设备）与**浏览器侧**（`getUserMedia` 采帧经 `/api/ws/client` 上行）两条，按"谁持有设备"分工 |
+| 分析 | 按机位类型加载模块（`indoor_shelf` / `entrance` / `checkout` 三类候选池），每摄像头独立实例（数据隔离） |
+| 与 Agent 的接口 | `data_quality` 可信度门禁（断流 0 与真实零值分开）+ 来源显式标注（`video`/`pos`/`simulated`/`test`） |
+
+**已知限制（诚实标注）**：
+
+- 容器内**看不到**物理摄像头（WSL2 无 `/dev/video*`，Docker 无法直通 USB）→ 用浏览器采帧或宿主机直跑；
+  真 RTSP 不受此限（网络设备）。
+- "唯一访客"目前只能**按 track_id 去重**：人离开画面超过跟踪窗口再回来会被算成新访客（实测 25 秒内 1 人切了 1 次 ID）。
+  要真正解决需要 **ReID 或业务层规则**（时间窗 / 门口穿越线）—— 这是路线图里的已知项，不是隐藏问题。
+- 客流"人次"与"人数"是两个口径，界面已分开显示并在 tooltip 说明。
+
+**排障工具**（怀疑"数字不对"时先跑它们，用数据说话）：
+
+```powershell
+python tools/check_video_sources.py --mint-session            # 每台摄像头真开一遍，报告画面/卡点/错误码
+python tools/push_camera_frames.py --source 0 --password '…'   # 把任意机器的画面推给服务端（跨机器/跨网络）
+python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计：不同 track_id 数 vs 访问客增量
+```
 
 ## 摄像头模块化（按需加载）
 

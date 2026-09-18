@@ -357,6 +357,13 @@ LLM_PROVIDER = "openai"
 LLM_MODEL = "deepseek-chat"
 # LLM API Key，从环境变量读取
 LLM_API_KEY = os.environ.get("dazuoye_api", "")
+# LLM 单价（美元 / 百万 token），用于 `/api/metrics/llm` 的成本估算。
+# ⚠ **默认 0 = 不做成本估算，只报 token 数** —— 各家价格会变，写死一个数就是错的；
+#   请按你实际使用模型的官方价目表填写（也可以用环境变量临时覆盖）：
+#     $env:LLM_PRICE_IN_PER_MTOK = "0.27"    # 输入（缓存未命中）
+#     $env:LLM_PRICE_OUT_PER_MTOK = "1.10"   # 输出
+LLM_PRICE_IN_PER_MTOK = float(os.environ.get("LLM_PRICE_IN_PER_MTOK") or 0)
+LLM_PRICE_OUT_PER_MTOK = float(os.environ.get("LLM_PRICE_OUT_PER_MTOK") or 0)
 # OpenAI 兼容接口地址
 LLM_BASE_URL = "https://api.deepseek.com"
 # LLM 生成温度

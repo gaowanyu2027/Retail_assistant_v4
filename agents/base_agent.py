@@ -95,17 +95,25 @@ def create_memory():
         return _memory_singleton
 
 
-def create_llm(temperature: float = LLM_TEMPERATURE) -> ChatOpenAI:
+def create_llm(temperature: float = LLM_TEMPERATURE, tag: str = "unknown") -> ChatOpenAI:
     """创建 LLM 实例 — 通过 ChatOpenAI 对接 DeepSeek
 
     带请求超时与自动重试（DeepSeek 偶发 5xx 时框架自动重试，配合 Agent 层模板降级）。
 
+    `tag`：这次调用的**用途标签**（answer / intent / report / title …），
+    用于 LLM 用量与成本归因 —— 全项目 9 处调用都从这里创建实例，
+    所以指标只需要挂在这一处（见 `agents/llm_metrics.py`）。
+
     Args:
         temperature: 生成温度（0=确定，1=随机）
+        tag: 调用用途（用于指标归因，不影响行为）
 
     Returns:
         ChatOpenAI 实例
     """
+    from agents.llm_metrics import make_metrics_handler
+
+    handler = make_metrics_handler(tag)
     return ChatOpenAI(
         api_key=LLM_API_KEY,
         base_url=LLM_BASE_URL,
@@ -113,6 +121,7 @@ def create_llm(temperature: float = LLM_TEMPERATURE) -> ChatOpenAI:
         temperature=temperature,
         timeout=60,
         max_retries=2,
+        callbacks=[handler] if handler else None,
     )
 
 
@@ -130,7 +139,7 @@ def generate_session_title(question: str, max_chars: int = 16) -> str:
     if not question:
         return "新会话"
     try:
-        llm = create_llm(temperature=0)
+        llm = create_llm(temperature=0, tag="title")
         prompt = (
             "请为下面这句用户的提问生成一个不超过12个字的中文会话标题。"
             "只输出标题本身，不要引号、不要解释、不要多余标点。\n提问：" + question[:200]
