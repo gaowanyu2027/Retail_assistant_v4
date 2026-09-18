@@ -1,13 +1,124 @@
 # 智能零售分析系统 v4
 
+<p>
+  <a href="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml">
+    <img src="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml/badge.svg?branch=main" alt="CI（单测门禁 + 评测门禁）">
+  </a>
+  <img src="https://img.shields.io/badge/unit%20tests-105%20passed-2ea44f" alt="105 个单测用例">
+  <img src="https://img.shields.io/badge/eval%20cases-80-1f6feb" alt="80 条评测集">
+  <img src="https://img.shields.io/badge/python-3.13-3776AB" alt="Python 3.13">
+  <img src="https://img.shields.io/badge/docker-compose-2496ED" alt="Docker Compose">
+</p>
+
 面向线下门店的 AI Agent 落地系统：以摄像头为感知入口，把 CV 检测结果结构化落库，
 再由 LangGraph Agent 完成自然语言问答与运营归因，最终通过**网页与微信小程序双端**交付。
 
 核心主张是**先保证数据可信、再给出结论**——设备故障与"真实零客流"被明确区分，
 销量来源（真实接入 / 演示 / 测试）显式标注，避免用不可信数据指导经营决策。
 
-> **演进记录见 [`改进记录.md`](改进记录.md)**：v3 → v4 的全部改进按「问题 → 做法 → 验证 → 收益」记录，
-> 含实测验证数字、设计取舍与踩坑复盘。
+### 三个能自己复现的硬数字
+
+| # | 问题 | 结果 | 怎么验 |
+|---|---|---|---|
+| 1 | Qdrant 打嗝时，40 并发请求把线程池吃光 | 熔断 + 舱壁后 `/api/chat/search` 中位延迟 **86.2s → 2.09s** | [`改进记录.md`](改进记录.md) 模块 C（含 A/B 脚本与原始数字） |
+| 2 | 就绪探针里的**同步**依赖探测每 30s 阻塞事件循环 | 视频帧停顿 **3.96s → 0.09s**；`/api/health` 峰值 **3606ms → 26ms** | 同上（75s 连续观测 + `/api/health` 采样） |
+| 3 | 演示数据混进真实时段分析，且无来源标注 | 修复前"高峰 19:00（270 人次）"**全部来自演示数据**，真实采集为 0 | 同模块 A8；`retail_stats` 加 `source` 列 + 实机 A/B |
+
+> 这类修复在本项目共 **51 条已修 / 35 条待修**，每条都按「问题 → 复现 → 根因 → 修复 → 验证 → 诚实边界」记录在
+> [`改进记录.md`](改进记录.md)（3400+ 行工程纪实，含**踩过的弯路**与未验证项标注）。
+
+## 架构
+
+```mermaid
+flowchart TB
+    subgraph SRC["视频源：统一入口 open_source"]
+        S1["服务器摄像头<br/>文件 / RTSP / 服务端物理设备"]
+        S2["本地摄像头<br/>浏览器采帧"]
+        S3["上传视频 / 白名单文件"]
+    end
+
+    S2 -->|"二进制 JPEG · /api/ws/client"| CV
+    S1 --> CV
+    S3 --> CV
+
+    subgraph CV["CV 管线 cv_engine"]
+        VP["video_processor<br/>YOLO 检测 + 跟踪 + 帧跳过 + 自适应帧率"]
+        TK["tracker<br/>轨迹状态 + ROI 区域判定"]
+        VP --> TK
+    end
+
+    TK --> SK["skills 分析<br/>货架热度 / 异常行为 / 人脸表情"]
+    TK --> MR["module_registry<br/>按机位类型加载模块<br/>每摄像头独立实例"]
+    SK --> DQ["data_quality<br/>可信度门禁<br/>把“断流 0”与“真没人”分开"]
+    SK --> DB[("MySQL<br/>retail_stats / alert_record<br/>product_sales / query_history")]
+    MR --> DB
+
+    DB --> AG["Agent 层 · 21 个模块<br/>intent_router → master_agent · LangGraph"]
+    DQ --> AG
+    AG <--> LLM["DeepSeek LLM"]
+    AG <--> VM["vector_memory<br/>Qdrant · 熔断 + 舱壁"]
+    AG --> API["FastAPI · 约 105 个接口<br/>/api/chat · /api/reports · /api/analytics"]
+    DB --> API
+    API --> FE["前端：Vue3 看板 + WebSocket 推流<br/>微信小程序"]
+
+    subgraph OPS["交付与运维"]
+        O1["健康检查<br/>liveness 与 readiness 分离"]
+        O2["GitHub Actions<br/>105 单测 + 80 条评测双门禁"]
+        O3["Docker Compose 四服务<br/>非 root 运行 · 镜像钉 digest · 依赖锁"]
+    end
+```
+
+## 能力一览
+
+| 维度 | 现状 |
+|---|---|
+| **接口** | 约 **105** 个（13 个路由模块：视频流 / 分析 / 报告 / 问答 / 鉴权 / 地图 / 语音 / TTS） |
+| **CV 分析** | YOLO 行人检测 + 跟踪 + ROI 热度、异常行为告警、人脸表情识别；**按机位类型**加载模块（货架 / 门口 / 收银台三类候选池） |
+| **Agent** | **21 个模块**：意图路由 → LangGraph StateGraph 编排 → DeepSeek；工具含 SQL 查询、业务分析、地图 MCP、向量记忆 |
+| **数据层** | MySQL（业务）+ SQLite（鉴权 / 降级回退）+ Qdrant（向量，熔断 + 舱壁）+ Redis（常驻） |
+| **数据可信度** | 断流与真实零值分离、来源显式标注（`pos`/`simulated`/`test`/`video`）、问答链路带可信度门禁 |
+| **测试与门禁** | **105** 个 Python 单测用例（零依赖运行器，pytest 亦可）+ Node 行为断言 + **80** 条 LLM 评测集；CI 双门禁 |
+| **交付** | Docker Compose 四服务、**非 root** 容器、健康检查（ready 探真依赖）、镜像 `tag@digest`、`requirements.lock.txt` 精确重建 |
+| **安全** | 登录鉴权 + 双角色权限矩阵（26 个门禁点）、会话滑动续期、视频源 SSRF 守卫（环回/云元数据永久封禁）、上传四道约束、安全响应头 |
+
+## 快速开始（三步）
+
+```powershell
+git clone https://github.com/gaowanyu2027/Retail_assistant_v4.git
+cd Retail_assistant_v4
+copy .env.example .env        # 填 dazuoye_api（LLM Key）与 mysql_root
+docker compose up -d --build  # 起 backend + MySQL + Qdrant + Redis
+```
+
+打开 **http://127.0.0.1:8000** 登录（root 口令只在鉴权库为空时打印一次；忘了用
+`python tools/reset_password.py` 离线重置）。
+
+> 不想用容器？`python run.py` 直接跑宿主（此时**能用本机物理摄像头**；容器模式下 WSL2 看不到设备）。
+
+## 如何复现上面那些数字
+
+```powershell
+python tests/run_tests.py                          # 105 个单元用例（零依赖，CI 用的就是它）
+python tools/check_video_sources.py --mint-session  # 把配置里每台摄像头真开一遍并报告结果
+python tools/push_camera_frames.py --source 0 --password '…'   # 跨机器送画面（容器看不到设备时的通用解）
+python evals/run_evals.py                          # 80 条 LLM 评测（需 MySQL + LLM Key）
+```
+
+- 逐条修复的**原始数字与 A/B 对照**： [`改进记录.md`](改进记录.md)（按模块归档 + 附四台账）
+- 压测报告： `benchmark/reports/`
+- 排障记录（真实故障复盘）： 摄像头打不开、`auth.db` 打不开、构建不可复现等
+
+<!-- ===== 界面预览：拍好 4 张图放进 docs/images/ 后，把下面这段的注释去掉即可（清单见 docs/images/README.md） =====
+## 界面预览
+
+| 实时监控 | 自然语言问答 |
+|---|---|
+| ![监控](docs/images/01-monitor.png) | ![问答](docs/images/02-chat.png) |
+
+| 热度与告警 | 动线与转化 |
+|---|---|
+| ![看板](docs/images/03-dashboard.png) | ![分析](docs/images/04-analytics.png) |
+===== -->
 
 ### v4 相对 v3 的主要变化
 
