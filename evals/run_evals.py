@@ -45,9 +45,20 @@ EVALS_DIR = Path(__file__).resolve().parent
 REPORTS_DIR = EVALS_DIR / "reports"
 
 
-def load_cases() -> list[dict]:
-    with open(EVALS_DIR / "cases.json", "r", encoding="utf-8") as f:
-        return json.load(f)["cases"]
+def load_cases(path: str | None = None) -> list[dict]:
+    """默认读 evals/cases.json；path 可以是绝对路径或相对仓库根/evals 目录的路径。"""
+    if path:
+        p = Path(path)
+        if not p.is_absolute():
+            cand = [EVALS_DIR / p, EVALS_DIR.parent / p]
+            p = next((c for c in cand if c.exists()), cand[0])
+    else:
+        p = EVALS_DIR / "cases.json"
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    cases = data["cases"] if isinstance(data, dict) else data
+    print(f"[cases] {p} → {len(cases)} 条")
+    return cases
 
 
 def get_agent():
@@ -118,9 +129,51 @@ def _score(case: dict, actual_intent: str, tool_names: list[str], answer: str) -
     return failures
 
 
-def _run_turn(agent, q: str, sid: str) -> dict:
+def _simulate_source(case: dict) -> None:
+    """设置评测进程里的"视频源"状态（决定数据可信度门禁走哪条分支）。
+
+    为什么评测必须显式管这件事：可信度门禁按**进程内**的最后出帧时刻判定
+    （`agents/data_quality.py` 的 `_last_frame`），而评测是**另一个进程**，
+    没有任何视频线程 → 门禁恒判"视频源未启动" → 模板回答全部变成
+    "【数据不可信】…本次不出热度结论"，于是断言关键词（到访/最热/表情）全都不出现。
+    实测（未处理前）：83 条里 11 条失败，全部是这一条原因，**不是产品回归**。
+
+    所以：
+    - 默认：标记两路源"刚出过帧" → 等价于"摄像头在跑"，与用例的预期语境一致；
+    - 用例声明 `"data_stale": true`：清空 → 专门验证门禁本身（见 gate_01/gate_02）。
+    每轮都调用（`DATA_STALE_SECONDS=90`，长会话用例单轮耗时可能接近该阈值）。
+    """
+    from agents import data_quality
+
+    if case.get("data_stale"):
+        data_quality.reset()
+        return
+    data_quality.mark_frame(data_quality.SOURCE_RETAIL)
+    data_quality.mark_frame(data_quality.SOURCE_EMOTION)
+
+
+def _persist_turn(sid: str, q: str, answer: str, intent: str) -> None:
+    """把本轮问答写进 query_history —— **对齐生产的写入路径**。
+
+    生产里这件事由 API 层做（`api/routes/query.py::fire_persist` → `_persist_query_history`），
+    每轮都会写，跨会话 `search_chat_history` 与向量召回都建立在这张表上。
+    评测直接调 `agent.handle_query`，绕过了 API 层 → 不补这一步，
+    "跨会话长期记忆"类断言（mem_ctx_03）**必然失败**，但那是评测没模拟生产，
+    不是产品缺陷（两者必须区分，否则会去改没坏的东西）。
+
+    失败只告警：单轮用例不需要这张表，跨会话用例靠 `preload_history` 也能自备数据。
+    """
+    try:
+        import mysql_db
+        mysql_db.save_query_history(sid, q, answer, intent or "general", 0.9)
+    except Exception as e:
+        print(f"[persist] 本轮写入 query_history 失败(跨会话断言可能失真): {e}")
+
+
+def _run_turn(agent, q: str, sid: str, case: dict | None = None) -> dict:
     """执行一轮问答（模板或 Agent），返回该轮输出。"""
     from agents.intent_router import route_intent
+    _simulate_source(case or {})
     started = time.time()
     intent = route_intent(q)
     quick = agent.quick_answer(intent, q, sid)
@@ -134,6 +187,7 @@ def _run_turn(agent, q: str, sid: str) -> dict:
         answer = result.get("answer", "")
         actual_intent = result.get("intent", intent)
         tool_names = query_tool_logs(sid)
+    _persist_turn(sid, q, answer, actual_intent)
     return {
         "question": q, "answer": answer, "actual_intent": actual_intent,
         "tools": tool_names, "actual_path": "router" if quick is not None else "agent",
@@ -162,6 +216,7 @@ def evaluate(agent, case: dict) -> dict:
     # 流式模式：走 handle_query_stream 收集全部 token，验证流式路径可用性
     if case.get("mode") == "stream":
         import asyncio
+        _simulate_source(case)
         started = time.time()
         tokens: list[str] = []
 
@@ -181,7 +236,7 @@ def evaluate(agent, case: dict) -> dict:
             "answer": answer[:200], "pass": not failures, "failures": failures,
         }
 
-    turn = _run_turn(agent, q, sid)
+    turn = _run_turn(agent, q, sid, case)
     failures = _score(case, turn["actual_intent"], turn["tools"], turn["answer"])
     return {
         "id": case["id"], "question": q, "mode": case.get("mode"),
@@ -215,7 +270,7 @@ def evaluate_dialog(agent, case: dict) -> dict:
         cur_sid = f"{sid}_b" if new_session else sid
         for _ in range(repeat):
             turn_index += 1
-            turn = _run_turn(agent, q, cur_sid)
+            turn = _run_turn(agent, q, cur_sid, case)
             turn["turn"] = turn_index
             turn["sid"] = cur_sid
             logs.append(turn)
@@ -223,17 +278,6 @@ def evaluate_dialog(agent, case: dict) -> dict:
     # 用 check_turn 轮的输出做断言（该轮的会话内工具日志仅统计本会话）
     target = logs[check_turn - 1] if 0 < check_turn <= len(logs) else logs[-1]
     failures = _score(case, target["actual_intent"], target["tools"], target["answer"])
-    return {
-        "id": case["id"], "question": f"[多轮×{len(logs)}] {logs[0]['question']}…",
-        "mode": case.get("mode", "multi"), "expect_intent": case.get("expect_intent"),
-        "actual_intent": target["actual_intent"], "actual_path": target["actual_path"],
-        "tools": target["tools"], "latency": round(sum(t["latency"] for t in logs), 2),
-        "answer_len": len(target["answer"]),
-        "answer": target["answer"][:200], "pass": not failures, "failures": failures,
-        "turns": len(logs), "check_turn": check_turn,
-        "turn_logs": logs,
-    }
-
     return {
         "id": case["id"], "question": f"[多轮×{len(logs)}] {logs[0]['question']}…",
         "mode": case.get("mode", "multi"), "expect_intent": case.get("expect_intent"),
@@ -296,12 +340,17 @@ def render_report(results: list[dict]) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Agent 评测集跑分")
-    parser.add_argument("--case", default=None, help="只跑指定用例 id（调试）")
+    parser.add_argument("--case", default=None,
+                        help="只跑指定用例 id（调试；支持逗号分隔多个，如 --case pop_01,emo_01）")
+    parser.add_argument("--file", default=None,
+                        help="用例文件（默认 evals/cases.json）。"
+                             "长会话记忆套件：--file evals/cases_memory.json")
     args = parser.parse_args()
 
-    cases = load_cases()
+    cases = load_cases(args.file)
     if args.case:
-        cases = [c for c in cases if c["id"] == args.case]
+        wanted = [c.strip() for c in args.case.split(",") if c.strip()]
+        cases = [c for c in cases if c["id"] in wanted]
         if not cases:
             print(f"未找到用例 {args.case}")
             sys.exit(1)
@@ -332,6 +381,30 @@ def main():
     out.write_text(report, encoding="utf-8")
     print(f"\n报告已保存: {out}")
 
+    # ===== LLM 用量快照：by_tag.summary 的条数即"长会话压缩真的触发过"的硬证据 =====
+    try:
+        from agents.llm_metrics import get_llm_metrics
+        snap = get_llm_metrics().snapshot()
+        by_tag = snap.get("by_tag", {})
+        print("\n" + "-" * 60)
+        print(f"[LLM] 调用 {snap.get('calls')} 次 | 失败 {snap.get('errors')} 次 | "
+              f"token 入 {snap.get('prompt_tokens')} / 出 {snap.get('completion_tokens')} | "
+              f"无 usage 上报 {snap.get('calls_without_usage')} 次")
+        if snap.get("latency_ms", {}).get("samples"):
+            lat = snap["latency_ms"]
+            print(f"[LLM] 延迟 平均 {lat['avg']}ms / p95 {lat['p95']}ms / 最大 {lat['max']}ms "
+                  f"（样本 {lat['samples']}）")
+        toks = snap.get("tokens_by_tag", {})
+        for tag, cnt in by_tag.items():
+            tk = toks.get(tag, {})
+            print(f"[LLM]   {tag:16s} 调用 {cnt:3d} | 入 {tk.get('prompt', 0):6d} "
+                  f"出 {tk.get('completion', 0):5d} token")
+        if not by_tag.get("summary"):
+            print("[LLM] 注意：本次没有 summary 调用 → 长会话压缩未触发（断言只覆盖了上下文窗口内）")
+        print("-" * 60)
+    except Exception as e:
+        print(f"[LLM] 指标读取失败(不影响评测结论): {e}")
+
     # ===== CI 门禁：任一用例失败 → 非零退出码（供流水线拦截回归） =====
     passed = sum(1 for r in results if r["pass"])
     failed = [r for r in results if not r["pass"]]
@@ -342,6 +415,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # 必须先给默认值：main() 全绿时**不抛 SystemExit**（只打印 CI-GATE），
+    # 原来的写法会让 exit_code 从未赋值 → 结尾 sys.exit(exit_code) 抛
+    # NameError（实测：单跑一条全通过的用例 `--case mem_ctx_01` 就崩在最后一行）
+    exit_code = 0
     try:
         main()
     except SystemExit as e:

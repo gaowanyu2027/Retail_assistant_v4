@@ -192,6 +192,11 @@ AGENT_SUMMARY_MAX_CHARS = 600
 AGENT_LONG_TERM_INJECT_LIMIT = 3
 # 摘要关键词提取上限
 AGENT_LONG_TERM_KEYWORD_LIMIT = 10
+# 模板轮（零 LLM 的意图路由回答）是否也写进检查点线程。
+# 为什么需要：多轮上下文的唯一来源是检查点，模板轮不经过图 →
+# 下一轮的 LLM 看不到"上一轮问了什么"，追问/指代类问题会答"这是第一条消息"。
+# 关掉（False）可省掉每次模板请求的一次 MySQL 检查点写入。
+AGENT_REMEMBER_TEMPLATE_TURNS = True
 
 # ==================== Agent 存储清理策略 ====================
 # 每个会话(thread)保留的最新检查点数量（LangGraph 恢复只用最新，旧的可安全清理）
