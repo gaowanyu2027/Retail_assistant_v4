@@ -15,12 +15,15 @@ cameras:
   cam_in_01:
     name: "1号店内货架摄像头"
     type: indoor_shelf
-    # 演示源：**30 秒 / 150 帧**（5fps）。
-    # ⚠ 不要换回 `mmpose/demo/resources/demo.mp4` —— 那个只有 5 帧（≈1 秒），
-    #   点开瞬间就"播放完毕"，看起来像坏了。
+    # 演示源：**30 秒 / 150 帧**，且**画面里有行人**。
+    # ⚠ 两个坑都踩过，别再换回去：
+    #   1. `mmpose/demo/resources/demo.mp4` —— 只有 **5 帧（≈1 秒）**，点开瞬间"播放完毕"，看起来像坏了；
+    #   2. `data/sources/long_demo.mp4` —— 有 30 秒，但**画面里没有行人**（实测 YOLO 检出 0 人）
+    #      → 热度/访客永远是 0，"货架热度排行"看起来像没反应（排查了很久才发现是素材问题）。
+    #   `demo_loop.mp4` = 把"有人"的那 5 帧乒乓循环成 30 秒（实测检出 49 人、44 个落在 ROI 带内）。
     # 放在 data/sources/ 而不是 data/videos/：后者是录制输出目录，受 DB_RECORD_KEEP_DAYS
     # 保留期（默认 30 天）按 mtime 清理，长期演示素材会被删掉。
-    source: "data/sources/long_demo.mp4"
+    source: "data/sources/demo_loop.mp4"
     modules: [shelf_heat, anomaly_detect, empty_shelf]
 
   # ---------------------------------------------------------------------------
