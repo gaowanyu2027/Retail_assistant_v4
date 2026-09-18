@@ -461,6 +461,63 @@ def _ensure_db_schema() -> None:
         _gha_annotate("error", "评测前建表失败", f"{type(e).__name__}: {e}")
 
 
+def _run_case_with_timeout(agent, case: dict, timeout: float) -> dict:
+    """在**子线程**里跑单条用例，超时/心跳可见，坏用例不再拖死整轮。
+
+    为什么要（用户本机实测的"假死"）：DeepSeek 网络抖动时，单条用例的 LLM 调用会长时间
+    不返回 —— `create_llm` 是 `timeout=60, max_retries=2`，再叠加一次反思重试，
+    **单条最坏可达数分钟**。表现就是"整个评测卡住不动，Ctrl+C 也没反应"
+    （Windows 控制台下，阻塞 socket 里的 KeyboardInterrupt 要等系统调用返回才生效）。
+
+    两个作用：
+    1. **心跳**：每 15 秒打印一次"仍在跑哪条、已多久"，一眼区分"在等网络"和"真死了"；
+    2. **超时**：超过 `timeout` 秒就放弃这条（记为该用例失败并继续），
+       其余用例照跑 —— 不能因为一条卡住的用例让整轮 85 条的结论都拿不到。
+       `timeout<=0` 表示不限制（回到旧行为）。
+
+    注意：超时后被放弃的线程仍在后台跑（无法强杀 Python 线程），
+    它会自己结束；这属于"宁可漏一条，不拖死一轮"的取舍。
+    """
+    import threading
+
+    if timeout is None or timeout <= 0:
+        return evaluate(agent, case)
+
+    box: dict = {}
+
+    def _work():
+        try:
+            box["result"] = evaluate(agent, case)
+        except Exception as e:                      # 交给主线程按"用例崩溃"处理
+            box["error"] = e
+
+    cid = case.get("id", "?")
+    t = threading.Thread(target=_work, name=f"eval-{cid}", daemon=True)
+    t.start()
+    waited = 0.0
+    step = 5.0
+    while t.is_alive() and waited < timeout:
+        t.join(step)
+        waited += step
+        if t.is_alive() and int(waited) % 15 == 0:
+            print(f"       …仍在跑 {cid}（已 {int(waited)}s，可能在等 LLM/外部 API；"
+                  f"超过 {int(timeout)}s 会自动放弃这条）", flush=True)
+
+    if t.is_alive():
+        return {
+            "id": cid, "question": case.get("question", ""), "mode": case.get("mode", "?"),
+            "expect_intent": case.get("expect_intent"), "actual_intent": "timeout",
+            "actual_path": "timeout", "tools": [], "latency": round(waited, 1),
+            "answer_len": 0, "answer": "",
+            "pass": False,
+            "failures": [f"用例超时({int(timeout)}s)：LLM/外部 API 长时间无响应"
+                         f"（网络抖动时常见；可用 --case-timeout 调整，或 --case 单独重跑）"],
+        }
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agent 评测集跑分")
     parser.add_argument("--case", default=None,
@@ -468,6 +525,9 @@ def main():
     parser.add_argument("--file", default=None,
                         help="用例文件（默认 evals/cases.json）。"
                              "长会话记忆套件：--file evals/cases_memory.json")
+    parser.add_argument("--case-timeout", type=float, default=180.0,
+                        help="单条用例超时秒数（默认 180；<=0 表示不限制）。"
+                             "超时只放弃该条并继续，避免一条卡住的用例让整轮拿不到结论")
     args = parser.parse_args()
 
     cases = load_cases(args.file)
@@ -494,7 +554,7 @@ def main():
     results = []
     for i, case in enumerate(cases, 1):
         try:
-            r = evaluate(agent, case)
+            r = _run_case_with_timeout(agent, case, args.case_timeout)
         except Exception as e:
             # 单条用例崩溃不再"一票否决整个跑分"：记成一条失败用例继续，
             # 否则一个坏用例会把其余 84 条的结论全部藏起来（CI 里尤其致命）
