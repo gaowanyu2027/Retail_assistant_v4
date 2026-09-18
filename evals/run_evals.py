@@ -338,6 +338,59 @@ def render_report(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _gha_annotate(level: str, title: str, message: str) -> None:
+    """在 GitHub Actions 里发一条注解（Annotations 面板可见），本地跑时自动跳过。
+
+    为什么要这个：CI 日志需要登录才能下载（匿名 API 403），
+    而 **Annotations 面板是公开可见的** —— 把"哪条用例失败、为什么"直接写成注解，
+    排查时不用再让人肉去翻日志（实测：连挂两轮，只拿到 "exit code 2" 这种信息量极低的提示）。
+    `level`：error / warning / notice。
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    title = (title or "").replace("\n", " ")[:120]
+    body = (message or "").replace("%", "%25").replace("\r", "").replace("\n", "%0A")[:1500]
+    print(f"::{level} title={title}::{body}", flush=True)
+
+
+def _gha_summary(text: str) -> None:
+    """把报告写进 Actions 的 Job Summary（公开可见），方便不下载日志也能看结论。"""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+    except Exception as e:
+        print(f"[CI] 写 Job Summary 失败(可忽略): {e}")
+
+
+def _print_env_banner() -> None:
+    """打印运行环境与关键依赖版本 —— CI 上"本地能跑、CI 挂"时的第一手线索。
+
+    动机（实测）：CI 只给一个 `exit code 2`，日志还要登录才能下载；
+    而最常见的原因就是**依赖版本漂移**（requirements.txt 用的是下界 `>=`，
+    CI 每次解析到的 langchain/langgraph/openai 版本可能比容器锁版更新）。
+    把版本号打出来，"本地 1.3.14 / CI 1.5.0"这种差异一眼就能看见。
+    """
+    import platform
+    print(f"[env] Python {platform.python_version()} | {platform.system()} {platform.release()}")
+    for mod in ("langchain", "langchain-core", "langgraph", "langchain-openai",
+                "openai", "qdrant-client", "pymysql", "pyyaml", "langfuse"):
+        try:
+            import importlib.metadata as md
+            print(f"[env]   {mod:16s} {md.version(mod)}")
+        except Exception as e:
+            print(f"[env]   {mod:16s} 不可用: {type(e).__name__}")
+    try:
+        import mysql_db
+        conn = mysql_db.get_connection()
+        conn.close()
+        print(f"[env]   MySQL 可连接 (db={mysql_db.MYSQL_DB})")
+    except Exception as e:
+        print(f"[env]   MySQL 连接失败: {type(e).__name__}: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agent 评测集跑分")
     parser.add_argument("--case", default=None,
@@ -356,11 +409,37 @@ def main():
             sys.exit(1)
 
     print(f"加载 {len(cases)} 条用例，装配 Agent（真实技能 + DeepSeek）...")
-    agent = get_agent()
+    _print_env_banner()
+    try:
+        agent = get_agent()
+    except Exception as e:
+        # 装配失败 = 环境问题（缺依赖/DB 连不上/key 无效），单独报出来，
+        # 不要和"用例断言失败"混在一起（CI 上这两类红的处理方式完全不同）
+        _gha_annotate("error", "Agent 装配失败（环境问题，不是用例失败）",
+                      f"{type(e).__name__}: {e}")
+        raise
+    print("[阶段] Agent 装配完成，开始跑用例")
 
     results = []
     for i, case in enumerate(cases, 1):
-        r = evaluate(agent, case)
+        try:
+            r = evaluate(agent, case)
+        except Exception as e:
+            # 单条用例崩溃不再"一票否决整个跑分"：记成一条失败用例继续，
+            # 否则一个坏用例会把其余 84 条的结论全部藏起来（CI 里尤其致命）
+            import traceback
+            r = {
+                "id": case.get("id", f"case_{i}"), "question": case.get("question", ""),
+                "mode": case.get("mode", "?"), "expect_intent": case.get("expect_intent"),
+                "actual_intent": "exception", "actual_path": "exception",
+                "tools": [], "latency": 0.0, "answer_len": 0,
+                "answer": f"{type(e).__name__}: {e}",
+                "pass": False, "failures": [f"用例执行异常: {type(e).__name__}: {e}"],
+                "traceback": traceback.format_exc(),
+            }
+            if len([x for x in results if x.get("actual_path") == "exception"]) < 3:
+                _gha_annotate("error", f"用例崩溃 {r['id']}",
+                              f"{type(e).__name__}: {e}\n\n{r['traceback'][-800:]}")
         results.append(r)
         mark = "✅" if r["pass"] else "❌"
         print(
@@ -408,6 +487,14 @@ def main():
     # ===== CI 门禁：任一用例失败 → 非零退出码（供流水线拦截回归） =====
     passed = sum(1 for r in results if r["pass"])
     failed = [r for r in results if not r["pass"]]
+    for r in failed[:15]:                     # 注解有数量上限，先报前 15 条
+        _gha_annotate("error", f"eval 失败 {r['id']}",
+                      f"问题: {r['question']}\n原因: {'; '.join(r['failures'])}\n"
+                      f"路径: {r['actual_path']} 意图: {r['actual_intent']} 工具: {r['tools'] or '无'}\n"
+                      f"回答: {r['answer'][:300]}")
+    if len(failed) > 15:
+        _gha_annotate("warning", "eval 失败过多", f"共 {len(failed)} 条失败，仅前 15 条有注解")
+    _gha_summary(report)
     if failed:
         print(f"\n[CI-GATE] 评测失败 {len(failed)}/{len(results)} 条，退出码 1（回归拦截）")
         sys.exit(1)
@@ -424,7 +511,14 @@ if __name__ == "__main__":
     except SystemExit as e:
         exit_code = e.code or 0
     except Exception as e:
-        print(f"[CI-GATE] 评测异常: {e}")
+        # 异常必须**连栈一起打**：CI 日志需要登录才能读，只给一行 "exit code 2"
+        # 根本没法定位（实测连挂两轮都是这样）。同时发一条注解 + 写 Job Summary。
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[CI-GATE] 评测异常: {type(e).__name__}: {e}")
+        print(tb)
+        _gha_annotate("error", f"评测异常 {type(e).__name__}", f"{e}\n\n关键栈帧:\n" + tb[-1200:])
+        _gha_summary(f"## ❌ 评测异常（退出码 2）\n\n```\n{tb[-2000:]}\n```\n")
         exit_code = 2
     finally:
         # 清理评测会话的工具日志与检查点（检查点残留会让下次跑不是冷启动，评测不可重复）
