@@ -2,11 +2,16 @@
 Agent 基础设施 — LangChain 方案
 使用 ChatOpenAI + create_agent，参考 travel_agent 架构
 """
+from __future__ import annotations          # 让类型注解延迟求值（见下面的 TYPE_CHECKING 导入）
+
 import re
 import threading
+from typing import TYPE_CHECKING
 
-from langchain_openai import ChatOpenAI
 from config.settings import LLM_API_KEY, LLM_MODEL, LLM_BASE_URL, LLM_TEMPERATURE
+
+if TYPE_CHECKING:                            # 只给类型检查用，运行时不导入
+    from langchain_openai import ChatOpenAI
 
 # ==================== 对话记忆持久化（MySQL 优先，SQLite 回退） ====================
 
@@ -95,6 +100,25 @@ def create_memory():
         return _memory_singleton
 
 
+def _chat_openai():
+    """延迟导入 langchain_openai —— 只在真正创建 LLM 时才需要它。
+
+    为什么必须延迟（不是洁癖，是 CI 实测出来的）：本模块在**包初始化链**上
+    （`agents/__init__.py` 曾直接 re-export create_llm），于是任何
+    `import agents.<任何子模块>` 都会执行到这里。模块级 import 的后果：
+    CI 的"最小依赖"单测 job（只装 fastapi/httpx/qdrant-client）里，
+    **10 个测试文件**因 `No module named 'langchain_openai'` 直接导入失败。
+    延迟后：只用 `create_memory`（检查点）或纯逻辑的路径不再需要 LLM 依赖 ✓
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+    except ModuleNotFoundError as e:      # 给出可操作的提示，而不是裸 ModuleNotFoundError
+        raise ModuleNotFoundError(
+            "缺少 langchain-openai（创建 LLM 需要）：pip install -r requirements.txt"
+        ) from e
+    return ChatOpenAI
+
+
 def create_llm(temperature: float = LLM_TEMPERATURE, tag: str = "unknown") -> ChatOpenAI:
     """创建 LLM 实例 — 通过 ChatOpenAI 对接 DeepSeek
 
@@ -114,6 +138,7 @@ def create_llm(temperature: float = LLM_TEMPERATURE, tag: str = "unknown") -> Ch
     from agents.llm_metrics import make_metrics_handler
 
     handler = make_metrics_handler(tag)
+    ChatOpenAI = _chat_openai()
     return ChatOpenAI(
         api_key=LLM_API_KEY,
         base_url=LLM_BASE_URL,

@@ -750,19 +750,14 @@ class MasterAgent:
         修复手段：模板轮结束后用 `update_state` 补两条消息（零 LLM 成本），
         让线程内上下文与真实对话一致；跨会话检索（query_history + 向量库）不受影响。
 
-        失败只打印、绝不影响回答（模板路径的意义就是毫秒级可用）。
+        实现放在 `agents/memory_append.py`（纯逻辑、可离线单测，见
+        `tests/test_template_memory.py`）——放在本文件里的话，测试就得 import
+        整个 master_agent（langchain + langgraph + langchain_openai 重链），CI 最小依赖跑不动。
+        开关 `AGENT_REMEMBER_TEMPLATE_TURNS` 与失败兜底都在那边。
         """
-        from config.settings import AGENT_REMEMBER_TEMPLATE_TURNS
+        from agents.memory_append import append_template_turn
 
-        if not AGENT_REMEMBER_TEMPLATE_TURNS or not answer:
-            return
-        try:
-            self.agent.update_state(
-                {"configurable": {"thread_id": session_id}},
-                {"messages": [HumanMessage(content=query), AIMessage(content=answer)]},
-            )
-        except Exception as e:
-            print(f"[MasterAgent] 模板轮写入检查点失败(不影响回答): {e}")
+        append_template_turn(self.agent, session_id, query, answer)
 
     def _quick_answer_inner(self, intent: str, query: str, session_id: str = "default") -> dict | None:
         """模板回答内部实现（无打点，保持原逻辑）。"""

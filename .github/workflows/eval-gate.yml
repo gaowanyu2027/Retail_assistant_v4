@@ -32,13 +32,23 @@ jobs:
   #                      （test_auth.py 导它，所以必须有；曾漏装 → 整个测试文件被跳过）
   #   - httpx          ← vector_memory.py:11
   #   - qdrant_client  ← vector_memory.py:12（自动带 numpy/grpcio/protobuf/portalocker）
+  #   - pyyaml         ← cv_engine/roi_manager.py:5（test_roi_scale 导它读 ROI 配置）
   #   **不需要**：torch（config/settings.py:47 包在 try/except ImportError 里，
   #   缺了就 DEVICE="cpu"，只有真正跑模型才要）、cv2、uvicorn（run.py 里是函数内 import）、
   #   redis、pymysql —— 装全套 requirements 要几分钟，而这一步十几秒。
-  #   实测手法：用 meta_path 拦截器把上述包全部伪装成"未安装"（抛 ModuleNotFoundError），
-  #   再跑 tests/run_tests.py → 33/33 通过（blocker 必须抛 ModuleNotFoundError，
+  #   实测手法：本地用 meta_path 拦截器把这些包全部伪装成"未安装"（抛 ModuleNotFoundError），
+  #   再跑 tests/run_tests.py → **138/138 通过**（blocker 必须抛 ModuleNotFoundError，
   #   抛裸 ImportError 会穿透 fastapi 的 `except ModuleNotFoundError` 容错分支，造出假依赖）。
   #   若将来某个测试模块引入最小集以外的包，这里会**报导入失败直接失败**（fail-loud）。
+  #
+  # ⚠ 2026-09-18 首次真跑 CI 才暴露的事（本 job 此前从未跑过，见 改进记录"CI 首跑"）：
+  #   18 个测试文件里有 **10 个**因 import 失败被拦下，根因不是"少装包"，而是**包入口的
+  #   模块级 re-export**：`agents/__init__.py` 曾 `from agents.master_agent import MasterAgent`
+  #   → 任何 `import agents.<子模块>` 都会拉起 langchain/langgraph；
+  #   `cv_engine/__init__.py` 曾 re-export detector/face_emotion/video_processor
+  #   → 任何 `import cv_engine.*` 都会要求 ultralytics+torch+cv2。
+  #   已把三个包入口（agents / cv_engine / skills）改成 PEP 562 延迟导入，
+  #   `base_agent` 的 langchain_openai 也改成函数内延迟导入 —— 纯逻辑测试不再被重依赖绑架。
   # ------------------------------------------------------------------
   unit:
     runs-on: ubuntu-latest
@@ -54,7 +64,7 @@ jobs:
         # 版本下界与 requirements.txt 保持一致，避免与生产环境漂移
         run: |
           python -m pip install --upgrade pip
-          pip install "fastapi>=0.100.0" "httpx>=0.27" "qdrant-client>=1.19.0"
+          pip install "fastapi>=0.100.0" "httpx>=0.27" "qdrant-client>=1.19.0" "pyyaml>=6.0"
 
       - name: Run unit tests
         # 零额外依赖（宿主/CI 不装 pytest 也能跑；装了 pytest 也能跑同一批用例）
