@@ -20,7 +20,7 @@ python run.py                 # 或 docker compose up -d
 |---|---|---|---|
 | `01-chat.png` | **自然语言问答** | 提问原文 + 回答 + **数据可信度提示**（例如"当前数据未采集/不可信"）——**这是全项目最该展示的一张**（证明 Agent 不会编结论） | 先**不**开摄像头，直接问「今天客流怎么样？」→ 回答里会出现可信度提示 ✓ |
 | `02-eval.png` | **85 条断言式评测跑通** | 终端里的评测输出（通过数/用例 id 列表） | `python evals/run_evals.py`（需 MySQL + LLM Key） |
-| `03-ci.png` | **CI 双门禁** | GitHub Actions 页面（`unit` + `eval` 两个 job 都绿）或终端 `python tests/run_tests.py` 的 `PASS 139/139` | 推代码后打开仓库 Actions 页；或本地跑单测截图 |
+| `03-ci.png` | **CI 双门禁** | GitHub Actions 页面（`unit` + `eval` 两个 job 都绿）或终端 `python tests/run_tests.py` 的 `PASS 142/142` | 推代码后打开仓库 Actions 页；或本地跑单测截图 |
 | `04-monitor.png` | 实时监控（感知层） | 画面 + **FPS ~30** + 活跃轨迹 + 总访客 | 打开「服务器摄像头」（有行人的 30 秒循环视频） |
 | `05-dashboard.png` | 经营看板 | 货架热度排行（有数字）+ 告警列表 | 同上，播一会儿让数据积累 |
 | `06-metrics.png` | **LLM 用量/成本指标** | JSON 里的 `calls` / `tokens` / `latency` / `by_tag` | 见下方命令 |

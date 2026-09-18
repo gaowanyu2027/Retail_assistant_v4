@@ -45,6 +45,15 @@ def get_connection(database: str = MYSQL_DB):
     等于在 db_engine 的兜底之上**又叠了一层**，两层叠加后并发一高就会撞
     MySQL 的 max_connections。只修 db_engine.py 是无效的。
     """
+    # ⚠ 必须先初始化 `db_engine = None`（实测 bug）：
+    # 本函数下面有 `import db_engine`（局部导入），这会让 `db_engine` 成为**整个函数的局部名**。
+    # 原来只在 `database == MYSQL_DB` 分支里赋值 → 一旦传**别的库名**，
+    # 该分支被跳过，第 65 行引用 `db_engine` 直接抛：
+    #     UnboundLocalError: cannot access local variable 'db_engine' where it is not associated with a value
+    # （复现：`get_connection("eval_fresh_probe")` —— 建全新库做验证时撞到的）
+    # 影响面：全仓目前没有调用方传别的库名，所以属**潜伏**缺陷；但"指定别的库"
+    # 是这本函数签名本身就支持的用法（文档字符串也这么写），不能让它在运行时才炸。
+    db_engine = None
     if database == MYSQL_DB:
         try:
             import db_engine

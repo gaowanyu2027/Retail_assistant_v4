@@ -4,7 +4,7 @@
   <a href="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml">
     <img src="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml/badge.svg?branch=main" alt="CI（单测门禁 + 评测门禁）">
   </a>
-  <img src="https://img.shields.io/badge/unit%20tests-139%20passed-2ea44f" alt="139 个单测用例">
+  <img src="https://img.shields.io/badge/unit%20tests-142%20passed-2ea44f" alt="142 个单测用例">
   <img src="https://img.shields.io/badge/eval%20cases-85-1f6feb" alt="85 条评测集">
   <img src="https://img.shields.io/badge/python-3.13-3776AB" alt="Python 3.13">
   <img src="https://img.shields.io/badge/docker-compose-2496ED" alt="Docker Compose">
@@ -64,7 +64,7 @@ flowchart TB
 
     subgraph OPS["质量门禁与交付"]
         O1["评测门禁<br/>85 条断言式用例<br/>意图 / 工具选择 / 防幻觉"]
-        O2["单测门禁<br/>139 个用例 + Node 行为断言"]
+        O2["单测门禁<br/>142 个用例 + Node 行为断言"]
         O3["Docker Compose 四服务<br/>非 root · 镜像钉 digest · 依赖锁"]
         O4["健康检查 + LLM 指标<br/>liveness / readiness / 成本"]
     end
@@ -78,7 +78,7 @@ flowchart TB
 | 维度 | 现状 |
 |---|---|
 | **Agent** | **21 个模块**：意图路由 → LangGraph StateGraph 编排 → DeepSeek；工具含 SQL 查询、业务分析、地图 MCP、向量记忆；**LLM 用量/延迟/成本可观测**（按用途归因） |
-| **评测与质量** | **85 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **139** 个单测用例 + Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
+| **评测与质量** | **85 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **142** 个单测用例 + Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
 | **可靠性** | 向量层熔断 + 舱壁、外部依赖降级、**静默失败治理**（错误通道、看门狗）、健康检查 liveness/readiness 分离 |
 | **数据可信度** | 断流与真实零值分离、来源显式标注（`pos`/`simulated`/`test`/`video`）、问答链路带可信度门禁 |
 | **接口** | 约 **105** 个（13 个路由模块：问答 / 分析 / 报告 / 视频流 / 鉴权 / 地图 / 语音 / TTS） |
@@ -152,7 +152,7 @@ docker compose up -d --build  # 起 backend + MySQL + Qdrant + Redis
 ## 如何复现上面那些数字
 
 ```powershell
-python tests/run_tests.py                          # 139 个单元用例（零依赖，CI 用的就是它）
+python tests/run_tests.py                          # 142 个单元用例（零依赖，CI 用的就是它）
 python evals/run_evals.py                          # 85 条断言式评测（意图/工具选择/防幻觉，需 MySQL + LLM Key）
 
 # LLM 用量与成本（Agent 侧指标；按用途归因 answer / report / summary / title）
