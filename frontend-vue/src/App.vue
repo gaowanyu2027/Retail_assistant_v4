@@ -107,7 +107,7 @@
         <div class="video-info">
           <span>帧号: <strong id="frame-id">--</strong></span>
           <span>活跃轨迹: <strong id="active-tracks">0</strong></span>
-          <span>总访客: <strong id="total-visitors">0</strong></span>
+          <span :title="'唯一访客数：同一个人逛多个货架只算 1 人。下方各货架行里的「N 次」是区域到访次数（同一个人逛 3 个货架算 3 次），两者口径不同'">总访客: <strong id="total-visitors">0</strong></span>
         </div>
       </section>
       <section class="panel dash-panel">
@@ -701,13 +701,20 @@ export default {
           this.updateEmoStatus(true)
         }
 
-        // 低延迟：降分辨率(320x240) + 降JPEG质量(0.4) + 固定帧率(~15fps)，不锁步
+        // 低延迟：降分辨率(320x240) + 降JPEG质量(0.4) + 固定帧率，**不锁步**
         // （原实现锁步"等上一帧发完才发下一帧"，toBlob/网络慢会卡到秒级；改连续推，卡则丢帧保流畅）
+        //
+        // ⚠ 帧间隔的取舍（改动记在 改进记录 · 模块 E）：
+        //   66ms(≈15fps) 是"低延迟优先"的旧取值；后来实测服务端 CPU 单帧推理仅 **24~27ms
+        //   （≈37-42fps 上限）**，而管线目标本身就是 `VIDEO_FPS=30` —— 15fps 离瓶颈很远，
+        //   于是放宽到 **33ms(≈30fps)**，与管线目标对齐；上行带宽约翻倍
+        //   （320×240 + q0.4 约 1-2 Mbps → 3-4 Mbps，局域网无压力）。
+        //   想再清晰可把 outW/outH 提到 640×480（与 ROI 基准、模型 imgsz 一致），代价是带宽再约 4 倍。
         const vw = videoEl.videoWidth || 480
         const vh = videoEl.videoHeight || 360
         const outW = 320
         const outH = 240
-        const FRAME_INTERVAL = 66   // ~15fps
+        const FRAME_INTERVAL = 33   // ~30fps（对齐服务端管线目标 VIDEO_FPS=30）
         const canvas = document.createElement('canvas')
         canvas.width = outW
         canvas.height = outH
