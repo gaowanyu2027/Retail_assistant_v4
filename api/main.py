@@ -573,6 +573,39 @@ async def health_ready():
     return body
 
 
+@app.get("/api/metrics/llm")
+async def llm_usage_metrics(_admin: dict = Depends(require_perm("system:manage"))):
+    """**LLM 调用指标**（用量 / 延迟 / 失败率 / 按用途归因 / 可选成本估算）。
+
+    为什么要有它：Agent 项目的"慢"和"贵"都藏在 LLM 调用里。本项目实测过一个典型成本问题 ——
+    定时汇报**固定 10 分钟一轮 = 144 次/天/店**（台账 F5），但当时**没有任何数据能说明它花了多少**。
+
+    实现方式（关键）：全项目 9 处 LLM 调用，但**只有一个创建入口** `create_llm()`，
+    所以指标用 LangChain 的 callback 挂在**创建处**一次覆盖全部 —— 而不是在每个调用点插代码
+    （那样漏一处，成本数字就是错的）。
+
+    `tag` 区分用途：`answer`=回答用户 / `report`=定时汇报 / `summary`=会话摘要 / `title`=标题生成。
+
+    ⚠ 诚实边界：
+    - `prompt_tokens/completion_tokens` 取自服务端返回的真实用量；**取不到时只计次数不计 token**
+      （`calls_without_usage` 会明说有多少次），不猜。
+    - `cost_estimate` **只有配置了单价才算**（`LLM_PRICE_IN_PER_MTOK` / `LLM_PRICE_OUT_PER_MTOK`），
+      默认 `None` —— 价格会变，写死一个数就是错的。
+    - 延迟分位只统计**最近 500 次**（有界窗口），不是历史全量。
+    """
+    from agents.llm_metrics import get_llm_metrics
+    from config.settings import LLM_MODEL, LLM_PRICE_IN_PER_MTOK, LLM_PRICE_OUT_PER_MTOK
+    import time as _t
+
+    snap = get_llm_metrics().snapshot(
+        price_in_per_mtok=LLM_PRICE_IN_PER_MTOK,
+        price_out_per_mtok=LLM_PRICE_OUT_PER_MTOK,
+    )
+    snap["model"] = LLM_MODEL
+    snap["server_time"] = _t.strftime("%Y-%m-%d %H:%M:%S")
+    return snap
+
+
 @app.post("/api/videos")
 async def upload_video_file(file: UploadFile = FastAPIFile(...),
                             _uploader: dict = Depends(require_perm("system:manage"))):

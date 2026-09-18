@@ -350,8 +350,8 @@ class MasterAgent:
         self.anom_skill = anomaly_skill
         self.emo_skill = emotion_skill
 
-        # 创建 LLM
-        self.llm = create_llm()
+        # 创建 LLM（tag=answer：这条是"回答用户"的主链路，成本归因时与 intent/report 分开统计）
+        self.llm = create_llm(tag="answer")
 
         # 定义 tools（闭包捕获 skill 实例）
         pop_skill_ref = popularity_skill
@@ -1055,7 +1055,7 @@ class MasterAgent:
                 f"{type(m).__name__}: {str(getattr(m, 'content', ''))[:200]}"
                 for m in messages
             )
-            llm = create_llm(temperature=0)
+            llm = create_llm(temperature=0, tag="summary")
             prompt = (
                 "你是对话摘要器。请把下面这段用户与零售视频分析助手的多轮对话压缩成一段中文摘要，"
                 "保留：用户问过的话题、助手给出的关键数据结论、用户偏好和关注点。"
