@@ -115,6 +115,36 @@ def probe_update_state(agent) -> None:
         print(f"[update_state 后读回] 异常 {type(e).__name__}: {e}")
 
 
+def cleanup() -> None:
+    """删掉本探针写进去的 `probe_*` 会话（检查点/问答历史/工具日志）。
+
+    探针会真的调用 Agent（会写检查点），跑完不留垃圾，否则库里会攒一堆调试会话。
+    """
+    try:
+        import mysql_db
+
+        conn = mysql_db.get_connection()
+        total = 0
+        with conn.cursor() as cur:
+            for tbl, col in (
+                ("agent_checkpoints", "thread_id"),
+                ("agent_checkpoint_writes", "thread_id"),
+                ("agent_long_term_memory", "session_id"),
+                ("query_history", "session_id"),
+                ("chat_session", "session_id"),
+                ("agent_tool_log", "session_id"),
+            ):
+                try:
+                    cur.execute(f"DELETE FROM {tbl} WHERE {col} LIKE %s", ("probe_%",))
+                    total += cur.rowcount
+                except Exception:
+                    pass
+        conn.close()
+        print(f"[cleanup] 探针会话已清理 {total} 行")
+    except Exception as e:
+        print(f"[cleanup] 清理失败(可忽略): {e}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-llm", action="store_true", help="不调用 LLM（只看 checkpointer 行为）")
@@ -134,10 +164,12 @@ def main() -> None:
     probe_config_only(agent)
     probe_update_state(agent)
     if args.no_llm:
+        cleanup()
         return
 
     probe_two_turns(agent, "probe_mt_flat", "flat")          # 现状写法
     probe_two_turns(agent, "probe_mt_nested", "nested")      # 标准写法
+    cleanup()
 
 
 if __name__ == "__main__":
