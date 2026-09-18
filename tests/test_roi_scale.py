@@ -77,12 +77,33 @@ def test_processor_updates_the_same_manager_it_was_given():
     """结构性断言：VideoProcessor 把 set_frame_size 调在**传入的那个** ROI 上。
 
     这正是"共用实例"能修掉缩放问题的原因——所以把这条契约钉住。
+
+    实现说明：这里用 **AST 直接读源码**，而不是 `import VideoProcessor` 再
+    `inspect.getsource()`。因为 `cv_engine/video_processor.py` 在模块级 import
+    cv2 + ultralytics（=torch），而 CI 的"最小依赖"单测 job 里没有这些 ——
+    原来那种写法会让本文件在 CI 里直接导入失败（实测，见 改进记录"CI 首跑"）。
+    断言强度不变：验的是**源码里的调用契约**，本来就不需要真的跑起来。
     """
-    import inspect
+    import ast
+    from pathlib import Path
 
-    from cv_engine.video_processor import VideoProcessor
+    src_path = Path(__file__).resolve().parents[1] / "cv_engine" / "video_processor.py"
+    source = src_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
 
-    src = inspect.getsource(VideoProcessor.process_frame)
-    assert "roi_manager.set_frame_size" in src, \
+    func_src = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "process_frame":
+            seg = ast.get_source_segment(source, node)
+            if seg:
+                func_src = seg
+                break
+        if isinstance(node, ast.ClassDef) and node.name == "VideoProcessor":
+            for sub in node.body:
+                if isinstance(sub, ast.FunctionDef) and sub.name == "process_frame":
+                    func_src = ast.get_source_segment(source, sub)
+                    break
+    assert func_src, "没找到 VideoProcessor.process_frame（结构变了？）"
+    assert "roi_manager.set_frame_size" in func_src, \
         "process_frame 不再同步帧尺寸？那共用实例也救不了缩放"
-    assert "self.roi_manager" in src, "processor 应该用传入的 ROI 实例"
+    assert "self.roi_manager" in func_src, "processor 应该用传入的 ROI 实例"
