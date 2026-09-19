@@ -4,7 +4,7 @@
   <a href="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml">
     <img src="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml/badge.svg?branch=main" alt="CI（单测门禁 + 评测门禁）">
   </a>
-  <img src="https://img.shields.io/badge/unit%20tests-148%20passed-2ea44f" alt="148 个单测用例">
+  <img src="https://img.shields.io/badge/unit%20tests-152%20passed-2ea44f" alt="152 个单测用例">
   <img src="https://img.shields.io/badge/eval%20cases-85-1f6feb" alt="85 条评测集">
   <img src="https://img.shields.io/badge/python-3.13-3776AB" alt="Python 3.13">
   <img src="https://img.shields.io/badge/docker-compose-2496ED" alt="Docker Compose">
@@ -64,7 +64,7 @@ flowchart TB
 
     subgraph OPS["质量门禁与交付"]
         O1["评测门禁<br/>85 条断言式用例<br/>意图 / 工具选择 / 防幻觉"]
-        O2["单测门禁<br/>148 个用例 + Node 行为断言"]
+        O2["单测门禁<br/>152 个用例 + Node 行为断言"]
         O3["Docker Compose 四服务<br/>非 root · 镜像钉 digest · 依赖锁"]
         O4["健康检查 + LLM 指标<br/>liveness / readiness / 成本"]
     end
@@ -78,7 +78,7 @@ flowchart TB
 | 维度 | 现状 |
 |---|---|
 | **Agent** | **21 个模块**：意图路由 → LangGraph StateGraph 编排 → DeepSeek；工具含 SQL 查询、业务分析、地图 MCP、向量记忆；**LLM 用量/延迟/成本可观测**（按用途归因） |
-| **评测与质量** | **85 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **148** 个单测用例 + Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
+| **评测与质量** | **85 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **152** 个单测用例 + Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
 | **可靠性** | 向量层熔断 + 舱壁、外部依赖降级、**静默失败治理**（错误通道、看门狗）、健康检查 liveness/readiness 分离 |
 | **数据可信度** | 断流与真实零值分离、来源显式标注（`pos`/`simulated`/`test`/`video`）、问答链路带可信度门禁 |
 | **接口** | 约 **105** 个（13 个路由模块：问答 / 分析 / 报告 / 视频流 / 鉴权 / 地图 / 语音 / TTS） |
@@ -96,8 +96,9 @@ flowchart TB
 | `expect_intent` 意图路由 | **81** | 问题被路由到错误的分析模板 |
 | `expect_tools` **工具选择** | **14**（共 20 个工具名断言） | 该调工具时不调 / 调错工具 |
 | `expect_no_tools` | 3 | **不该调工具时乱调**（浪费 token + 慢） |
-| `expect_keywords` / `_any` 内容断言 | 29 / 44 | 答非所问、结论缺关键数据 |
-| `expect_no_keywords` | 7 | **幻觉与越界表述**（说了不该说的） |
+| `expect_keywords` / `_any` 内容断言 | 29 / 35 | 答非所问、结论缺关键数据 |
+| `expect_no_keywords` | 8 | **幻觉与越界表述**（说了不该说的） |
+| `expect_refusal` **必须拒答**（统一词表） | 11 | 越界请求被照做；措辞换个说法就假红（曾连踩 5 次） |
 | `dialog` + `check_turn` 多轮 | 9 | 上下文丢失、指代错误 |
 | `preload_history` | 1 | 历史注入失效 |
 | `data_stale` **可信度门禁** | 2 | 摄像头没开时仍给出"到访 0 人次"这类**假业务结论** |
@@ -152,7 +153,7 @@ docker compose up -d --build  # 起 backend + MySQL + Qdrant + Redis
 ## 如何复现上面那些数字
 
 ```powershell
-python tests/run_tests.py                          # 148 个单元用例（零依赖，CI 用的就是它）
+python tests/run_tests.py                          # 152 个单元用例（零依赖，CI 用的就是它）
 python evals/run_evals.py                          # 85 条断言式评测（意图/工具选择/防幻觉，需 MySQL + LLM Key）
 
 # LLM 用量与成本（Agent 侧指标；按用途归因 answer / report / summary / title）
