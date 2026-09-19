@@ -99,3 +99,55 @@ miniprogram/project.private.config.json
 # 该次重跑时机器同时跑着多个容器，QPS/延迟受负载影响明显（QPS 62 vs 历史 167），
 # 数据不具可比性，暂不入库，避免与历史报告对比时产生误导。
 benchmark/reports/loadtest_20260910_134134.md
+
+# ===== 防御性补充（2026-09-19 仓库体检）=====
+# 背景：当时体检结论是"干净"——184 个跟踪文件 / 1.9MB，
+# 未跟踪且未被忽略的文件数 = 0，历史里也从未出现敏感文件名。
+# 下面这些规则**当前没有命中任何文件**，纯粹是防以后手滑（新素材/新工具产物）：
+#
+# ① 同一类"大文件"的其它常见格式（上方已覆盖 *.pt/*.pth/*.onnx/*.bin）
+*.safetensors
+*.gguf
+*.ckpt
+*.engine
+*.trt
+*.weights
+*.pdparams
+*.h5
+*.caffemodel
+
+# ② 视频与压缩包：演示素材请放 data/sources/（data/ 已整体忽略）
+#    唯一例外是入库的 4KB 测试素材（放在未忽略的 tests/assets/ 下，故否定规则有效）
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+!tests/assets/tiny.mp4
+
+# ③ Python 工具链缓存
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
+
+# ④ 补丁/备份/进程残留
+*.bak
+*.bak-*
+*.orig
+*.rej
+*.pid
+logs/
+
+# ⑤ 前端构建缓存
+frontend-vue/.vite/
+frontend-vue/coverage/
+
+# ⑥ 系统文件
+.DS_Store
