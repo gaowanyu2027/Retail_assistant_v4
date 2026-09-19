@@ -169,8 +169,6 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 - 压测报告： `benchmark/reports/`
 - 排障记录（真实故障复盘）： 容器化后摄像头打不开、`auth.db` 打不开、构建不可复现等
 
-<!-- ===== 界面预览：把图放进 docs/images/ 后，删掉本行注释标记即可（拍图清单见 docs/images/README.md） =====
-
 ## 界面预览
 
 | 自然语言问答（含数据可信度提示） | 评测门禁（85 条断言式用例） |
@@ -184,7 +182,10 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 | 经营看板（热度/告警/转化） | LLM 用量与成本指标 |
 |---|---|
 | ![看板](docs/images/05-dashboard.png) | ![指标](docs/images/06-metrics.png) |
-===== -->
+
+> 截图口径：问答图里包含**数据可信度提示**（"视频源未启动…当前统计值可能不代表真实客流"）——
+> 这是本项目刻意保留的行为：**宁可说没有数据，也不把设备故障输出成业务结论**。
+> 监控图来自真实摄像头画面，**已做人脸脱敏**（公开仓库不放可识别人脸）。
 
 ### v4 相对 v3 的主要变化
 

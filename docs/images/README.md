@@ -47,17 +47,19 @@ curl.exe -H "Authorization: Bearer <会话令牌>" http://127.0.0.1:8000/api/met
   要放进项目说明 PDF（有些工具不渲染 mermaid）可以：VS Code 装 mermaid 插件导出 PNG，
   或直接截 GitHub 渲染出来的图。
 
-## 当前状态（2026-09-19 规格化后）
+## 当前状态（2026-09-19 六张已齐全）
 
-| 文件名 | 尺寸 | 体积 | 来源/说明 |
+| 文件名 | 尺寸 | 体积 | 内容 |
 |---|---|---|---|
-| `01-chat.png` | 1440x142 | 45KB | ⚠ 目前是一条**窄条**（"AI 分析结果 + 无数据提示"）；建议重拍成完整对话页 |
-| `02-eval.png` | 1440x859 | 262KB | 本机评测：85/85 / 100.0% + 完整明细表 |
-| `03-ci.png` | 1440x794 | 71KB | GitHub Actions **run#10 双绿** + eval summary(85/85) |
-| `04-monitor.png` | 762x531 | 53KB | 监控画面（**人脸已高斯模糊脱敏**）；更"原生"的做法是打开项目自带 FACE_BLUR 开关后重拍 |
+| `01-chat.png` | 1440x182 | 43KB | 自然语言问答：**到访 23 人次 / 2号货架热度 100 / 3号 47.7 / 1号零到访** + **数据可信度提示**（"视频源未启动…不代表真实客流"） |
+| `02-eval.png` | 1440x859 | 262KB | 本机评测：`85/85 / 100.0%` + 完整明细表 |
+| `03-ci.png` | 1440x794 | 71KB | GitHub Actions run#10 **双绿**（unit ✅ + eval ✅）+ eval summary 85/85 |
+| `04-monitor.png` | 762x531 | 53KB | 实时监控：`Frame:245 Tracks:1` + 三个货架 ROI + `帧号245 活跃轨迹1 总访客1`；**人脸已高斯模糊脱敏** |
 | `05-dashboard.png` | 813x624 | 16KB | 货架热度排行（2号100 / 3号37 / 1号0）+ 榜单 |
-| `06-metrics.png` | — | — | ❌ **仍缺**：需 `curl -H "Authorization: Bearer <令牌>" /api/metrics/llm` 后截图（**令牌务必打码**） |
+| `06-metrics.png` | 1440x260 | 117KB | `GET /api/metrics/llm` 真实返回：calls/tokens/latency(p50,p95)/by_tag/by_model/**report_gate**（Bearer 已打码） |
 
-> 处理方式：统一缩到 **1440 宽** + 256 色量化（保证单张 <400KB，实测 02-eval 从 737KB → 262KB）；
-> 原始截图已归档到 `data/_shots_src/`（`data/` 被 gitignore，不会进仓库）。
-> 六张齐全后再删掉 `README.md` 里 `===== 界面预览` 那行注释标记。
+**处理方式（可复现）**：统一缩到 **1440 宽** + **256 色量化**（保证单张 <400KB；`02-eval` 从 737KB → 262KB）。
+原始截图归档在 `data/_shots_src/`（`data/` 被 gitignore，不进仓库）。
+README 的「界面预览」注释标记已删除 —— 六张齐全，可以显示了。
+
+**备用素材（未进 README）**：`5e91673c…`（同期对比回答："昨天 24 人次 vs 今天 0，属于当前无采集数据而非真实客流下滑"）。
