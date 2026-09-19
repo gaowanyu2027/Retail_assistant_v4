@@ -46,3 +46,18 @@ curl.exe -H "Authorization: Bearer <会话令牌>" http://127.0.0.1:8000/api/met
 - **架构图**：README 里已用 mermaid 画好（GitHub 直接渲染 ✓），不需要图片。
   要放进项目说明 PDF（有些工具不渲染 mermaid）可以：VS Code 装 mermaid 插件导出 PNG，
   或直接截 GitHub 渲染出来的图。
+
+## 当前状态（2026-09-19 规格化后）
+
+| 文件名 | 尺寸 | 体积 | 来源/说明 |
+|---|---|---|---|
+| `01-chat.png` | 1440x142 | 45KB | ⚠ 目前是一条**窄条**（"AI 分析结果 + 无数据提示"）；建议重拍成完整对话页 |
+| `02-eval.png` | 1440x859 | 262KB | 本机评测：85/85 / 100.0% + 完整明细表 |
+| `03-ci.png` | 1440x794 | 71KB | GitHub Actions **run#10 双绿** + eval summary(85/85) |
+| `04-monitor.png` | 762x531 | 53KB | 监控画面（**人脸已高斯模糊脱敏**）；更"原生"的做法是打开项目自带 FACE_BLUR 开关后重拍 |
+| `05-dashboard.png` | 813x624 | 16KB | 货架热度排行（2号100 / 3号37 / 1号0）+ 榜单 |
+| `06-metrics.png` | — | — | ❌ **仍缺**：需 `curl -H "Authorization: Bearer <令牌>" /api/metrics/llm` 后截图（**令牌务必打码**） |
+
+> 处理方式：统一缩到 **1440 宽** + 256 色量化（保证单张 <400KB，实测 02-eval 从 737KB → 262KB）；
+> 原始截图已归档到 `data/_shots_src/`（`data/` 被 gitignore，不会进仓库）。
+> 六张齐全后再删掉 `README.md` 里 `===== 界面预览` 那行注释标记。
