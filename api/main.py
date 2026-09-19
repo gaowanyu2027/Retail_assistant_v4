@@ -313,36 +313,18 @@ NO_CACHE_HEADERS = {
 }
 
 # Vue 页面加载失败时的提示脚本（资源失败/挂载超时 → 提示刷新，不再回退原生版）
-VUE_FALLBACK_SCRIPT = """
-<script>
-(function () {
-  function notify(reason) {
-    if (window.__dshVueFallback) return;
-    window.__dshVueFallback = true;
-    try {
-      fetch('/api/frontend/fallback?reason=' + encodeURIComponent(reason), { method: 'POST' });
-    } catch (e) {}
-    var box = document.createElement('div');
-    box.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;color:#333;padding:24px;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.2);z-index:9999;text-align:center;font-family:sans-serif';
-    box.innerHTML = '<div style="font-size:20px;margin-bottom:8px">前端资源加载异常</div>' +
-      '<div style="font-size:14px;color:#666">请刷新页面重试，或检查后端控制台日志</div>';
-    document.body.appendChild(box);
-  }
-  window.addEventListener('error', function (e) {
-    var src = (e.target && (e.target.src || e.target.href)) || '';
-    if (src && src.indexOf('/assets/') !== -1) notify('资源加载失败: ' + src);
-  }, true);
-  window.addEventListener('unhandledrejection', function () {
-    var app = document.getElementById('app');
-    if (!app || app.childElementCount === 0) notify('未处理的Promise异常');
-  });
-  setTimeout(function () {
-    var app = document.getElementById('app');
-    if (!app || app.childElementCount === 0) notify('Vue 挂载超时');
-  }, 8000);
-})();
-</script>
-"""
+#
+# ⚠ 必须是**同源外部脚本**，不能内联（2026-09-19 实测）：
+#   这段逻辑原先以**内联 `<script>`** 注入到 `</body>` 前，但安全加固的 CSP 是
+#   `script-src 'self'`（当时注释写着"index.html 无内联脚本，所以不需要 unsafe-inline"）
+#   → 浏览器直接拦掉，控制台报：
+#       Refused to execute inline script because it violates the following
+#       Content Security Policy directive: "script-src 'self'"
+#   代价不只是报错：**兜底提示本身失效** —— 恰恰在"前端资源挂了"这种最需要它的场景下白屏无提示。
+#   改法：逻辑搬到 `frontend-vue/public/js/vue-fallback.js`（构建后为 `/js/vue-fallback.js`），
+#   这里只注入一行外部引用 → CSP 保持严格，兜底也真的能跑。
+#   回归守卫见 `tests/test_csp_inline_script.py`。
+VUE_FALLBACK_SCRIPT = '<script src="/js/vue-fallback.js"></script>'
 
 _vue_ok: bool = False
 
