@@ -445,7 +445,7 @@ export default {
       this.reportWsReconnectTimer = null
     }
     if (this.reportWs) {
-      try { this.reportWs.close() } catch (e) {}
+      try { this.reportWs.close() } catch (e) { /* 关闭失败无妨：连接本来就要断了 */ }
       this.reportWs = null
     }
     clearTimeout(this.localCaptureTimer)
@@ -553,7 +553,7 @@ export default {
     async loadVideoCaps() {
       try {
         const resp = await fetch('/api/video/sources')
-        if (!resp.ok) return
+        if (!resp.ok) { await this.describeFetchFailure('视频能力加载', resp); return }
         const caps = await resp.json()
         this.videoCaps = caps
         // 能力接口同时带回摄像头清单（含 kind / available / reason），作为 source 查询来源
@@ -1049,7 +1049,7 @@ export default {
             this.updateRankingList(stats)
           }
         }
-      } catch (e) {}
+      } catch (e) { window.updateStatus?.('warning', `fetchDashboardData 请求失败：网络异常（${e.message || e}）`) }
     },
     // ==================== 零售模式：仪表盘数据刷新 ====================
     async fetchPopularityReport() {
@@ -1061,8 +1061,18 @@ export default {
           this.updateRankingList(data)
           const tv = document.getElementById('total-visitors')
           if (tv) tv.textContent = data.total_visitors || 0
+          return
         }
-      } catch (e) {}
+        // 原来这里没有 else：接口 500（典型原因：MySQL 掉线）时排行榜就这么空着，
+        // 用户无法区分"真的没客流"与"数据层挂了" —— 这正是可信度门禁在问答链路上要解决的问题，
+        // 前端面板同样不该沉默。
+        const text = await this.describeFetchFailure('热度排行加载', resp)
+        const list = document.getElementById('ranking-list')
+        if (list) list.innerHTML = `<p class="placeholder-text" style="color:var(--accent-yellow)">${this.escapeHtml(text)}</p>`
+      } catch (e) {
+        // 原来是空 catch：网络异常时整块面板静默空白
+        window.updateStatus?.('warning', `热度排行加载失败：网络异常（${e.message || e}）`)
+      }
     },
     updateRankingList(data) {
       const zones = data.zones || data
@@ -1084,13 +1094,42 @@ export default {
         </div>
       `).join('')
     },
+    // ==================== 请求失败的统一出口（防"静默失败"） ====================
+    // 为什么需要：本文件里原本有 4 处 `catch (e) {}` 加若干 `if (!resp.ok) return`——
+    // 请求失败时界面**什么都不显示**，用户看到的是"点了没反应"或"数据一直空着"。
+    // 实测踩过两次：演示数据按钮（点了没动静，实际是 500/403）、
+    // 以及 MySQL 掉线时热度/销量面板空白（实际是 500，但没有一句话说明）。
+    // 这里把"HTTP 状态 + 后端 detail"翻译成一句人话，同时写状态栏与目标容器。
+    async describeFetchFailure(where, resp) {
+      let detail = ''
+      try {
+        const j = await resp.json()
+        detail = j.detail || j.message || ''
+      } catch (e) {
+        try { detail = (await resp.text() || '').replace(/\s+/g, ' ').slice(0, 120) } catch (e2) { /* 无 body */ }
+      }
+      const hint = (resp.status === 401 || resp.status === 403)
+        ? '（登录已过期或该账号无此权限，请重新登录/换有权限的账号）'
+        : (resp.status >= 500 ? '（服务端/数据层异常，可查看后端日志或 /api/health/ready）' : '')
+      const text = `${where}失败：HTTP ${resp.status}${detail ? ' · ' + detail : ''}${hint}`
+      window.updateStatus?.('warning', text)
+      return text
+    },
+    paintBoxFailure(boxId, text) {
+      const box = document.getElementById(boxId)
+      if (box) box.innerHTML = `<p class="placeholder-text" style="color:var(--accent-yellow)">${this.escapeHtml(text)}</p>`
+    },
     // ===== 热度 vs 销量比对（转化诊断） =====
     async fetchHotVsSales() {
       const box = document.getElementById('sales-compare-box')
       if (!box) return
       try {
         const resp = await fetch('/api/analytics/hot-vs-sales')
-        if (!resp.ok) return
+        if (!resp.ok) {
+          // 原来是 `if (!resp.ok) return` —— 面板就那么空着，没人知道是接口挂了
+          this.paintBoxFailure('sales-compare-box', await this.describeFetchFailure('热度/销量比对加载', resp))
+          return
+        }
         const data = await resp.json()
         const zones = data.zones || []
         if (!zones.length) {
@@ -1116,17 +1155,41 @@ export default {
           ${rows}
           <div style="margin-top:6px"><button id="btn-sales-simulate-vue" style="background:var(--accent-blue);color:#fff;border:none;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:0.9em">重新生成演示数据</button></div>`
         this.bindSalesSimulate()
-      } catch (e) {}
+      } catch (e) {
+        // 原来是空 catch：网络异常时整块面板静默空白
+        this.paintBoxFailure('sales-compare-box', `热度/销量比对加载失败：网络异常（${e.message || e}）`)
+      }
     },
     bindSalesSimulate() {
       const btn = document.getElementById('btn-sales-simulate-vue')
       if (btn && !btn._bound) {
         btn._bound = true
         btn.addEventListener('click', async () => {
+          // 原来：`await fetch(...)` 不看 resp.ok、catch 里空语句 ——
+          // 权限不足(403)/后端 500 时按钮**毫无反应**（用户报障："生成演示数据没反应"）。
+          const original = btn.textContent
+          btn.disabled = true
+          btn.textContent = '生成中…'
           try {
-            await fetch('/api/analytics/sales-simulate', { method: 'POST' })
-            this.fetchHotVsSales()
-          } catch (e) {}
+            const resp = await fetch('/api/analytics/sales-simulate', { method: 'POST' })
+            let data = null
+            try { data = await resp.json() } catch (e) { /* 非 JSON 响应 */ }
+            if (!resp.ok) {
+              const msg = (data && (data.detail || data.message)) || `HTTP ${resp.status}`
+              const hint = (resp.status === 401 || resp.status === 403)
+                ? '（该接口需要 data:write 权限，请用有权限的账号登录）'
+                : ''
+              window.updateStatus?.('warning', `生成演示数据失败：${msg}${hint}`)
+              return
+            }
+            window.updateStatus?.('online', (data && data.msg) || '演示数据已生成')
+            await this.fetchHotVsSales()
+          } catch (e) {
+            window.updateStatus?.('warning', `生成演示数据失败：网络异常（${e.message || e}）`)
+          } finally {
+            btn.disabled = false
+            btn.textContent = original
+          }
         })
       }
     },
@@ -1137,7 +1200,7 @@ export default {
           const data = await resp.json()
           this.updateAlertsFromQuery((data.high_risk || []).concat(data.watch_list || []))
         }
-      } catch (e) {}
+      } catch (e) { window.updateStatus?.('warning', `fetchAnomalyReport 请求失败：网络异常（${e.message || e}）`) }
     },
     // 汇报栏渲染（REST 轮询与 WS 推送共用，避免两处逻辑漂移）
     updateReportBar(summary, type, timeStr) {
@@ -1152,14 +1215,14 @@ export default {
     async fetchLatestReport() {
       try {
         const resp = await fetch('/api/reports/heat-reports?limit=1')
-        if (!resp.ok) return
+        if (!resp.ok) { await this.describeFetchFailure('最新汇报加载', resp); return }
         const data = await resp.json()
         const reports = data.reports || []
         if (!reports.length) return
         const r = reports[0]
         const type = (r.data && typeof r.data === 'object') ? r.data.type : null
         this.updateReportBar(r.summary, type, r.report_time)
-      } catch (e) {}
+      } catch (e) { window.updateStatus?.('warning', `fetchLatestReport 请求失败：网络异常（${e.message || e}）`) }
     },
     // 主动汇报 WS 订阅 — 实时推送通道（后台汇报 Agent 广播 /api/ws/reports）
     // 断线自动退避重连；失败不影响主链路（REST 轮询仍在跑）
@@ -1297,7 +1360,7 @@ export default {
     async fetchEmotionStats() {
       try {
         const resp = await fetch('/api/emotions/stats')
-        if (!resp.ok) return
+        if (!resp.ok) { await this.describeFetchFailure('表情统计加载', resp); return }
         const d = await resp.json()
         const pos = document.getElementById('emo-pos')
         const neg = document.getElementById('emo-neg')
@@ -1327,13 +1390,13 @@ export default {
         setTimeout(() => {
           if (this.retailEmoChart) this.retailEmoChart.resize()
         }, 0)
-      } catch (e) {}
+      } catch (e) { window.updateStatus?.('warning', `fetchEmotionStats 请求失败：网络异常（${e.message || e}）`) }
     },
     // ==================== 表情模式：统计数据 ====================
     async fetchEmotionSummary() {
       try {
         const resp = await fetch('/api/emotion-records/summary?camera_id=camera_entrance&hours=1')
-        if (!resp.ok) return
+        if (!resp.ok) { await this.describeFetchFailure('表情汇总加载', resp); return }
         const data = await resp.json()
         const total = data.total || 0
         const st = document.getElementById('stat-total')
@@ -1354,7 +1417,7 @@ export default {
 
         this.renderEmotionBarChart(dist, total)
         this.renderEmotionPieChart(dist)
-      } catch (e) {}
+      } catch (e) { window.updateStatus?.('warning', `fetchEmotionSummary 请求失败：网络异常（${e.message || e}）`) }
     },
     renderEmotionBarChart(dist, total) {
       const chart = document.getElementById('emotion-bar-chart')
@@ -1406,7 +1469,7 @@ export default {
     async fetchEmotionRecords() {
       try {
         const resp = await fetch('/api/emotion-records?camera_id=camera_entrance&limit=10')
-        if (!resp.ok) return
+        if (!resp.ok) { await this.describeFetchFailure('表情记录加载', resp); return }
         const data = await resp.json()
         const tbody = document.getElementById('emo-records-body')
         if (!tbody) return
@@ -1427,16 +1490,16 @@ export default {
             </tr>
           `
         }).join('')
-      } catch (e) {}
+      } catch (e) { window.updateStatus?.('warning', `fetchEmotionRecords 请求失败：网络异常（${e.message || e}）`) }
     },
     async updateEmotionDbCount() {
       try {
         const resp = await fetch('/api/emotion-records/summary?camera_id=camera_entrance&hours=24')
-        if (!resp.ok) return
+        if (!resp.ok) { await this.describeFetchFailure('表情入库计数加载', resp); return }
         const data = await resp.json()
         const el = document.getElementById('emo-db-count')
         if (el) el.textContent = data.total || 0
-      } catch (e) {}
+      } catch (e) { window.updateStatus?.('warning', `updateEmotionDbCount 请求失败：网络异常（${e.message || e}）`) }
     },
     // ==================== 会话记录 ====================
     async loadSessions() {
