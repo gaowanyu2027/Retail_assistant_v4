@@ -2,7 +2,7 @@
 WS /ws/stream — 实时视频流 WebSocket 端点（双模式：零售分析 / 表情分析）
 
 架构：后台线程处理视频 -> WebSocket 仅负责推帧
-- 零售模式(retail): YOLO26l+ByteTrack -> 轨迹 -> ROI -> 热度/异常/表情技能
+- 零售模式(retail): YOLO26n+ByteTrack -> 轨迹 -> ROI -> 热度/异常/表情技能
 - 表情模式(emotion): YOLOv8n-face -> MobileNetV3表情 -> 十帧表决 -> 批量入库SQLite
 """
 import asyncio

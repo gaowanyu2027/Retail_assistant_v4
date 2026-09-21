@@ -1,5 +1,5 @@
 """
-YOLO检测器封装 — YOLO26l + ByteTrack 内置跟踪
+YOLO检测器封装 — YOLO26n + ByteTrack 内置跟踪
 """
 from dataclasses import dataclass
 import numpy as np
