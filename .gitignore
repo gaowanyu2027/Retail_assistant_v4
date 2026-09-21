@@ -127,6 +127,13 @@ benchmark/reports/loadtest_20260910_134134.md
 *.rar
 *.tar
 *.tar.gz
+# .tar.bz2 / .tgz 是**实测漏项**（2026-09-21 查 all_models 时发现）：
+# 该目录里 16 个模型包全是 .tar.bz2，当时只被"整目录 all_models/"挡住，
+# 规则本身并不覆盖 —— 一旦把模型包放到别处，`git add -A` 就会把 GB 级文件带进历史。
+*.tar.bz2
+*.tar.xz
+*.tgz
+*.tbz2
 !tests/assets/tiny.mp4
 
 # ③ Python 工具链缓存
