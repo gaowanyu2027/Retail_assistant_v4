@@ -166,6 +166,7 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 ```
 
 - 逐条修复的**原始数字与 A/B 对照**： [`改进记录.md`](改进记录.md)（按模块归档 + 附四台账）
+- 云服务器 Docker 部署（阿里云 ECS 实战）： [`docs/DEPLOY.md`](docs/DEPLOY.md)（镜像加速 / swap / 精简挂载 / uid 1000 权限 / 安全清单 / 回滚）
 - 压测报告： `benchmark/reports/`
 - 排障记录（真实故障复盘）： 容器化后摄像头打不开、`auth.db` 打不开、构建不可复现等
 
@@ -240,6 +241,7 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 ├── miniprogram/             # 微信小程序端（问答/看板/监控/摄像头管理/语音）
 ├── evals/                   # 自动化评测集（85 条）+ CI 门禁
 ├── benchmark/               # 并发压测脚本与报告
+├── docs/                    # 截图素材（界面预览）与部署手册 DEPLOY.md
 ├── data/                    # 运行时数据：SQLite、鉴权库、销量投递目录、日志
 ├── 改进记录.md               # v3 → v4 改进记录（问题/做法/验证/收益）
 ├── all_models/              # sherpa-onnx 语音模型
