@@ -44,10 +44,10 @@ Thumbs.db
 Desktop.ini
 evals/reports/
 
-# ===== 个人 / 仓库外笔记（勿推送） =====
-项目经历_STAR.md
-JD匹配度评估.md
-# PDF 提取出的交流题集（agent.md 实为 17000 行长文本笔记，非项目文档）
+# ===== 仓库外笔记与材料（勿推送） =====
+*STAR*.md
+JD*.md
+# PDF 提取出的长文本笔记（非项目文档）
 agent.md
 notes*.pdf
 # PDF 文本提取的中间产物
