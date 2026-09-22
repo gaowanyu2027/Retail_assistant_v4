@@ -196,6 +196,33 @@ GitHub Actions（runner 上有代码）──scp 源码包──> 服务器 /tmp
 **安全要点**：服务器上建**单独的部署账号**（只加 `docker` 组、不用 root）、禁密码登录、`PermitRootLogin no`；
 `.env` 不进仓库（本来就没进，见 `.gitignore`）。首次部署前手动跑过一遍 `docker compose up -d --build` 最稳。
 
+### 13.1 版本保留与回滚（任意往期）
+
+部署时服务器会维护一份"版本仓库"：
+
+| 路径 / 标签 | 内容 |
+|---|---|
+| `/opt/releases/<sha8>.tar.gz` | 每个部署过的**源码包**（保留最近 **3** 个，旧的自动删） |
+| `/opt/releases/CURRENT` / `PREVIOUS` | 当前 / 上一个版本的 sha8（供"回退一步"） |
+| `retail-assistant:sha-<sha8>` | 每个版本的**镜像**（同样保留最近 3 个） |
+| `retail-assistant:v4` | 正在运行的镜像 |
+
+**回滚不需要重新构建**（2 核机器一次构建 ~20 分钟）：旧镜像重新 tag 成 `v4` + 旧源码包解包回去 +
+`docker compose up -d --force-recreate backend`，**秒级生效**。
+
+```text
+Actions → Run workflow
+  rollback_to = 59cc78c     # 回滚到指定版本（sha 前缀）
+  rollback_to = previous    # 回退一步
+  rollback_to = （留空）     # 正常部署当前 main
+```
+
+**部署失败会自动回滚**：健康检查（`/api/health/ready`）+ **首页引用了前端产物**（`assets/index-`）两项都通过才算成功；
+任一失败 → 打日志 → 自动切回 `PREVIOUS` 并以失败退出。
+
+⚠ **数据不参与回滚**：`data/`（auth.db）与 MySQL/Qdrant/Redis 卷原地继续用。若某版本改过 schema，
+回滚镜像可能与新数据不兼容 —— **回滚前先备份 `data/`**。
+
 ## 附：本次踩过的坑（给未来的自己）
 
 1. **compose 挂载被 gitignore 的大文件** → 服务器上文件不存在，Docker 建空目录，功能**静默失效**（第 5 节）；

@@ -1,44 +1,62 @@
-# CD：把 main 分支部署到云服务器（阿里云 ECS）
+# CD：部署 / 回滚（阿里云 ECS）
 #
-# ## 为什么是"推送到服务器"而不是"服务器拉取"
-# 实测发现：**这台阿里云 ECS 访问不了 GitHub**（`git clone` 报
+# ## 一、为什么是"推送到服务器"而不是"服务器拉取"
+# 实测这台 ECS **访问不了 GitHub**（`git clone` 报
 # `GnuTLS recv error (-110): The TLS connection was non-properly terminated.`），
-# 服务器上 `git pull` 走不通。
-# 所以这里把方向反过来：**GitHub 的 runner 有代码 → 打包后 scp 推到服务器 → SSH 触发重建**。
-# 服务器一次都不需要访问 GitHub，方向是"公网 → 服务器"，完全成立。
+# 服务器上 `git pull` 走不通。所以方向反过来：
+# **GitHub runner 有代码 → 打包后 scp 推到服务器 → SSH 触发重建**。
+# 服务器一次都不需要访问 GitHub。
 #
-# ## 需要先配好的 3 个 Secrets（仓库 Settings → Secrets and variables → Actions）
+# ## 二、版本与回滚（本文件的核心能力）
+# 服务器上维护一份"版本仓库"：
+#
+#   /opt/releases/<sha8>.tar.gz   ← 每次部署过的**源码包**（保留最近 3 个）
+#   /opt/releases/CURRENT         ← 当前版本 sha8
+#   /opt/releases/PREVIOUS        ← 上一个版本 sha8（供"回退一步"）
+#   retail-assistant:v4           ← 正在运行的镜像
+#   retail-assistant:sha-<sha8>   ← 每个版本的镜像（保留最近 3 个）
+#
+# 因此**回滚不需要重新构建**（2 核机器一次构建要 ~20 分钟）：
+# 只要把旧镜像重新 tag 成 `retail-assistant:v4` + 把旧源码包解包回去 + 重建容器（秒级）。
+#
+#   回滚到指定版本：Actions → Run workflow → rollback_to 填 sha 前缀（如 59cc78c）
+#   回退一步：      rollback_to 填 previous
+#   正常部署：      rollback_to 留空
+#
+# ## 三、需要先配好的 3 个 Secrets（仓库 Settings → Secrets and variables → Actions）
 #   DEPLOY_HOST     服务器公网 IP（如 182.92.31.32）
 #   DEPLOY_USER     部署用户（**不要用 root**，见下）
-#   DEPLOY_SSH_KEY  部署专用私钥（ed25519）。对应公钥要加到服务器该用户的 ~/.ssh/authorized_keys
+#   DEPLOY_SSH_KEY  部署专用私钥（ed25519）；对应公钥加到该用户 ~/.ssh/authorized_keys
 #
-# ## 服务器侧一次性准备（用单独的部署账号，最小权限）
+# ## 四、服务器侧一次性准备（最小权限）
 #   adduser --disabled-password --gecos "" deploy
-#   usermod -aG docker deploy                      # 只给 docker 组，够用
+#   usermod -aG docker deploy
 #   mkdir -p /home/deploy/.ssh && chmod 700 /home/deploy/.ssh
 #   echo '<部署公钥>' >> /home/deploy/.ssh/authorized_keys && chmod 600 /home/deploy/.ssh/authorized_keys
-#   chown -R deploy:deploy /opt/retail-assistant   # 让它能写代码目录
+#   chown -R deploy:deploy /opt/retail-assistant /opt/releases
 #   # 加固：/etc/ssh/sshd_config → PermitRootLogin no（确认能登录后再改）
 #
-# ## 触发方式
-#   - 默认**手动**（workflow_dispatch）：项目演示够用，最安全；
-#   - 想让每次 push 到 main 自动部署：把下面 `push:` 段取消注释。
-#
-# ## 回滚
-#   重建前把当前镜像打上 `rollback` 标签；健康检查失败则回滚该标签并重启 backend，作业以失败退出。
+# ## 五、注意
+# - **数据不参与回滚**：`data/`（auth.db）与 MySQL/Qdrant/Redis 卷原地继续用；
+#   若某版本改过 schema，回滚镜像可能与新数据不兼容 → 回滚前先备份 `data/`。
+# - 健康检查除 `/api/health/ready` 外，**还会检查首页是否引用了前端产物**
+#   （避免"后端起来了但前端 404/空白"这种不算失败的情况）。
 
 name: deploy
 
 on:
-  workflow_dispatch:            # 手动触发（Actions 页面点 "Run workflow"）
+  workflow_dispatch:
+    inputs:
+      rollback_to:
+        description: '回滚到往期版本：填 sha 前缀（如 59cc78c）或 previous；留空 = 正常部署当前 main'
+        required: false
+        default: ''
   # push:
   #   branches: [main]
-  #   paths-ignore:
-  #     - '**.md'               # 只改文档就别折腾服务器
-  #     - 'docs/**'
+  #   paths-ignore: ['**.md', 'docs/**']
 
 concurrency:
-  group: deploy-production      # 同一时间只允许一个部署
+  group: deploy-production
   cancel-in-progress: false
 
 jobs:
@@ -49,6 +67,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 打包源码（排除 .git 与本地文件）
+        if: ${{ inputs.rollback_to == '' }}
         run: |
           tar --exclude=.git \
               --exclude=node_modules \
@@ -57,6 +76,7 @@ jobs:
           ls -lh src.tar.gz
 
       - name: 上传到服务器
+        if: ${{ inputs.rollback_to == '' }}
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -66,19 +86,91 @@ jobs:
           target: /tmp/retail-deploy/
           overwrite: true
 
-      - name: 远端解包 + 重建 + 健康检查（失败自动回滚）
+      - name: 部署或回滚
         uses: appleboy/ssh-action@v1
+        env:
+          SHA: ${{ github.sha }}
+          ROLLBACK_TO: ${{ inputs.rollback_to }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          command_timeout: 20m
+          command_timeout: 40m
+          envs: SHA,ROLLBACK_TO
           script: |
             set -e
             cd /opt/retail-assistant
+            REL=/opt/releases
+            SHORT=$(echo "$SHA" | cut -c1-8)
+            KEEP=3
+            mkdir -p "$REL"
 
-            # 1) 记录当前镜像作为回滚点（首次部署时不存在，忽略错误）
-            docker tag retail-assistant:v4 retail-assistant:rollback 2>/dev/null || true
+            health_ok() {
+              curl -fsS http://127.0.0.1:8000/api/health/ready | grep -q '"status":"ok"'
+            }
+            front_ok() {
+              curl -fsS http://127.0.0.1:8000/ | grep -q 'assets/index-'
+            }
+            wait_healthy() {
+              for i in $(seq 20); do
+                if health_ok; then return 0; fi
+                sleep 5
+              done
+              return 1
+            }
+            prune_old() {
+              # 镜像：保留最近 KEEP 个 sha 标签
+              docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' \
+                | grep '^retail-assistant:sha-' | sort -k2 -r | tail -n +$((KEEP + 1)) \
+                | awk '{print $1}' | xargs -r docker rmi -f >/dev/null 2>&1 || true
+              # 源码包：同样只留最近 KEEP 个
+              ls -1t "$REL"/*.tar.gz 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f || true
+            }
+
+            # ==================== 回滚分支 ====================
+            if [ -n "$ROLLBACK_TO" ]; then
+              TARGET="$ROLLBACK_TO"
+              if [ "$TARGET" = "previous" ]; then
+                TARGET=$(cat "$REL/PREVIOUS" 2>/dev/null || true)
+              fi
+              if [ -z "$TARGET" ]; then
+                echo "❌ 没有可回滚的版本（$REL/PREVIOUS 不存在）；现有版本："
+                ls -1 "$REL"/*.tar.gz 2>/dev/null || true
+                exit 1
+              fi
+              IMG=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E ":sha-$TARGET\$" | head -1 || true)
+              if [ -z "$IMG" ]; then
+                echo "❌ 找不到镜像 retail-assistant:sha-$TARGET；现有镜像："
+                docker images | grep retail-assistant || true
+                exit 1
+              fi
+              echo "▶ 回滚到 $TARGET（镜像 $IMG）"
+              if [ -f "$REL/$TARGET.tar.gz" ]; then
+                tar -xzf "$REL/$TARGET.tar.gz" -C /opt/retail-assistant
+                echo "  源码已切回 $TARGET"
+              else
+                echo "  ⚠ 没有 $TARGET 的源码包（只回滚镜像；下次构建会变回新代码）"
+              fi
+              CUR=$(cat "$REL/CURRENT" 2>/dev/null || true)
+              [ -n "$CUR" ] && echo "$CUR" > "$REL/PREVIOUS"
+              echo "$TARGET" > "$REL/CURRENT"
+              docker tag "$IMG" retail-assistant:v4
+              docker compose up -d --force-recreate backend
+              if wait_healthy; then
+                echo "✅ 已回滚到 $TARGET"
+                docker compose ps
+                exit 0
+              fi
+              echo "❌ 回滚后健康检查仍失败"
+              docker compose logs --tail=60 backend || true
+              exit 1
+            fi
+
+            # ==================== 部署分支 ====================
+            # 1) 存下本版本（源码包 + 记录版本指针）
+            cp /tmp/retail-deploy/src.tar.gz "$REL/$SHORT.tar.gz"
+            if [ -f "$REL/CURRENT" ]; then cp "$REL/CURRENT" "$REL/PREVIOUS"; fi
+            echo "$SHORT" > "$REL/CURRENT"
 
             # 2) 解包覆盖（data/ 与模型文件不在包里，不受影响）
             tar -xzf /tmp/retail-deploy/src.tar.gz -C /opt/retail-assistant
@@ -87,24 +179,28 @@ jobs:
             # 3) 重建并启动
             docker compose up -d --build
 
-            # 4) 健康检查（最多等 90s）
-            ok=0
-            for i in $(seq 18); do
-              if curl -fsS http://127.0.0.1:8000/api/health/ready | grep -q '"status":"ok"'; then
-                ok=1; break
-              fi
-              sleep 5
-            done
+            # 4) 无论成败都打版本标签，便于事后回滚
+            docker tag retail-assistant:v4 "retail-assistant:sha-$SHORT"
 
-            if [ "$ok" = "1" ]; then
-              echo "✅ 部署成功"
+            # 5) 健康检查：后端 ready + 首页引用了前端产物
+            if wait_healthy && front_ok; then
+              echo "✅ 部署成功 $SHORT"
+              prune_old
               docker compose ps
               exit 0
             fi
 
-            # 5) 回滚
-            echo "❌ 健康检查失败，回滚到上一个镜像"
+            # 6) 失败 → 自动回滚到上一个版本
+            echo "❌ 健康检查/前端可用性检查失败，尝试回滚到上一个版本"
             docker compose logs --tail=80 backend || true
-            docker tag retail-assistant:rollback retail-assistant:v4 2>/dev/null || true
-            docker compose up -d --force-recreate backend || true
+            PREV=$(cat "$REL/PREVIOUS" 2>/dev/null || true)
+            if [ -n "$PREV" ] && docker images --format '{{.Tag}}' | grep -q "^sha-$PREV\$"; then
+              if [ -f "$REL/$PREV.tar.gz" ]; then tar -xzf "$REL/$PREV.tar.gz" -C /opt/retail-assistant || true; fi
+              echo "$PREV" > "$REL/CURRENT"
+              docker tag "retail-assistant:sha-$PREV" retail-assistant:v4
+              docker compose up -d --force-recreate backend || true
+              echo "已回滚到 $PREV"
+            else
+              echo "⚠ 没有可用的上一版本镜像，保持现状（需人工处理）"
+            fi
             exit 1
