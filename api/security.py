@@ -50,18 +50,25 @@ from config.settings import (
 
 ROLE_ROOT = "root"
 ROLE_PLATFORM = "platform"
+# 只读账户（2026-09-22 新增）：给**演示/外部查看**用的最小权限角色。
+# 动机：此前只有 root / platform 两个角色，而 platform 带 data:write（导入销量、生成演示数据、
+# 启停采集…）—— 把这种账号发给外部使用者，等于让他能改掉你准备好的演示数据。
+# viewer 只拿 data:read：能问答、看看板/热度/告警/表情，但所有写接口一律 403。
+ROLE_VIEWER = "viewer"
 
-ROLES = (ROLE_ROOT, ROLE_PLATFORM)
+ROLES = (ROLE_ROOT, ROLE_PLATFORM, ROLE_VIEWER)
 
 ROLE_LABELS = {
     ROLE_ROOT: "平台管理员（root）",
     ROLE_PLATFORM: "平台账户",
+    ROLE_VIEWER: "只读账户",
 }
 
 # 权限矩阵：新增权限点时在此登记
 PERMISSIONS: dict[str, set[str]] = {
     ROLE_ROOT: {"data:read", "data:write", "user:manage", "system:manage"},
     ROLE_PLATFORM: {"data:read", "data:write"},
+    ROLE_VIEWER: {"data:read"},
 }
 
 # Cookie 名（浏览器通道）

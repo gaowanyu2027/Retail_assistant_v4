@@ -799,7 +799,7 @@ docker exec mysql-main mysqldump -uroot -p retail_assistant > backup.sql
 
 | 层 | 隔离对象 | 粒度与实现 |
 |---|---|---|
-| **账号与权限** | 谁能做什么 | **角色级**。`root` = 平台管理员（`data:read` / `data:write` / `user:manage` / `system:manage`）；`platform` = 平台账户（`data:read` / `data:write`）。权限矩阵在 `api/security.py`，路由用 `require_perm("...")` 强制 |
+| **账号与权限** | 谁能做什么 | **角色级（三档）**。`root` = 平台管理员（`data:read` / `data:write` / `user:manage` / `system:manage`）；`platform` = 平台账户（`data:read` / `data:write`）；**`viewer` = 只读账户**（仅 `data:read`：能问答、看看板/热度/告警/表情，所有写接口 403）。权限矩阵在 `api/security.py`，路由用 `require_perm("...")` 强制 |
 | **会话与问答记忆** | 谁能看谁的对话 | **账号级**。`chat_session.owner` 是唯一事实来源，问答历史通过 JOIN 过滤；长期记忆（压缩摘要）与 Qdrant 向量点各带 `owner`，混合检索的**关键词与向量两个通道都过滤**；`root` 为**审计视角**（`owner=None`）可查全部 |
 | **业务数据**（客流 / 热度 / 销量 / 告警 / 表情） | — | **实例内共享**：这些表没有账号或门店维度，所有登录账号看到同一份店内数据 |
 | **摄像头模块** | 不同镜头的数据 | **按模块隔离**：每摄像头独立 `roi` / `detector` / `skill` 实例（`agents/module_registry.py`） |
@@ -816,7 +816,8 @@ docker exec mysql-main mysqldump -uroot -p retail_assistant > backup.sql
 1. 业务数据**不按账号隔离**（没有多门店/租户维度）—— 单店多操作员场景够用，要做 SaaS 需要再分一层；
 2. B3 迁移前遗留的会话 `owner=''`（**无归属**）：普通账号看不到也写不了，只有 root 审计视角可见（"安全默认偏严"的代价）；
 3. `root` 能看到**所有账号**的对话（审计视角，设计如此）；
-4. 目前只有两个角色，**没有"只读"角色**：`platform` 也能写数据（导入销量、模拟数据、启停采集）。给他人演示账号时需注意这一点。
+4. **给外部演示请用 `viewer`（只读）**，别给 `platform`：后者能写数据（导入销量、模拟数据、启停采集）；
+5. ⚠ **问答接口本身不挂额外权限**（`viewer` 也能问）—— 它只写"自己的会话"，但**每次问答都会消耗 LLM token**。公开演示账号前，请在模型服务商侧设**用量上限/预算告警**（这类"接口能跑但会花钱"的风险不体现在权限矩阵里）。
 
 > 完整实现细节与排查过程见 [`改进记录.md`](改进记录.md) 模块 D · **B3**。
 

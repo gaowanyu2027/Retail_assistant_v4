@@ -107,6 +107,7 @@
                style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
         <select v-model="newUser.role"
                 style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+          <option value="viewer">viewer —— 只读账户（只能看：问答/看板/热度，不能改任何数据）</option>
           <option value="platform">platform —— 平台账户（数据读写，不能管用户/系统）</option>
           <option value="root">root —— 平台管理员（+ 用户管理 / 系统管理）</option>
         </select>
@@ -328,8 +329,9 @@ export default {
       userLabel: (() => {
         const w = (typeof window !== 'undefined' && window.__currentUser) || null
         if (!w) return ''
-        const role = w.role === 'root' ? '管理员' : '平台账户'
-        return (w.display_name || w.username) + ' · ' + role
+        // 角色标签直接用后端下发的 role_label —— 不再用 "root ? 管理员 : 平台账户" 这种二元判断：
+        // 新增 viewer（只读账户）后，二元判断会把它显示成"平台账户"，误导操作者。
+        return (w.display_name || w.username) + ' · ' + (w.role_label || w.role || '')
       })(),
       // ===== 账号管理抽屉（root：建号/改密/停用/删除；所有人：改自己的口令）=====
       userPanelOpen: false,
