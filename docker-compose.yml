@@ -111,15 +111,19 @@ services:
       - ./data:/app/data
       # 模型权重以只读方式挂载（不打进镜像）
       - ./yolo26n.pt:/app/yolo26n.pt:ro
-      # 演示视频源：模块配置里 cam_in_01 的 source 就是它（`mmpose/demo/resources/demo.mp4`）。
-      # ⚠ mmpose/ 被 .dockerignore 排除（体积大），所以镜像里**没有**这个文件 ——
-      #   不挂载的话"服务器摄像头"在容器里永远打不开（实测 /app 下一个 mp4 都没有）。
-      #   cv2 读文件不需要本机设备，因此这是容器里唯一能真正出画面的"服务器摄像头"来源。
-      - ./mmpose/demo/resources/demo.mp4:/app/mmpose/demo/resources/demo.mp4:ro
       - ./best.pt:/app/best.pt:ro
       - ./mobilenetv3_fer_best.pth:/app/mobilenetv3_fer_best.pth:ro
-      - ./all_models:/app/all_models:ro
-      - ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01:/app/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01:ro
+      # ⚠ 下面这类"体积大 / 属于第三方"的可选素材**默认不挂**，放在
+      #   `docker-compose.models.yml`（覆盖文件）里，需要时这样起：
+      #       docker compose -f docker-compose.yml -f docker-compose.models.yml up -d
+      #
+      #   为什么拆出去（2026-09-22 云端部署实测踩坑）：这些路径都在 .gitignore /
+      #   .dockerignore 里，**仓库与镜像里都没有**。而 Docker 遇到不存在的挂载路径会
+      #   **自己建空目录** → 容器照常起来，但功能静默失效（表情/语音/演示视频全废、不报错）。
+      #   部署时只能手工把那几行注释掉，可一旦"整包同步代码"（scp / CD 解包）又会被还原 →
+      #   同样的坑反复出现。拆成覆盖文件后：**默认那份在服务器上直接可用**，同步也不会踩雷。
+      #   涉及：mmpose/demo/resources/demo.mp4（演示视频源）、all_models/（语音）、
+      #        sherpa-onnx-kws-*/（唤醒词）
 
   # ---------------- MySQL（业务数据持久化） ----------------
   mysql:

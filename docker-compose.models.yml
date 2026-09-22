@@ -1,0 +1,29 @@
+# 可选覆盖文件：把「体积大 / 第三方」的素材挂进容器
+#
+# ## 为什么单独拆出来
+# 这些路径都在 `.gitignore` / `.dockerignore` 里 —— **仓库和镜像里都没有**。
+# 而 Docker 遇到**不存在的挂载路径会自己建空目录**：容器照常起来，但功能**静默失效**
+# （表情/语音/演示视频全废，且不报错）。2026-09-22 云端部署时就踩了这个坑，当时只能在
+# 服务器上手工注释这几行；可一旦"整包同步代码"（scp 或 CD 解包）又会被还原 → 反复踩。
+#
+# 拆成覆盖文件后：**默认的 `docker-compose.yml` 在任何机器上直接可用**，同步也不会踩雷。
+#
+# ## 用法
+# 本机（这些目录真实存在时）：
+#     docker compose -f docker-compose.yml -f docker-compose.models.yml up -d
+# 只想跑默认那份（服务器 / CI / 全新 clone）：
+#     docker compose up -d
+#
+# ## 各挂载的作用
+#   mmpose/demo/resources/demo.mp4  —— 「服务器摄像头」的演示视频源
+#                                      （`config/cameras.yaml` 里 cam_in_01 的 source 就是它；
+#                                        cv2 读文件不需要本机设备，所以这是容器里唯一能出画面的来源）
+#   all_models/                     —— 语音识别（sherpa-onnx streaming zipformer，约 77.6MB 被用到）
+#   sherpa-onnx-kws-*/              —— 语音唤醒词模型（懒加载：不用语音功能就不需要）
+
+services:
+  backend:
+    volumes:
+      - ./mmpose/demo/resources/demo.mp4:/app/mmpose/demo/resources/demo.mp4:ro
+      - ./all_models:/app/all_models:ro
+      - ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01:/app/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01:ro

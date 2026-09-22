@@ -179,34 +179,22 @@ sudo docker compose logs --tail=100 backend # 看日志
 
 ## 13. 下一步：CD（自动部署）
 
-手动跑通之后，再加一个 `.github/workflows/deploy.yml` 就能"一键更新线上版本"：
+手动跑通之后，`.github/workflows/deploy.yml` 就能"一键更新线上版本"。
+**注意方向**：实测这台阿里云 ECS **访问不了 GitHub**（`git clone` 报
+`GnuTLS recv error (-110): The TLS connection was non-properly terminated.`），
+所以**不能让服务器 `git pull`**，要反过来 —— **GitHub 的 runner 打包后 scp 推到服务器**：
 
-```yaml
-name: deploy
-on:
-  workflow_dispatch:                 # 手动触发（演示够用，最安全）
-  # push: { branches: [main] }       # 想每次推送都自动部署就打开
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}     # 专用部署用户，非 root
-          key: ${{ secrets.DEPLOY_SSH_KEY }}       # 部署专用 ed25519 私钥
-          script: |
-            cd /opt/retail-assistant
-            git pull --ff-only
-            docker compose up -d --build
-            for i in $(seq 12); do
-              curl -fsS http://127.0.0.1:8000/api/health/ready && exit 0 || sleep 5
-            done
-            exit 1
+```
+GitHub Actions（runner 上有代码）──scp 源码包──> 服务器 /tmp ──SSH 触发──> docker compose up -d --build
+                                                              └─ 健康检查失败 → 回滚上一个镜像标签
 ```
 
-**安全要点**：三个值放 GitHub Secrets；服务器上部署用户只加 `docker` 组、禁密码登录、`PermitRootLogin no`；
-`.env` 不进仓库（本来就没进，见 `.gitignore`）。
+仓库里已放好 `.github/workflows/deploy.yml`（默认**手动触发**；改成 push 自动部署的开关在文件注释里）。
+需要配 3 个 Secrets：`DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY`
+（部署**专用**密钥，别复用个人密钥；对应公钥加到服务器上部署账号的 `authorized_keys`）。
+
+**安全要点**：服务器上建**单独的部署账号**（只加 `docker` 组、不用 root）、禁密码登录、`PermitRootLogin no`；
+`.env` 不进仓库（本来就没进，见 `.gitignore`）。首次部署前手动跑过一遍 `docker compose up -d --build` 最稳。
 
 ## 附：本次踩过的坑（给未来的自己）
 

@@ -44,6 +44,7 @@ const StreamManager = {
             this.ctx.fillText('点击摄像头按钮开始', this.canvas.width/2, this.canvas.height/2 + 40);
         }
         this.img = new Image();
+        this._ensureGlobalListeners();   // 回前台/网络恢复时的自愈监听（只绑一次）
         this.img.onload = () => {
             if (this.ctx && this.canvas) {
                 const scale = Math.max(
@@ -58,6 +59,102 @@ const StreamManager = {
                 this.ctx.drawImage(this.img, dx, dy, dw, dh);
             }
         };
+    },
+
+    // ===== 画面叠加提示（2026-09-22）=====
+    // 背景：原先"停止/断线"是 `canvas.style.display='none'` + 不透明黑占位符 → 画面**凭空消失**，
+    // 而帧号/轨迹是画布外的文字仍在更新 → 极易被误判成"服务端停推流"。
+    // 现在改为：**保留最后一帧**，只在底部叠一条半透明提示条说明状态。
+    _overlayEl() {
+        let el = document.getElementById('video-overlay');
+        if (!el) {
+            const host = (this.canvas && this.canvas.parentElement) || document.body;
+            el = document.createElement('div');
+            el.id = 'video-overlay';
+            el.style.cssText = 'position:absolute;left:0;right:0;bottom:0;padding:6px 10px;'
+                + 'background:rgba(0,0,0,.62);color:#ffd479;font-size:.85em;z-index:11;'
+                + 'pointer-events:none;text-align:center';
+            host.appendChild(el);
+        }
+        return el;
+    },
+    _showOverlay(text) {
+        try {
+            const el = this._overlayEl();
+            el.textContent = text;
+            el.style.display = 'block';
+        } catch (e) { /* 提示失败不影响主流程 */ }
+    },
+    _hideOverlay() {
+        const el = document.getElementById('video-overlay');
+        if (el) el.style.display = 'none';
+    },
+
+    // 是否处于"本机摄像头（client）"模式 —— 决定断线时要不要重开上行通道
+    _isClientMode() {
+        if (this.clientShouldReconnect || this.clientWs) return true;
+        const a = this.reconnectAction;
+        if (!a) return false;
+        return a.action === 'start_client_camera'
+            || (a.action === 'open_source' && (a.params || {}).kind === 'client');
+    },
+
+    /**
+     * 画布尺寸守卫：布局塌陷时**显式告警**，而不是让画面静默消失。
+     *
+     * 2026-09-22 实测真坑：≤768px 时 `.alert-panel` 的 `grid-column: span 2` 隐式多出一列，
+     * 那一列被 ECharts 的固定像素宽顶住 → 视频面板被挤到 21px → canvas 尺寸 0×0 →
+     * **画面消失**；而画布里的像素数据仍在、帧号/轨迹照旧更新 → 看起来像服务端停了推流。
+     * 有了这段守卫，同类问题会在界面上直接写明"尺寸异常 + 栅格列"，一眼可定位。
+     */
+    _checkCanvasSize() {
+        if (!this.canvas) return true;
+        const now = Date.now();
+        if (this._lastSizeCheckAt && now - this._lastSizeCheckAt < 2000) return this._lastSizeOk !== false;
+        this._lastSizeCheckAt = now;
+        const r = this.canvas.getBoundingClientRect();
+        const ok = r.width >= 8 && r.height >= 8;
+        this._lastSizeOk = ok;
+        if (!ok) {
+            const host = this.canvas.parentElement;
+            const hr = host ? host.getBoundingClientRect() : null;
+            const grid = document.getElementById('retail-container')
+                || document.getElementById('emotion-container');
+            const cols = grid ? getComputedStyle(grid).gridTemplateColumns : 'n/a';
+            const text = `画面尺寸异常：canvas ${Math.round(r.width)}x${Math.round(r.height)}`
+                + (hr ? `、容器 ${Math.round(hr.width)}x${Math.round(hr.height)}` : '')
+                + `、栅格列=${cols}`;
+            console.warn('[Stream] ' + text);
+            window.updateStatus?.('error', text);
+            this._showOverlay(`画面尺寸异常（布局塌陷）：${Math.round(r.width)}×${Math.round(r.height)}`);
+        }
+        return ok;
+    },
+
+    /**
+     * 回到前台自愈：手机切 App / 锁屏回来后，页面被冻结期间采帧与心跳都会停，
+     * 服务端可能已把源判停。这里若发现"有多秒没有画面帧"，就重发当前动作并重开上行通道。
+     */
+    _recoverAfterForeground() {
+        if (this.manualDisconnect || !this.reconnectAction) return;
+        const silentMs = Date.now() - (this._lastFrameAt || 0);
+        if (this._lastFrameAt && silentMs < 4000) return;   // 还在出帧，不用管
+        console.warn(`[Stream] 回到前台：已 ${Math.round(silentMs / 1000)}s 无画面帧，尝试恢复`);
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.sendAction(this.reconnectAction.action, this.reconnectAction.params);
+        } else {
+            this.connect();
+        }
+        if (this._isClientMode()) this.startClientStream();
+    },
+
+    _ensureGlobalListeners() {
+        if (this._listenersBound) return;
+        this._listenersBound = true;
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') this._recoverAfterForeground();
+        });
+        window.addEventListener('online', () => this._recoverAfterForeground());
     },
 
     setMode(mode) {
@@ -125,18 +222,16 @@ const StreamManager = {
             const closeCode = (event && typeof event.code === 'number') ? event.code : 0;
             if (window.DSH_AUTH &&
                 window.DSH_AUTH.shouldReconnectOnClose(closeCode) === false) {
-                if (this.canvas) this.canvas.style.display = 'none';
-                const ph = document.getElementById('video-placeholder');
-                if (ph) ph.style.display = 'flex';
+                // 不再隐藏画布（否则画面"凭空消失"）：保留最后一帧 + 叠提示条
+                this._showOverlay('登录已过期，请重新登录');
                 updateStatus('offline', '登录已过期，请重新登录');
                 return;
             }
             if (!this.manualDisconnect && this.reconnectAction) {
                 updateStatus('warning', '连接断开，正在重连...');
+                this._showOverlay('连接中断，正在重连…（当前为最后一帧）');
             } else {
-                if (this.canvas) this.canvas.style.display = 'none';
-                const ph = document.getElementById('video-placeholder');
-                if (ph) ph.style.display = 'flex';
+                this._showOverlay('已断开');
                 updateStatus('offline', '已断开');
             }
             if (!this.manualDisconnect && this.shouldReconnect) {
@@ -182,6 +277,12 @@ const StreamManager = {
     },
 
     _handleBinaryFrame(buffer) {
+        // 背压：上一帧还在解码时**丢掉本帧**。移动端解码慢，若继续 createObjectURL 堆积，
+        // 内存与解码器压力会导致"渲染静默停住"（画面不动但数字还在变）。
+        if (this._decoding) {
+            this._droppedFrames = (this._droppedFrames || 0) + 1;
+            return;
+        }
         const view = new DataView(buffer);
         const frameId = view.getUint32(0);
         const jpegBytes = new Uint8Array(buffer, 4);
@@ -207,12 +308,25 @@ const StreamManager = {
                 this.ctx.drawImage(this.img, dx, dy, dw, dh);
             }
         };
+        this._decoding = true;
         this.img.onload = () => {
+            this._decoding = false;
             URL.revokeObjectURL(url);
             if (this._pendingFrameUrl === url) this._pendingFrameUrl = null;
             drawImage();
         };
+        // 解码失败（移动端内存紧张/帧损坏）也要释放 URL 并复位，否则会永久卡在"解码中"
+        this.img.onerror = () => {
+            this._decoding = false;
+            URL.revokeObjectURL(url);
+            if (this._pendingFrameUrl === url) this._pendingFrameUrl = null;
+            this._decodeErrors = (this._decodeErrors || 0) + 1;
+            if (this._decodeErrors === 5) console.warn('[Stream] 连续 5 帧解码失败（可能是内存压力）');
+        };
         if (this.canvas) this.canvas.style.display = '';
+        this._lastFrameAt = Date.now();        // 供"回到前台自愈"判断是否真的在出帧
+        this._hideOverlay();                   // 一有画面就把提示条收起
+        this._checkCanvasSize();               // 布局塌陷时显式告警（内部有 2s 节流）
         this.img.src = url;
         if (this.currentMode === 'emotion') {
             const emoFrameId = document.getElementById('emo-frame-id');
@@ -263,24 +377,22 @@ const StreamManager = {
             case 'status':
                 console.log('[Stream] 状态:', msg.message);
                 if (msg.status === 'finished' || msg.status === 'stopped') {
-                    if (msg.status === 'finished') {
-                        // 视频播放完毕，避免断线重连后自动重播同一文件
+                    if (msg.status === 'finished' && !this._isClientMode()) {
+                        // 视频文件播放完毕 → 避免断线重连后自动重播同一文件。
+                        // ⚠ 但**本机摄像头（client）模式不能清**：清了之后一旦 WS 断线，
+                        //   onclose 会走"无动作可重发"分支，重连后也不知道该起什么源 →
+                        //   画面永久消失（2026-09-22 实测）。client 模式只有用户点「停止」才清。
                         this.reconnectAction = null;
                     }
                     if (msg.segment_analysis && typeof window.renderAnalysisReport === 'function') {
                         window.renderAnalysisReport(msg.segment_analysis);
                     }
                     updateStatus('offline', msg.message);
-                    setTimeout(() => {
-                        if (this.canvas && this.ctx) {
-                            this.canvas.style.display = 'none';
-                            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                        }
-                        const ph = document.getElementById('video-placeholder');
-                        if (ph) ph.style.display = 'flex';
-                    }, 100);
+                    // 保留最后一帧 + 叠提示条（原先是隐藏画布 + 不透明黑占位符 → 画面凭空消失）
+                    this._showOverlay(msg.message || '画面已停止');
                 } else if (msg.status === 'error') {
                     updateStatus('warning', msg.message);
+                    this._showOverlay(msg.message || '画面异常');
                 }
                 break;
         }

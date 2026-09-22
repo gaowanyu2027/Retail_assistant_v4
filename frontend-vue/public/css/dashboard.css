@@ -711,8 +711,112 @@ body {
 @media (max-width: 768px) {
     .main-container.retail-mode,
     .main-container.emotion-mode { grid-template-columns: 1fr; }
+    /* ⚠ 必须重置"跨 2 列"（2026-09-22 定位到的真 bug）：
+       上面 ≤1200px 给 `.alert-panel` 设了 `grid-column: span 2`，但这里只剩 **1 个显式列**，
+       于是浏览器**隐式多生成一列**（实测 getComputedStyle 得到 `21.3333px 322.667px` 两列）；
+       而那一列被 ECharts 图表的**固定像素宽度**顶住（栅格子项默认 `min-width:auto` 不收缩），
+       结果视频面板被挤到 **21px 宽 → .video-container/canvas 塌成 0×0 → 画面上"消失"**
+       （画布里的像素数据其实还在、帧号/轨迹仍在更新，所以极易误判成"服务端停推流"）。
+       修法：单列时不再 span，并允许栅格子项收缩。 */
+    .main-container.retail-mode .alert-panel { grid-column: auto; }
+    .main-container > * { min-width: 0; }
+    .chart-box { min-width: 0; }
     .topbar { flex-wrap: wrap; gap: 8px; }
     .query-input-row { flex-wrap: wrap; }
     .voice-bar { flex-wrap: wrap; }
     .mode-switcher { overflow-x: auto; }
+}
+
+/* ===== 手机端适配（≤640px）=====
+   已有的 1200/768 断点只做了"降列"，手机上仍有四个具体问题：
+   ① 顶栏一排按钮在 375px 下换行后触控目标偏小（容易点错）；
+   ② 视频 canvas 固定 1280×720，会横向溢出 / 被压扁；
+   ③ 左侧抽屉固定在左缘的"会话记录"竖排按钮会压住内容；
+   ④ 输入框 font-size < 16px 时 **iOS 聚焦会自动放大页面**（经典坑）。
+   下面按「单列 + 触控目标 ≥38px + 不横向溢出」收敛。 */
+@media (max-width: 640px) {
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+        font-size: 14px;
+        /* Android Chrome 的地址栏高度会算进 100vh（页面底部被挡）→ 有 dvh 就用 dvh */
+        min-height: 100vh;
+        min-height: 100dvh;
+    }
+    /* 去掉移动端点击时的高亮方块（Android 上尤其明显） */
+    * { -webkit-tap-highlight-color: transparent; }
+
+    /* 顶栏：标题独占一行，按钮换行但保持可点 */
+    .topbar { padding: 8px 10px; gap: 6px; }
+    .topbar h1 { font-size: 1em; width: 100%; }
+    .topbar-right { gap: 6px; width: 100%; }
+    /* 触控目标：按 Android Material ≥48dp / iOS HIG ≥44pt 取大值（原先 38px 偏小） */
+    .btn { padding: 8px 10px; font-size: 0.85em; min-height: 44px; }
+    .fps-display { font-size: 0.8em; }
+    .user-chip { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; font-size: 0.75em; }
+
+    /* 面板与表单：更紧凑，输入框 ≥16px 防 iOS 聚焦缩放 */
+    .panel { padding: 10px; }
+    .panel h2 { font-size: 0.95em; }
+    input, select, textarea { font-size: 16px; }
+    .query-input-row .btn { min-height: 48px; }
+
+    /* ⚠ 这里**故意不覆盖** .video-container canvas 的尺寸。
+       桌面规则 `container{aspect-ratio:16/9}` + `canvas{width:100%;height:100%;object-fit:contain}`
+       在窄屏本来就正确；2026-09-22 曾在此加过 `width:100%!important; height:auto!important`，
+       结果手机上画面"消失"（画布高度被算成 0/被压扁，露出容器黑底），而帧号/轨迹仍在变
+       （那些数字是画布外的文字）→ 一度被误判成"服务端停止推流"。教训：**别用 !important 去覆盖
+       本来已经自适应的尺寸规则**，先用 getBoundingClientRect() 看实际渲染尺寸再动手。 */
+    .video-info { flex-wrap: wrap; gap: 6px; font-size: 0.85em; }
+
+    /* 图表：给足高度，否则饼图/柱图会挤成一条 */
+    .chart-box { min-height: 220px; }
+
+    /* 抽屉（会话记录 / 用户管理共用 .session-drawer）：几乎占满屏，好点；滚动不穿透到页面 */
+    .session-drawer {
+        width: 92vw; max-width: 92vw; padding: 10px;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+    }
+    .session-drawer-header h2 { font-size: 1em; }
+
+    /* "会话记录"按钮：竖排贴边 → 底部悬浮胶囊（不压内容、拇指够得到） */
+    .session-toggle-btn {
+        top: auto;
+        bottom: calc(14px + env(safe-area-inset-bottom));
+        left: 10px;
+        transform: none;
+        writing-mode: horizontal-tb;
+        padding: 8px 14px;
+        border-radius: 999px;
+        font-size: 0.85em;
+        letter-spacing: normal;
+    }
+
+    /* 模式切换与语音条：横向滚动，不挤压变形 */
+    .mode-switcher { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .mode-switcher .mode-tab { flex: 0 0 auto; font-size: 0.85em; padding: 8px 10px; }
+    .voice-bar { flex-wrap: wrap; font-size: 0.85em; }
+
+    /* 列表项（会话 / 账号）：允许换行，行内按钮可点 */
+    .session-item { height: auto; min-height: 44px; padding: 8px; }
+    .session-item .btn { min-height: 40px; padding: 6px 8px; font-size: 0.8em; }
+}
+
+/* 手机横屏（iPhone / Android 通用）：高度小、宽度够（常 >640px，会掉回平板布局）
+   → 这里只做"变矮"处理，保留双列（横屏本来就适合看画面） */
+@media (max-height: 520px) and (orientation: landscape) {
+    .topbar { padding: 6px 10px; gap: 4px; }
+    .topbar h1 { font-size: 0.95em; width: auto; }
+    .btn { min-height: 36px; padding: 6px 9px; font-size: 0.8em; }
+    .video-container canvas { max-height: 60vh; }
+    .chart-box { min-height: 160px; }
+    .session-toggle-btn { bottom: calc(8px + env(safe-area-inset-bottom)); padding: 6px 10px; }
+}
+
+/* 超窄屏（≤380px，如 iPhone SE）：进一步压缩，保证不溢出 */
+@media (max-width: 380px) {
+    .topbar h1 { font-size: 0.95em; }
+    .btn { padding: 7px 8px; font-size: 0.8em; min-height: 40px; }
+    .user-chip { display: none; }      /* 极窄屏优先保证"用户管理/退出"可见 */
+    .chart-box { min-height: 180px; }
 }

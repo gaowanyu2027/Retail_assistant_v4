@@ -2,7 +2,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- viewport-fit=cover：让 iPhone 刘海/圆角区域的 safe-area 变量可用
+       （底部悬浮按钮用了 env(safe-area-inset-bottom)，安卓挖孔/手势条同样受益）
+       interactive-widget=resizes-content：安卓 Chrome 弹出软键盘时**压缩布局**而不是盖住输入框 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
   <title>智能零售分析系统</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%234da6ff'/></svg>">
   <link rel="stylesheet" href="/css/dashboard.css">

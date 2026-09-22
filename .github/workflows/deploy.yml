@@ -1,0 +1,110 @@
+# CD：把 main 分支部署到云服务器（阿里云 ECS）
+#
+# ## 为什么是"推送到服务器"而不是"服务器拉取"
+# 实测发现：**这台阿里云 ECS 访问不了 GitHub**（`git clone` 报
+# `GnuTLS recv error (-110): The TLS connection was non-properly terminated.`），
+# 服务器上 `git pull` 走不通。
+# 所以这里把方向反过来：**GitHub 的 runner 有代码 → 打包后 scp 推到服务器 → SSH 触发重建**。
+# 服务器一次都不需要访问 GitHub，方向是"公网 → 服务器"，完全成立。
+#
+# ## 需要先配好的 3 个 Secrets（仓库 Settings → Secrets and variables → Actions）
+#   DEPLOY_HOST     服务器公网 IP（如 182.92.31.32）
+#   DEPLOY_USER     部署用户（**不要用 root**，见下）
+#   DEPLOY_SSH_KEY  部署专用私钥（ed25519）。对应公钥要加到服务器该用户的 ~/.ssh/authorized_keys
+#
+# ## 服务器侧一次性准备（用单独的部署账号，最小权限）
+#   adduser --disabled-password --gecos "" deploy
+#   usermod -aG docker deploy                      # 只给 docker 组，够用
+#   mkdir -p /home/deploy/.ssh && chmod 700 /home/deploy/.ssh
+#   echo '<部署公钥>' >> /home/deploy/.ssh/authorized_keys && chmod 600 /home/deploy/.ssh/authorized_keys
+#   chown -R deploy:deploy /opt/retail-assistant   # 让它能写代码目录
+#   # 加固：/etc/ssh/sshd_config → PermitRootLogin no（确认能登录后再改）
+#
+# ## 触发方式
+#   - 默认**手动**（workflow_dispatch）：项目演示够用，最安全；
+#   - 想让每次 push 到 main 自动部署：把下面 `push:` 段取消注释。
+#
+# ## 回滚
+#   重建前把当前镜像打上 `rollback` 标签；健康检查失败则回滚该标签并重启 backend，作业以失败退出。
+
+name: deploy
+
+on:
+  workflow_dispatch:            # 手动触发（Actions 页面点 "Run workflow"）
+  # push:
+  #   branches: [main]
+  #   paths-ignore:
+  #     - '**.md'               # 只改文档就别折腾服务器
+  #     - 'docs/**'
+
+concurrency:
+  group: deploy-production      # 同一时间只允许一个部署
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 打包源码（排除 .git 与本地文件）
+        run: |
+          tar --exclude=.git \
+              --exclude=node_modules \
+              --exclude=__pycache__ \
+              -czf src.tar.gz .
+          ls -lh src.tar.gz
+
+      - name: 上传到服务器
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: src.tar.gz
+          target: /tmp/retail-deploy/
+          overwrite: true
+
+      - name: 远端解包 + 重建 + 健康检查（失败自动回滚）
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+            cd /opt/retail-assistant
+
+            # 1) 记录当前镜像作为回滚点（首次部署时不存在，忽略错误）
+            docker tag retail-assistant:v4 retail-assistant:rollback 2>/dev/null || true
+
+            # 2) 解包覆盖（data/ 与模型文件不在包里，不受影响）
+            tar -xzf /tmp/retail-deploy/src.tar.gz -C /opt/retail-assistant
+            rm -f /tmp/retail-deploy/src.tar.gz
+
+            # 3) 重建并启动
+            docker compose up -d --build
+
+            # 4) 健康检查（最多等 90s）
+            ok=0
+            for i in $(seq 18); do
+              if curl -fsS http://127.0.0.1:8000/api/health/ready | grep -q '"status":"ok"'; then
+                ok=1; break
+              fi
+              sleep 5
+            done
+
+            if [ "$ok" = "1" ]; then
+              echo "✅ 部署成功"
+              docker compose ps
+              exit 0
+            fi
+
+            # 5) 回滚
+            echo "❌ 健康检查失败，回滚到上一个镜像"
+            docker compose logs --tail=80 backend || true
+            docker tag retail-assistant:rollback retail-assistant:v4 2>/dev/null || true
+            docker compose up -d --force-recreate backend || true
+            exit 1

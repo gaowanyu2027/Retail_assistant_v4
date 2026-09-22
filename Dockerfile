@@ -19,7 +19,7 @@ FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a55
 WORKDIR /build
 # 先只拷依赖清单，命中 Docker 层缓存（源码变更不会重装依赖）
 COPY frontend-vue/package.json frontend-vue/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --no-audit --no-fund --registry=https://registry.npmmirror.com
 COPY frontend-vue/ ./
 RUN npm run build
 
@@ -34,6 +34,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 # OpenCV / 视频处理在 slim 基础镜像下需要的系统库。
 #
+# ⚠ 实测（2026-09-22，阿里云 ECS 构建）：**py3.13-slim 基于 Debian trixie，apt 源是
+#   deb.debian.org，国内被限速到 ~30KB/s** —— 单是 libllvm19(26MB) 就花了 829 秒，
+#   整段 apt（55.3MB / 66 个包）近 30 分钟。故这里先把源换成阿里云。
+#   教训：国内构建要三处都换源（apt/pip/npm），只换 pip 不够。
+#
 # 注意这里**故意不装 ffmpeg**：本项目全代码（含 Python/前端）没有任何
 # subprocess/os.system 调用，不存在"调用 ffmpeg 命令行"的路径——
 # 视频解码由 opencv-python 自带（wheel 内已捆绑 ffmpeg），
@@ -42,7 +47,9 @@ ENV PYTHONUNBUFFERED=1 \
 # 等大包），使系统层从 ~15 个包膨胀到 ~160 个，镜像增大约 200MB 且构建
 # 时间多出十几分钟，属于纯累赘。若将来确实要调 CLI（如转码 mp3），
 # 再单独加回来。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i "s|deb.debian.org|mirrors.aliyun.com|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
         libsm6 \

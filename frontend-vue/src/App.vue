@@ -44,6 +44,10 @@
         <span class="user-chip" :title="'当前登录：' + userLabel">
           {{ userLabel }}
         </span>
+        <button v-if="canManageUsers" id="btn-users" class="btn btn-secondary" @click="openUserPanel"
+                title="新建账号 / 分配角色 / 重置口令（仅 root）">用户管理</button>
+        <button v-else id="btn-account" class="btn btn-secondary" @click="openUserPanel"
+                title="修改我的登录口令">修改密码</button>
         <button id="btn-logout" class="btn btn-secondary" @click="logout">退出</button>
       </div>
     </header>
@@ -77,6 +81,81 @@
           <button class="session-rename-btn" @click.stop="renameSession(session.session_id)">重命名</button>
           <button class="session-delete-btn" @click.stop="deleteSession(session.session_id)">删除</button>
         </div>
+      </div>
+    </aside>
+
+    <!-- ===== 账号管理抽屉：root 建号/改密/停用/删除；所有人改自己的口令 =====
+         后端 API 早就齐了（/api/auth/users 需 user:manage），此前**没有界面**——
+         登录页写着"账号由平台管理员分配"，管理员却无处可点。这里补上。 -->
+    <aside id="user-drawer" class="session-drawer collapsed" :class="{ open: userPanelOpen }">
+      <div class="session-drawer-header">
+        <h2>{{ canManageUsers ? '用户管理' : '我的账号' }}</h2>
+        <button class="btn btn-outline" @click="closeUserPanel">收起</button>
+      </div>
+
+      <div v-if="userPanelMsg" class="session-item"
+           style="color:var(--accent-yellow);white-space:normal;line-height:1.5">{{ userPanelMsg }}</div>
+
+      <!-- —— root：新建账号 —— -->
+      <div v-if="canManageUsers" style="padding:10px 12px;border-bottom:1px solid var(--border)">
+        <div style="font-size:.85em;color:var(--text-secondary);margin-bottom:8px">
+          新建账号 · 口令规则：<strong>≥8 位、非纯数字、不能与用户名相同</strong>
+        </div>
+        <input v-model.trim="newUser.username" placeholder="用户名（3~32 位，字母数字 _ - . @）"
+               style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+        <input v-model.trim="newUser.display_name" placeholder="昵称（可选，界面显示用）"
+               style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+        <select v-model="newUser.role"
+                style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+          <option value="platform">platform —— 平台账户（数据读写，不能管用户/系统）</option>
+          <option value="root">root —— 平台管理员（+ 用户管理 / 系统管理）</option>
+        </select>
+        <input v-model="newUser.password" type="password" placeholder="初始口令（≥8 位）"
+               style="width:100%;box-sizing:border-box;margin-bottom:8px;padding:6px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:4px"
+               @keyup.enter="createUser">
+        <button class="btn btn-primary" :disabled="userPanelBusy" @click="createUser">创建账号</button>
+      </div>
+
+      <!-- —— root：账号列表 —— -->
+      <div v-if="canManageUsers" class="session-list" style="max-height:38vh;overflow:auto;border-bottom:1px solid var(--border)">
+        <div v-if="!users.length" class="session-item">暂无账号（或正在加载…）</div>
+        <div v-for="u in users" :key="u.id" class="session-item" style="display:block;white-space:normal">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+            <span class="session-item-title">{{ u.username }}{{ u.display_name && u.display_name !== u.username ? '（' + u.display_name + '）' : '' }}</span>
+            <span class="session-item-meta">
+              {{ u.role_label || u.role }}{{ u.enabled === false ? ' · ⛔已停用' : '' }}
+              <template v-if="currentUser && u.id === currentUser.id"> · 这是你</template>
+            </span>
+          </div>
+          <div class="session-item-meta" style="margin-top:2px">
+            最近登录：{{ u.last_login_at || '（从未）' }}
+          </div>
+          <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-outline" @click="startResetPassword(u)">重置口令</button>
+            <button class="btn btn-secondary" @click="toggleUserEnabled(u)">{{ u.enabled === false ? '启用' : '停用' }}</button>
+            <button class="btn btn-danger" :disabled="currentUser && u.id === currentUser.id"
+                    :title="currentUser && u.id === currentUser.id ? '不能删除自己' : ''"
+                    @click="deleteUser(u)">删除</button>
+          </div>
+          <div v-if="resetFor && resetFor.id === u.id" style="margin-top:8px;display:flex;gap:6px">
+            <input v-model="resetPassword" type="password" placeholder="新口令（≥8 位）" style="flex:1;min-width:0;padding:6px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:4px" @keyup.enter="doResetPassword">
+            <button class="btn btn-primary" :disabled="userPanelBusy" @click="doResetPassword">保存</button>
+            <button class="btn btn-secondary" @click="cancelResetPassword">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- —— 所有人：改自己的口令 —— -->
+      <div style="padding:10px 12px">
+        <div style="font-size:.85em;color:var(--text-secondary);margin-bottom:8px">
+          修改我的口令 · 改成功后<strong>本人全部登录态会被吊销</strong>，需要重新登录
+        </div>
+        <input v-model="pwdForm.old_password" type="password" placeholder="当前口令"
+               style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+        <input v-model="pwdForm.new_password" type="password" placeholder="新口令（≥8 位）"
+               style="width:100%;box-sizing:border-box;margin-bottom:8px;padding:6px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:4px"
+               @keyup.enter="changeOwnPassword">
+        <button class="btn btn-primary" :disabled="userPanelBusy" @click="changeOwnPassword">修改口令</button>
       </div>
     </aside>
 
@@ -252,6 +331,15 @@ export default {
         const role = w.role === 'root' ? '管理员' : '平台账户'
         return (w.display_name || w.username) + ' · ' + role
       })(),
+      // ===== 账号管理抽屉（root：建号/改密/停用/删除；所有人：改自己的口令）=====
+      userPanelOpen: false,
+      users: [],
+      userPanelMsg: '',
+      userPanelBusy: false,
+      newUser: { username: '', display_name: '', role: 'platform', password: '' },
+      resetFor: null,          // 正在重置口令的那个账号
+      resetPassword: '',
+      pwdForm: { old_password: '', new_password: '' },
       emoPieChart: null,
       retailEmoChart: null,
       videoCaps: null,        // GET /api/video/sources 的能力描述（决定菜单可用性）
@@ -259,6 +347,12 @@ export default {
     }
   },
   computed: {
+    // 能否管理账号：以**后端下发的权限**为准（`/api/auth/me` → `window.__currentPerms`），
+    // 并以 role===root 兜底 —— 避免权限字段缺失时管理入口整体消失（点了没反应那类问题）。
+    canManageUsers() {
+      const perms = (typeof window !== 'undefined' && window.__currentPerms) || []
+      return perms.includes('user:manage') || !!(this.currentUser && this.currentUser.role === 'root')
+    },
     // ---- 按服务端能力决定菜单可用性（不可用要**说明原因**，而不是点了没反应）----
     capKinds() {
       const map = {}
@@ -427,12 +521,22 @@ export default {
     }
     document.addEventListener('click', this._docClickHandler)
 
-    // 窗口尺寸变化时重绘表情饼图
+    // 窗口尺寸变化 / 手机横竖屏切换时重绘图表。
+    // 为什么延迟再画一次：手机端媒体查询（≤640px 变单列）切换后浏览器还要回流，
+    // 立刻 resize 会按**旧宽度**绘制，留下空白或半张图 —— 250ms 后补一次最稳。
     this._resizeHandler = () => {
-      if (this.emoPieChart) this.emoPieChart.resize()
-      if (this.retailEmoChart) this.retailEmoChart.resize()
+      const resizeAll = () => {
+        if (this.emoPieChart) this.emoPieChart.resize()
+        if (this.retailEmoChart) this.retailEmoChart.resize()
+        // 热度柱图由全局 ChartManager 管（原先只在切模式时 resize，横竖屏切换会画歪）
+        if (window.ChartManager && typeof ChartManager.resize === 'function') ChartManager.resize()
+      }
+      resizeAll()
+      clearTimeout(this._resizeTimer)
+      this._resizeTimer = setTimeout(resizeAll, 250)
     }
     window.addEventListener('resize', this._resizeHandler)
+    window.addEventListener('orientationchange', this._resizeHandler)
   },
   beforeUnmount() {
     clearInterval(this.pollTimer)
@@ -451,7 +555,11 @@ export default {
     clearTimeout(this.localCaptureTimer)
     if (this.localPreviewRaf) cancelAnimationFrame(this.localPreviewRaf)
     if (this._docClickHandler) document.removeEventListener('click', this._docClickHandler)
-    if (this._resizeHandler) window.removeEventListener('resize', this._resizeHandler)
+    if (this._resizeHandler) {
+      window.removeEventListener('resize', this._resizeHandler)
+      window.removeEventListener('orientationchange', this._resizeHandler)
+    }
+    if (this._resizeTimer) { clearTimeout(this._resizeTimer); this._resizeTimer = null }
     if (this.localStream) {
       this.localStream.getTracks().forEach(t => t.stop())
       this.localStream = null
@@ -465,6 +573,134 @@ export default {
     }
   },
   methods: {
+    // ===== 账号管理（root）=====
+    // 后端权限：`/api/auth/users` 的 GET/POST/PATCH/DELETE 都要求 `user:manage`（root）；
+    // `POST /api/auth/password` 是"本人改密"（需旧口令）。
+    // ⚠ 后端行为：**改角色 / 改口令 / 停用都会吊销该账号的全部会话** —— 所以每条成功提示里
+    //   都写明"对方需要重新登录"，避免操作者以为改完对方还能继续用。
+    openUserPanel() {
+      this.userPanelOpen = true
+      this.userPanelMsg = ''
+      if (this.canManageUsers) this.fetchUsers()
+    },
+    closeUserPanel() {
+      this.userPanelOpen = false
+      this.resetFor = null
+      this.resetPassword = ''
+    },
+    async fetchUsers() {
+      try {
+        const resp = await fetch('/api/auth/users')
+        if (!resp.ok) { this.userPanelMsg = await this.describeFetchFailure('账号列表加载', resp); return }
+        const data = await resp.json()
+        this.users = data.users || []
+      } catch (e) {
+        this.userPanelMsg = `账号列表加载失败：网络异常（${e.message || e}）`
+        window.updateStatus?.('warning', this.userPanelMsg)
+      }
+    },
+    async createUser() {
+      const u = this.newUser
+      if (!u.username || !u.password) { this.userPanelMsg = '请先填写用户名与初始口令'; return }
+      this.userPanelBusy = true
+      try {
+        const resp = await fetch('/api/auth/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: u.username, password: u.password, role: u.role,
+            display_name: u.display_name || u.username,
+          }),
+        })
+        if (!resp.ok) { this.userPanelMsg = await this.describeFetchFailure(`创建账号 ${u.username}`, resp); return }
+        this.userPanelMsg = `✅ 已创建 ${u.username}（${u.role}）—— 请把用户名与初始口令告知对方`
+        window.updateStatus?.('success', this.userPanelMsg)
+        this.newUser = { username: '', display_name: '', role: 'platform', password: '' }
+        await this.fetchUsers()
+      } catch (e) {
+        this.userPanelMsg = `创建账号失败：网络异常（${e.message || e}）`
+      } finally {
+        this.userPanelBusy = false
+      }
+    },
+    startResetPassword(u) { this.resetFor = u; this.resetPassword = '' },
+    cancelResetPassword() { this.resetFor = null; this.resetPassword = '' },
+    async doResetPassword() {
+      const u = this.resetFor
+      if (!u || !this.resetPassword) { this.userPanelMsg = '请填写新口令'; return }
+      this.userPanelBusy = true
+      try {
+        const resp = await fetch(`/api/auth/users/${u.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: this.resetPassword }),
+        })
+        if (!resp.ok) { this.userPanelMsg = await this.describeFetchFailure(`重置 ${u.username} 的口令`, resp); return }
+        this.userPanelMsg = `✅ 已重置 ${u.username} 的口令（该账号现有登录态已吊销，需重新登录）`
+        window.updateStatus?.('success', this.userPanelMsg)
+        this.cancelResetPassword()
+        await this.fetchUsers()
+      } catch (e) {
+        this.userPanelMsg = `重置口令失败：网络异常（${e.message || e}）`
+      } finally {
+        this.userPanelBusy = false
+      }
+    },
+    async toggleUserEnabled(u) {
+      const next = !u.enabled
+      const warn = next ? '' : '（该账号现有登录态会被吊销）'
+      if (!window.confirm(`${next ? '启用' : '停用'}账号 ${u.username}？${warn}`)) return
+      this.userPanelBusy = true
+      try {
+        const resp = await fetch(`/api/auth/users/${u.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: next }),
+        })
+        if (!resp.ok) { this.userPanelMsg = await this.describeFetchFailure(`${next ? '启用' : '停用'} ${u.username}`, resp); return }
+        this.userPanelMsg = `✅ 已${next ? '启用' : '停用'} ${u.username}${next ? '' : '（其登录态已吊销）'}`
+        await this.fetchUsers()
+      } catch (e) {
+        this.userPanelMsg = `操作失败：网络异常（${e.message || e}）`
+      } finally {
+        this.userPanelBusy = false
+      }
+    },
+    async deleteUser(u) {
+      if (!window.confirm(`删除账号 ${u.username}？该账号的会话会一并吊销，且不可撤销。`)) return
+      this.userPanelBusy = true
+      try {
+        const resp = await fetch(`/api/auth/users/${u.id}`, { method: 'DELETE' })
+        if (!resp.ok) { this.userPanelMsg = await this.describeFetchFailure(`删除 ${u.username}`, resp); return }
+        this.userPanelMsg = `✅ 已删除 ${u.username}`
+        await this.fetchUsers()
+      } catch (e) {
+        this.userPanelMsg = `删除失败：网络异常（${e.message || e}）`
+      } finally {
+        this.userPanelBusy = false
+      }
+    },
+    async changeOwnPassword() {
+      const f = this.pwdForm
+      if (!f.old_password || !f.new_password) { this.userPanelMsg = '请填写当前口令与新口令'; return }
+      this.userPanelBusy = true
+      try {
+        const resp = await fetch('/api/auth/password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ old_password: f.old_password, new_password: f.new_password }),
+        })
+        if (!resp.ok) { this.userPanelMsg = await this.describeFetchFailure('修改口令', resp); return }
+        this.pwdForm = { old_password: '', new_password: '' }
+        window.alert('口令已修改，为安全起见需要重新登录。')
+        // 服务端已吊销本人全部会话，直接重载 → Root.vue 拿到 401 会回到登录页
+        window.location.reload()
+      } catch (e) {
+        this.userPanelMsg = `修改口令失败：网络异常（${e.message || e}）`
+      } finally {
+        this.userPanelBusy = false
+      }
+    },
     // 退出登录：吊销服务端会话并回登录页（整页重载以彻底清掉仪表盘状态/WS 连接）
     async logout() {
       if (!window.confirm('确认退出登录？')) return
