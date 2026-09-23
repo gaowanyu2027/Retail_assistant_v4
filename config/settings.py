@@ -374,6 +374,18 @@ LLM_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 #     $env:LLM_PRICE_OUT_PER_MTOK = "1.10"   # 输出
 LLM_PRICE_IN_PER_MTOK = float(os.environ.get("LLM_PRICE_IN_PER_MTOK") or 0)
 LLM_PRICE_OUT_PER_MTOK = float(os.environ.get("LLM_PRICE_OUT_PER_MTOK") or 0)
+
+# ==================== LLM 日配额（成本护栏）====================
+# **0 = 不限**（默认值，不影响本机开发）。
+# 公网演示建议：LLM_DAILY_QUOTA_PER_USER=20、LLM_DAILY_QUOTA_GLOBAL=200。
+#
+# ⚠ 为什么要在应用层自己兜：模型平台**没有"单 Key 额度上限/预算上限"这类硬开关**
+#   （控制台只提供"按 Key 查看用量"）。所以"公网问答接口被爬/被刷"的钱只能靠：
+#     ① 账户里**只留少量余额**（余额本身就是硬上限）；
+#     ② 本闸门：按账号 + 全局的**每日提问数**上限，超限直接 429、**不打 LLM**。
+#   两个上限都为 0 时闸门关闭 —— 此时**一次计数查询都不做**（零开销）。
+LLM_DAILY_QUOTA_PER_USER = int(os.environ.get("LLM_DAILY_QUOTA_PER_USER") or 0)
+LLM_DAILY_QUOTA_GLOBAL = int(os.environ.get("LLM_DAILY_QUOTA_GLOBAL") or 0)
 # OpenAI 兼容接口地址
 LLM_BASE_URL = "https://api.deepseek.com"
 # LLM 生成温度

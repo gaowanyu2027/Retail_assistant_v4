@@ -158,7 +158,7 @@ sudo docker compose logs -f backend | head -50   # 看首启日志（会打印 r
 ## 11. 上公网必须做的四道防护
 
 1. **强口令**：`AUTH_ROOT_PASSWORD` 别用默认的；对外演示单独建只读账号；
-2. **DeepSeek 设用量上限与预算告警**（控制台）—— 公网可访问的问答接口会被爬，这是**真金白银**的风险；
+2. **控制 LLM 花费**（公网问答接口会被爬，这是**真金白银**的风险）：① 账户里**只留少量余额**（平台**没有**单 Key 额度上限开关，余额就是硬上限）；② 打开应用层日配额 `LLM_DAILY_QUOTA_PER_USER` / `LLM_DAILY_QUOTA_GLOBAL`（超限 429、不打 LLM）；③ 需要更细的控制可挂第三方网关（OneAPI 等）做 Key 级配额；
 3. **限流**：登录限流项目里已有；要再加一层就上 nginx `limit_req`（可选）；
 4. **不要接真实摄像头**：演示用 `data/sources/demo_loop.mp4` 循环素材；`config/cameras.yaml`
    里那台 RTSP 保持注释状态。

@@ -12,11 +12,44 @@ import time
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from api.schemas import QueryRequest, QueryResponse
-from config.settings import QUERY_SESSION_TTL
+from config.settings import (
+    QUERY_SESSION_TTL,
+    LLM_DAILY_QUOTA_PER_USER,
+    LLM_DAILY_QUOTA_GLOBAL,
+)
 from agents.intent_router import route_intent
+from agents.llm_quota import check_quota, quota_enabled
 from auth_context import owner_filter, write_owner
 
 router = APIRouter(tags=["query"])
+
+
+async def _llm_quota_guard(owner: str) -> None:
+    """LLM 日配额闸门：超限直接 **429**（在调用 LLM 之前拦下）。
+
+    两个上限都为 0（默认）= 关闭 ⇒ 直接返回，**一次计数查询都不做**。
+    打开的语义：`LLM_DAILY_QUOTA_PER_USER` 是"每个账号每天最多得到多少次回答"，
+    `LLM_DAILY_QUOTA_GLOBAL` 是全站上限（演示环境防止被爬/被刷把钱烧掉）。
+    计数取"已写入 `query_history` 的条数"，因此本轮提问尚未计入 —— 语义正好是"最多 N 个回答"。
+    """
+    if not quota_enabled(LLM_DAILY_QUOTA_PER_USER, LLM_DAILY_QUOTA_GLOBAL):
+        return
+    import mysql_db
+
+    used_user = (
+        await asyncio.to_thread(mysql_db.count_query_history_today, owner)
+        if LLM_DAILY_QUOTA_PER_USER > 0 else 0
+    )
+    used_global = (
+        await asyncio.to_thread(mysql_db.count_query_history_today, None)
+        if LLM_DAILY_QUOTA_GLOBAL > 0 else 0
+    )
+    allowed, reason = check_quota(
+        used_user, used_global, LLM_DAILY_QUOTA_PER_USER, LLM_DAILY_QUOTA_GLOBAL
+    )
+    if not allowed:
+        print(f"[Quota] 拒绝提问 owner={owner!r} used_user={used_user} used_global={used_global}")
+        raise HTTPException(status_code=429, detail=reason)
 
 # ===== 会话级 Agent 缓存（按 session_id 复用，保持对话记忆） =====
 _agent_cache: dict[str, "MasterAgent"] = {}     # type: ignore
@@ -184,6 +217,7 @@ async def create_query(request: QueryRequest):
     try:
         await _ensure_session_writable(request.session_id)
         owner = write_owner()
+        await _llm_quota_guard(owner)
         agent = await _aget_agent(request.session_id)
 
         # 意图路由：数据类问题直接模板回答（零 LLM）
@@ -225,6 +259,7 @@ async def create_query_stream(request: QueryRequest):
     try:
         await _ensure_session_writable(request.session_id)
         owner = write_owner()
+        await _llm_quota_guard(owner)
         agent = await _aget_agent(request.session_id)
 
         # 意图路由：数据类问题直接模板回答（零 LLM）

@@ -899,6 +899,36 @@ def delete_chat_session(session_id: str, owner: str | None = None):
     return message_ids
 
 
+def count_query_history_today(owner: str | None = None) -> int:
+    """今天（按数据库服务器本地日期）的提问条数。
+
+    - `owner=None` → **全部账号**（用于全局日配额）；
+    - `owner="张三"` → 只统计该账号。`query_history` 本身不存 owner（单一事实来源），
+      通过 `JOIN chat_session` 取归属。
+
+    用途：LLM 日配额闸门（见 `agents/llm_quota.py` 与 `api/routes/query.py`）。
+    ⚠ 配额关闭（两个上限都为 0）时本函数**不会被调用** —— 日常开发零开销。
+    `created_at` 上有索引（`idx_query_created_at`），因此这条计数是索引范围扫描。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM query_history q
+                JOIN chat_session s ON q.session_id = s.session_id
+                WHERE q.created_at >= CURDATE()
+                  AND (%s IS NULL OR s.owner=%s)
+                """,
+                (owner, owner),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
 def get_all_query_history_records(owner: str | None = None):
     """获取查询历史，用于向量库重建。
 
