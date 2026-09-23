@@ -6,10 +6,13 @@
         <span id="status-indicator" class="status-dot offline"></span>
         <span id="status-text">未连接</span>
         <select id="camera-select" class="btn btn-secondary" style="display:none;padding:6px 10px"></select>
-        <button id="btn-webcam" class="btn btn-primary" style="display:none" @click="startServerCamera">服务器摄像头</button>
-        <button id="btn-local-cam" class="btn btn-primary" style="display:none" @click="startLocalCamera">本机摄像头</button>
+        <button id="btn-webcam" class="btn btn-primary" style="display:none" :disabled="!canSystem"
+                :title="canSystem ? '' : roHint" @click="startServerCamera">服务器摄像头</button>
+        <button id="btn-local-cam" class="btn btn-primary" style="display:none" :disabled="!canSystem"
+                :title="canSystem ? '' : roHint" @click="startLocalCamera">本机摄像头</button>
         <div class="camera-menu-wrap" @click.stop>
-          <button id="btn-camera-menu" class="btn btn-primary" @click.stop="toggleCameraMenu">
+          <button id="btn-camera-menu" class="btn btn-primary" :disabled="!canSystem"
+                  :title="canSystem ? '' : roHint" @click.stop="toggleCameraMenu">
             {{ cameraActive ? '切换摄像头' : '摄像头' }}
           </button>
           <div v-show="cameraMenuOpen" id="camera-menu" class="camera-menu">
@@ -19,24 +22,28 @@
                  本地摄像头   = **你眼前这台电脑**的摄像头（浏览器采集，不经服务端设备）
                  上传视频     = **临时素材**（落 data/videos，可能被保留期清理） -->
             <button type="button" @click="selectCamera('webcam')"
-                    :disabled="!capCamera.enabled" :title="capCamera.reason || ''">
+                    :disabled="!canSystem || !capCamera.enabled"
+                    :title="!canSystem ? roHint : (capCamera.reason || '')">
               服务器摄像头（门店固定机位）{{ capCamera.enabled ? '' : '（不可用）' }}
             </button>
             <button type="button" @click="selectCamera('local')"
-                    :disabled="!capClient.enabled" :title="capClient.reason || ''">
+                    :disabled="!canSystem || !capClient.enabled"
+                    :title="!canSystem ? roHint : (capClient.reason || '')">
               本地摄像头（这台电脑）{{ capClient.enabled ? '' : '（不可用）' }}
             </button>
             <button type="button" @click="startRtspCamera"
-                    :disabled="!capRtsp.enabled" :title="capRtsp.reason || ''">
+                    :disabled="!canSystem || !capRtsp.enabled"
+                    :title="!canSystem ? roHint : (capRtsp.reason || '')">
               网络摄像头 RTSP{{ capRtsp.enabled ? '' : '（不可用）' }}
             </button>
             <div v-if="cameraHint" class="camera-menu-hint">{{ cameraHint }}</div>
           </div>
         </div>
-        <button id="btn-upload" class="btn btn-secondary" :disabled="cameraActive" @click="openFilePicker"
-                title="临时素材：上传一段视频播放/离线分析（存放在 data/videos，受保留期清理）">上传视频（临时素材）</button>
+        <button id="btn-upload" class="btn btn-secondary" :disabled="!canSystem || cameraActive" @click="openFilePicker"
+                :title="!canSystem ? roHint : '临时素材：上传一段视频播放/离线分析（存放在 data/videos，受保留期清理）'">上传视频（临时素材）</button>
         <input type="file" id="file-input" accept="video/*" style="display:none" @change="onFileSelected">
-        <button id="btn-stop" class="btn btn-danger" :disabled="!cameraActive" @click="stopVideo">停止</button>
+        <button id="btn-stop" class="btn btn-danger" :disabled="!canSystem || !cameraActive" @click="stopVideo"
+                :title="!canSystem ? roHint : ''">停止</button>
         <button id="btn-voice" class="btn btn-success">🎤 语音输入</button>
         <button id="btn-transcribe-test" class="btn btn-secondary">转文字测试</button>
         <button id="btn-voice-reply" class="btn btn-secondary">语音回复: 开</button>
@@ -44,6 +51,7 @@
         <span class="user-chip" :title="'当前登录：' + userLabel">
           {{ userLabel }}
         </span>
+        <span v-if="isReadOnly" class="badge-readonly" title="只读账号：可问答与查看看板，所有写操作已置灰（服务端同样强制 403）">只读</span>
         <button v-if="canManageUsers" id="btn-users" class="btn btn-secondary" @click="openUserPanel"
                 title="新建账号 / 分配角色 / 重置口令（仅 root）">用户管理</button>
         <button v-else id="btn-account" class="btn btn-secondary" @click="openUserPanel"
@@ -198,7 +206,9 @@
         </div>
         <h2 style="margin-top:14px">热度 vs 销量 <span style="font-size:0.7em;color:var(--text-secondary)">(转化诊断)</span></h2>
         <div id="sales-compare-box" style="font-size:0.78em;line-height:1.6">
-          <p class="placeholder-text">暂无比对数据 —— <button @click="simulateSales" style="background:var(--accent-blue);color:#fff;border:none;border-radius:4px;padding:2px 10px;cursor:pointer">生成演示数据</button></p>
+          <p class="placeholder-text">暂无比对数据 —— <button @click="simulateSales" :disabled="!canWrite"
+             :title="canWrite ? '' : roHint"
+             :style="{background: canWrite ? 'var(--accent-blue)' : 'var(--border)', color:'#fff', border:'none', borderRadius:'4px', padding:'2px 10px', cursor: canWrite ? 'pointer' : 'not-allowed'}">生成演示数据{{ canWrite ? '' : '（只读账号不可用）' }}</button></p>
         </div>
       </section>
       <section class="panel alert-panel">
@@ -352,8 +362,23 @@ export default {
     // 能否管理账号：以**后端下发的权限**为准（`/api/auth/me` → `window.__currentPerms`），
     // 并以 role===root 兜底 —— 避免权限字段缺失时管理入口整体消失（点了没反应那类问题）。
     canManageUsers() {
-      const perms = (typeof window !== 'undefined' && window.__currentPerms) || []
-      return perms.includes('user:manage') || !!(this.currentUser && this.currentUser.role === 'root')
+      return this._perms().includes('user:manage') || this._isRoot()
+    },
+    // ---- 权限门（2026-09-22 加只读角色后补）----
+    // ⚠ 前端置灰只是**体验**：真正的强制在服务端 `require_perm(...)`（viewer 调写接口一律 403）。
+    //   这里做两件事：① 无权限的按钮置灰 + 写明原因；② 处理函数再兜一道，避免"点了没反应"。
+    canWrite() {
+      return this._perms().includes('data:write') || this._isRoot()
+    },
+    canSystem() {
+      return this._perms().includes('system:manage') || this._isRoot()
+    },
+    // 只读账号（viewer）：既不能写数据、也不能控制设备 → 界面给个明确标识
+    isReadOnly() {
+      return !!this.currentUser && !this.canWrite && !this.canSystem
+    },
+    roHint() {
+      return '当前账号为只读（viewer）：该操作需要写权限'
     },
     // ---- 按服务端能力决定菜单可用性（不可用要**说明原因**，而不是点了没反应）----
     capKinds() {
@@ -575,6 +600,30 @@ export default {
     }
   },
   methods: {
+    // ---- 权限读取与拒绝提示（供计算属性与写操作入口共用）----
+    // 权限来源：`/api/auth/me` 的 permissions（Root.vue 在 App 挂载**之前**写入 window.__currentPerms）。
+    _perms() {
+      if (typeof window !== 'undefined' && Array.isArray(window.__currentPerms) && window.__currentPerms.length) {
+        return window.__currentPerms
+      }
+      const u = this.currentUser || (typeof window !== 'undefined' ? window.__currentUser : null)
+      return (u && Array.isArray(u.permissions)) ? u.permissions : []
+    },
+    _isRoot() {
+      const u = this.currentUser || (typeof window !== 'undefined' ? window.__currentUser : null)
+      return !!(u && u.role === 'root')
+    },
+    // 写操作入口的兜底守卫：无权限 → 状态栏说明原因并返回 true（调用方 `if (this._denyWrite()) return`）
+    _denyWrite() {
+      if (this.canWrite) return false
+      window.updateStatus?.('warning', '当前账号为只读（viewer）：该操作需要 data:write 权限')
+      return true
+    },
+    _denySystem() {
+      if (this.canSystem) return false
+      window.updateStatus?.('warning', '当前账号为只读（viewer）：该操作需要 system:manage 权限')
+      return true
+    },
     // ===== 账号管理（root）=====
     // 后端权限：`/api/auth/users` 的 GET/POST/PATCH/DELETE 都要求 `user:manage`（root）；
     // `POST /api/auth/password` 是"本人改密"（需旧口令）。
@@ -747,9 +796,11 @@ export default {
       if (btn) btn.style.display = ''
     },
     toggleCameraMenu() {
+      if (this._denySystem()) return
       this.cameraMenuOpen = !this.cameraMenuOpen
     },
     async selectCamera(kind) {
+      if (this._denySystem()) return
       this.cameraMenuOpen = false
       if (this.cameraActive && this.sourceType === kind) return
       if (this.cameraActive) {
@@ -805,6 +856,7 @@ export default {
     },
     // 网络摄像头（RTSP）：直传地址，由**服务端做 SSRF 校验**后再打开
     async startRtspCamera() {
+      if (this._denySystem()) return
       this.cameraMenuOpen = false
       const url = window.prompt('输入网络摄像头地址（rtsp:// 或 rtsps://）', 'rtsp://')
       if (!url) return
@@ -824,6 +876,7 @@ export default {
     },
     // ==================== 视频控制 ====================
     async startServerCamera() {
+      if (this._denySystem()) return
       const cameraSelect = document.getElementById('camera-select')
       const wantId = cameraSelect ? cameraSelect.value : ''
       if (!this.cameraList.length) await this.scanCameras()
@@ -850,6 +903,7 @@ export default {
       }
     },
     async startLocalCamera() {
+      if (this._denySystem()) return
       try {
         // 先给出**可操作**的失败原因，别让用户对着转圈猜。
         // 浏览器只在"安全上下文"（https 或 localhost/127.0.0.1）下才提供 mediaDevices；
@@ -1013,6 +1067,7 @@ export default {
       }
     },
     openFilePicker() {
+      if (this._denySystem()) return
       const fileInput = document.getElementById('file-input')
       if (fileInput) fileInput.click()
     },
@@ -1049,6 +1104,7 @@ export default {
       e.target.value = ''
     },
     async stopVideo() {
+      if (this._denySystem()) return
       // 记录发起停止时的模式：await 期间 currentMode 可能已被 switchMode 修改
       const stopMode = this.currentMode
 
@@ -1371,7 +1427,7 @@ export default {
         const data = await resp.json()
         const zones = data.zones || []
         if (!zones.length) {
-          box.innerHTML = '<p class="placeholder-text">暂无比对数据 —— <button id="btn-sales-simulate-vue" style="background:var(--accent-blue);color:#fff;border:none;border-radius:4px;padding:2px 10px;cursor:pointer">生成演示数据</button></p>'
+          box.innerHTML = '<p class="placeholder-text">暂无比对数据 —— ' + this._demoSalesBtnHtml('生成演示数据') + '</p>'
           this.bindSalesSimulate()
           return
         }
@@ -1391,39 +1447,57 @@ export default {
         box.innerHTML = `
           <div style="margin-bottom:6px;color:var(--text-secondary)">${this.escapeHtml(data.summary || '')}</div>
           ${rows}
-          <div style="margin-top:6px"><button id="btn-sales-simulate-vue" style="background:var(--accent-blue);color:#fff;border:none;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:0.9em">重新生成演示数据</button></div>`
+          <div style="margin-top:6px">${this._demoSalesBtnHtml('重新生成演示数据', 'font-size:0.9em')}</div>`
         this.bindSalesSimulate()
       } catch (e) {
         // 原来是空 catch：网络异常时整块面板静默空白
         this.paintBoxFailure('sales-compare-box', `热度/销量比对加载失败：网络异常（${e.message || e}）`)
       }
     },
+    // 生成演示销量数据（写操作）。模板初始态按钮与 JS 注入按钮**共用这一条实现**
+    // （原先模板里 `@click="simulateSales"` 引用了**不存在的方法**，点它只会抛错）。
+    async runSalesSimulate() {
+      if (this._denyWrite()) return
+      try {
+        const resp = await fetch('/api/analytics/sales-simulate', { method: 'POST' })
+        let data = null
+        try { data = await resp.json() } catch (e) { /* 非 JSON 响应 */ }
+        if (!resp.ok) {
+          const msg = (data && (data.detail || data.message)) || `HTTP ${resp.status}`
+          const hint = (resp.status === 401 || resp.status === 403)
+            ? '（该接口需要 data:write 权限，请用有权限的账号登录）'
+            : ''
+          window.updateStatus?.('warning', `生成演示数据失败：${msg}${hint}`)
+          return
+        }
+        window.updateStatus?.('online', (data && data.msg) || '演示数据已生成')
+        await this.fetchHotVsSales()
+      } catch (e) {
+        window.updateStatus?.('warning', `生成演示数据失败：网络异常（${e.message || e}）`)
+      }
+    },
+    // 模板里的入口
+    simulateSales() { return this.runSalesSimulate() },
+    // 演示数据按钮的 HTML：只读账号置灰 + 写明原因（服务端同样会 403）
+    _demoSalesBtnHtml(label, extraStyle = '') {
+      const base = 'border:none;border-radius:4px;padding:2px 10px;'
+      if (!this.canWrite) {
+        return `<button id="btn-sales-simulate-vue" disabled title="${this.roHint}" `
+          + `style="${base}${extraStyle}background:var(--border);color:#fff;opacity:.5;cursor:not-allowed">${label}（只读账号不可用）</button>`
+      }
+      return `<button id="btn-sales-simulate-vue" `
+        + `style="${base}${extraStyle}background:var(--accent-blue);color:#fff;cursor:pointer">${label}</button>`
+    },
     bindSalesSimulate() {
       const btn = document.getElementById('btn-sales-simulate-vue')
       if (btn && !btn._bound) {
         btn._bound = true
         btn.addEventListener('click', async () => {
-          // 原来：`await fetch(...)` 不看 resp.ok、catch 里空语句 ——
-          // 权限不足(403)/后端 500 时按钮**毫无反应**（用户报障："生成演示数据没反应"）。
           const original = btn.textContent
           btn.disabled = true
           btn.textContent = '生成中…'
           try {
-            const resp = await fetch('/api/analytics/sales-simulate', { method: 'POST' })
-            let data = null
-            try { data = await resp.json() } catch (e) { /* 非 JSON 响应 */ }
-            if (!resp.ok) {
-              const msg = (data && (data.detail || data.message)) || `HTTP ${resp.status}`
-              const hint = (resp.status === 401 || resp.status === 403)
-                ? '（该接口需要 data:write 权限，请用有权限的账号登录）'
-                : ''
-              window.updateStatus?.('warning', `生成演示数据失败：${msg}${hint}`)
-              return
-            }
-            window.updateStatus?.('online', (data && data.msg) || '演示数据已生成')
-            await this.fetchHotVsSales()
-          } catch (e) {
-            window.updateStatus?.('warning', `生成演示数据失败：网络异常（${e.message || e}）`)
+            await this.runSalesSimulate()
           } finally {
             btn.disabled = false
             btn.textContent = original

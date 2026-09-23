@@ -84,11 +84,17 @@ def test_sales_simulate_button_checks_ok_and_recovers():
 
     ⚠ 签名要带缩进与 `{`：`bindSalesSimulate()` 在别处还有**调用点**
     （`this.bindSalesSimulate()`），只按名字切会切到调用点、截出无关代码（第一版就踩了）。
+
+    ⚠ 2026-09-22 调整：请求实现抽到 `runSalesSimulate()`（模板初始态按钮与 JS 注入按钮共用同一实现），
+    因此前三条断言改为盯那个方法；"按钮状态恢复"仍留在 `bindSalesSimulate`。
+    **断言强度不变** —— 四条属性依旧全部受守。
     """
-    body = _fn_body(_read(), "\n    bindSalesSimulate() {")
-    assert "resp.ok" in body, "按钮还是不看 HTTP 状态（用户看到的就是'点了没反应'）"
-    assert "data:write" in body, "权限不足时没有给出可操作的解释"
-    assert "catch (e) {}" not in body, "空 catch：网络异常静默"
+    src = _read()
+    impl = _fn_body(src, "\n    async runSalesSimulate() {")
+    assert "resp.ok" in impl, "按钮还是不看 HTTP 状态（用户看到的就是'点了没反应'）"
+    assert "data:write" in impl, "权限不足时没有给出可操作的解释"
+    assert "catch (e) {}" not in impl, "空 catch：网络异常静默"
+    body = _fn_body(src, "\n    bindSalesSimulate() {")
     assert "finally" in body and "disabled = false" in body, \
         "失败后按钮没有恢复（会一直卡在'生成中…'）"
 

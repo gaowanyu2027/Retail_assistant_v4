@@ -67,6 +67,18 @@ body {
     white-space: nowrap;
 }
 
+/* 只读账号标识（viewer）：让"为什么按钮是灰的"一眼可见 */
+.badge-readonly {
+    font-size: 0.75em;
+    color: #ffd479;
+    border: 1px solid #7a6420;
+    background: rgba(255, 212, 121, 0.12);
+    border-radius: 999px;
+    padding: 3px 8px;
+    white-space: nowrap;
+    cursor: help;
+}
+
 /* ===== 模式切换栏 ===== */
 .session-toggle-btn {
     position: fixed;
