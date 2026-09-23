@@ -1,11 +1,11 @@
 # CI 门禁：push/PR 时跑 Agent 评测集，失败则拦截（回归保护）
 # run_evals.py 已按"任一失败→退出码1"实现门禁。
 #
-# ⚠ 本文件曾经有一处**致命笔误**（已修，别再改回去）：
-#   env 里写的是 `DEEPSEEK_API_KEY`，而**全项目读的是 `DEEPSEEK_API_KEY`**
-#   （见 config/settings.py）——全仓 grep `DEEPSEEK_API_KEY` 命中 0 次。
-#   后果是 CI 里 LLM_API_KEY 恒为空，走 LLM 的用例必然失败或退化，
-#   "评测门禁"名存实亡。此类"变量名不匹配"的静默失效本项目踩过多次
+# ⚠ 这里踩过一个**静默失效**的坑（已修，别再改回去）：
+#   workflow 注入的变量名与 `config/settings.py` 读取的名字**不一致**时，
+#   CI 里的 LLM_API_KEY 会恒为空 —— 走 LLM 的用例必然失败或退化，"评测门禁"名存实亡。
+#   现全项目统一为 `DEEPSEEK_API_KEY`（本文件、compose、.env.example、settings.py 同名）。
+#   此类"变量名不匹配"的静默失效本项目踩过多次
 #   （另见 compose 漏传 mysql_root、容器内硬编码 127.0.0.1）。
 #
 # 使用前置（需要你手动做一次）：

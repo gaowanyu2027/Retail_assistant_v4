@@ -52,7 +52,7 @@ ROLE_ROOT = "root"
 ROLE_PLATFORM = "platform"
 # 只读账户（2026-09-22 新增）：给**演示/外部查看**用的最小权限角色。
 # 动机：此前只有 root / platform 两个角色，而 platform 带 data:write（导入销量、生成演示数据、
-# 启停采集…）—— 把这种账号发给外部使用者，等于让他能改掉你准备好的演示数据。
+# 启停采集…）—— 把这种账号发给外部演示对象，等于让他能改掉你准备好的演示数据。
 # viewer 只拿 data:read：能问答、看看板/热度/告警/表情，但所有写接口一律 403。
 ROLE_VIEWER = "viewer"
 
@@ -90,7 +90,7 @@ _WEAK_PASSWORDS = {
     "admin123", "admin888", "administrator", "root1234", "root12345",
     "abc12345", "abcd1234", "a1234567", "12345678a",
     "iloveyou", "letmein1", "welcome1", "sunshine",
-    "retail123", "shop1234", "store123", "demo_pass_1",
+    "retail123", "shop1234", "store123", "store2024",
 }
 
 _PBKDF2_ITERATIONS = AUTH_PBKDF2_ITERATIONS
