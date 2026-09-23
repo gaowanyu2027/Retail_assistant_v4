@@ -92,11 +92,18 @@ COPY requirements.lock.txt ./
 # 锁文件必须在**容器内** `pip freeze` 生成：宿主机环境与镜像不一致，拿宿主机的 freeze 当锁是错的。
 # `--no-deps`：锁文件已是完整依赖闭包，不需要再解析（更快、也不会被上游新版本带偏）。
 ARG USE_LOCK=0
+# ⚠ 关于 ${PYTORCH_CPU_INDEX} 的两种"镜像形态"（2026-09-23 实测踩坑）：
+#   官方默认 https://download.pytorch.org/whl/cpu 是 **PEP 503 简单索引**（有 .../cpu/torch/ 这种子路径）→ `--index-url` 可用；
+#   而国内不少 pytorch-wheels 镜像（如 mirrors.aliyun.com/pytorch-wheels/cpu/）发布的是**文件列表**（一页 .whl 链接），
+#   用 `--index-url` 会直接报：`ERROR: Could not find a version that satisfies the requirement torch (from versions: none)`
+#   （HTTP 200 能打开 ≠ pip 能解析 —— 这两件事必须分开验证）。
+#   故这里**先 --index-url、失败再回退 --find-links**，两种形态都能装；不传 build-arg 时行为与之前完全一致。
 RUN if [ "$USE_LOCK" = "1" ]; then \
         pip install --no-deps --index-url ${PIP_INDEX_URL} \
                     --extra-index-url ${PYTORCH_CPU_INDEX} -r requirements.lock.txt ; \
     else \
-        pip install --no-deps --index-url ${PYTORCH_CPU_INDEX} torch torchvision \
+        ( pip install --no-deps --index-url ${PYTORCH_CPU_INDEX} torch torchvision \
+          || pip install --no-deps --find-links ${PYTORCH_CPU_INDEX} torch torchvision ) \
         && pip install --index-url ${PIP_INDEX_URL} -r requirements.txt ; \
     fi
 
