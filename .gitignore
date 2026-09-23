@@ -158,3 +158,6 @@ frontend-vue/coverage/
 
 # ⑥ 系统文件
 .DS_Store
+
+# 本机专属的 AI 助手补充（DSH 的 AGENTS.local.md 本地覆盖层，不入库）
+AGENTS.local.md
