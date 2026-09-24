@@ -260,3 +260,58 @@ def route_intent(question: str) -> str:
     if _hits(q, _CHAT_KEYS):
         return "chat"
     return "general"
+
+
+# ==================== 由"调用过的工具"反推意图 ====================
+# ⚠ 为什么要按**数据域**而不是按**某一个工具名**：
+#   此前只把 `shelf_popularity` 当作"热度域"，于是"客流(hourly_traffic) + 告警(anomaly_alerts)"
+#   这种横跨两域的提问被判成 `anomaly`（CI mem_04 实测：期望 both、实际 anomaly，且随调用顺序时红时绿）。
+#   现在先把工具映射到域，再按**域集合**判定 —— 与调用顺序无关，标签也稳定。
+TOOL_DOMAINS: dict[str, str] = {
+    # 热度 / 客流分析域（同一类"经营数据"口径，答这类问题时常与告警并列出现）
+    "shelf_popularity": "popularity",
+    "heat_report": "popularity",
+    "hourly_traffic": "popularity",       # 时段客流
+    "zone_depth": "popularity",           # 区域深度兴趣
+    "movement_paths": "popularity",       # 顾客动线
+    "period_comparison": "popularity",    # 同期对比（热度/客流口径）
+    # 销量 / 转化（单独一域：不参与 both 判定，避免把"销量"问题标成热度）
+    "sales_comparison": "sales",
+    # 异常告警域
+    "anomaly_alerts": "anomaly",
+    # 表情域
+    "emotion_stats": "emotion",
+    # 记忆 / 归档（不影响业务意图）
+    "search_chat_history": "memory",
+    "get_ops_archive": "memory",
+}
+
+
+def _domain_of(tool_name: str) -> str | None:
+    """工具名 → 数据域（用包含匹配，兼容 `get_xxx` 前缀与别名）。"""
+    for key, domain in TOOL_DOMAINS.items():
+        if key in (tool_name or ""):
+            return domain
+    return None
+
+
+def infer_intent_from_tools(tool_names) -> str:
+    """由**本轮调用过的工具集合**反推意图（与调用顺序无关）。
+
+    规则：
+      - 热度/客流域 **与** 告警域都被查过 → `both`
+      - 只查热度/客流域 → `popularity`
+      - 只查告警域 → `anomaly`
+      - 只查表情域 → `emotion`
+      - 其它（含只查记忆/销量、什么都没查）→ `general`
+    """
+    domains = {d for d in (_domain_of(n) for n in (tool_names or [])) if d}
+    if "popularity" in domains and "anomaly" in domains:
+        return "both"
+    if "popularity" in domains:
+        return "popularity"
+    if "anomaly" in domains:
+        return "anomaly"
+    if "emotion" in domains:
+        return "emotion"
+    return "general"

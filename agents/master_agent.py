@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.base_agent import create_llm, create_memory, langfuse_available, observe_langfuse
 from agents import tool_guard
+from agents.intent_router import infer_intent_from_tools
 from config.settings import AGENT_MAX_TOOL_CALLS_PER_TURN, AGENT_RECURSION_LIMIT
 # 会话归属过滤（B3）：Agent 工具与记忆检索拿不到 request，靠请求上下文取当前账号
 from auth_context import owner_filter
@@ -1350,6 +1351,7 @@ class MasterAgent:
         """从 Agent 返回的 messages 反推意图与数据，并收集工具调用记录。"""
         answer = result["messages"][-1].content
         intent = "general"
+        called_tools: list[str] = []
         pop_data = None
         anom_data = None
         tool_logs: list[dict] = []
@@ -1357,18 +1359,7 @@ class MasterAgent:
             if hasattr(msg, "tool_calls") and msg.tool_calls:
                 for tc in msg.tool_calls:
                     tool_name = tc.get("name", "")
-                    if "shelf_popularity" in tool_name:
-                        if intent == "anomaly":
-                            intent = "both"
-                        elif intent != "both":
-                            intent = "popularity"
-                    elif "anomaly_alerts" in tool_name:
-                        if intent == "popularity":
-                            intent = "both"
-                        # both 一旦成立保持 both（修复：多轮调用时
-                        # [anomaly→shelf→anomaly] 会把 both 打回 anomaly 的抖动）
-                        elif intent != "both":
-                            intent = "anomaly"
+                    called_tools.append(tool_name)
                     tool_logs.append({
                         "name": tool_name,
                         "args": tc.get("args", {}),
@@ -1392,6 +1383,9 @@ class MasterAgent:
                         break
 
         # 获取实际数据（如果 tool 被调用了）
+        # 意图 = 本轮调用过的**工具集合**（与顺序无关）→ 见 agents/intent_router.infer_intent_from_tools
+        intent = infer_intent_from_tools(called_tools)
+
         if pop_data is None and intent in ("popularity", "both", "general"):
             pop_data = self.pop_skill.get_stats()
         if anom_data is None and intent in ("anomaly", "both", "general"):
