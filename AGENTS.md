@@ -21,7 +21,7 @@
 
 | 目的 | 命令 |
 |---|---|
-| 单测（离线，秒级） | `python tests/run_tests.py` |
+| 单测（离线，秒级） | `python tests/run_tests.py` —— ⚠ 自研运行器：**不调用** pytest 的 `setup_function/fixture`，用例必须自己复位共享状态；导入失败按失败处理（`TESTS_ALLOW_IMPORT_SKIP=1` 可放行） |
 | Agent 评测门禁（需 MySQL + LLM Key） | `python evals/run_evals.py` |
 | 前端构建（改动 `frontend-vue/` 或 `public/` 后必跑） | `cd frontend-vue && npm run build` |
 | 本地起服务 | `python run.py`（<http://127.0.0.1:8000>） |

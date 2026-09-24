@@ -12,6 +12,8 @@ from langchain_core.tools import tool
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.base_agent import create_llm, create_memory, langfuse_available, observe_langfuse
+from agents import tool_guard
+from config.settings import AGENT_MAX_TOOL_CALLS_PER_TURN, AGENT_RECURSION_LIMIT
 # 会话归属过滤（B3）：Agent 工具与记忆检索拿不到 request，靠请求上下文取当前账号
 from auth_context import owner_filter
 
@@ -481,6 +483,11 @@ class MasterAgent:
         if emotion_skill is not None:
             self.tools.append(get_emotion_stats)
 
+        # 工具护栏（agents/tool_guard.py）：每轮去重 + 总次数上限（防"空数据反复重试"）。
+        # 包装失败会原样保留工具 —— 宁可少一个护栏，也不能让 Agent 起不来。
+        self.tools = tool_guard.install_guard(self.tools)
+        self._turn_seq = 0
+
         # 创建 LangChain agent
         self.memory = create_memory()
         self.agent = create_agent(
@@ -534,10 +541,11 @@ class MasterAgent:
                     if history_context else long_term_context
                 )
             query_with_history = self._compose_query(query, history_context)
-            # 调用 LangChain agent
+            # 调用 LangChain agent（先登记本轮工具护栏）
+            self._begin_turn()
             result = self.agent.invoke(
                 {"messages": [HumanMessage(content=query_with_history)]},
-                config={"thread_id": session_id},
+                config={"thread_id": session_id, "recursion_limit": AGENT_RECURSION_LIMIT},
             )
             usage = self._lf_usage_from_result(result)
             answer, intent, pop_data, anom_data, alerts, suggestions, tool_logs = self._analyze_result(result)
@@ -596,9 +604,10 @@ class MasterAgent:
                     if history_context else long_term_context
                 )
             query_with_history = self._compose_query(query, history_context)
+            self._begin_turn()
             result = await self.agent.ainvoke(
                 {"messages": [HumanMessage(content=query_with_history)]},
-                config={"thread_id": session_id},
+                config={"thread_id": session_id, "recursion_limit": AGENT_RECURSION_LIMIT},
             )
             usage = self._lf_usage_from_result(result)
             answer, intent, pop_data, anom_data, alerts, suggestions, tool_logs = self._analyze_result(result)
@@ -1018,9 +1027,10 @@ class MasterAgent:
                     if history_context else long_term_context
                 )
             query_with_history = self._compose_query(query, history_context)
+            self._begin_turn()
             async for event in self.agent.astream_events(
                 {"messages": [HumanMessage(content=query_with_history)]},
-                config={"thread_id": session_id},
+                config={"thread_id": session_id, "recursion_limit": AGENT_RECURSION_LIMIT},
                 version="v2",
             ):
                 kind = event.get("event", "")
@@ -1306,6 +1316,15 @@ class MasterAgent:
             print(f"[Reflection] 校验异常: {e}")
         return None, None
 
+    def _begin_turn(self) -> None:
+        """登记新一轮工具护栏（每次调用 Agent 前调用一次）。
+
+        状态放在 ContextVar 里（与 `auth_context` 把账号传进工具是同一机制），
+        对同步 / 异步 / 流式三条路径都生效；`AGENT_MAX_TOOL_CALLS_PER_TURN=0` 时完全关闭。
+        """
+        self._turn_seq += 1
+        tool_guard.set_turn(self._turn_seq, AGENT_MAX_TOOL_CALLS_PER_TURN)
+
     def _retry_invoke(self, query, history_context, session_id, last_answer, feedback):
         """带反馈重新 invoke（反思消息追加进同一 thread）。"""
         retry_msg = (
@@ -1314,6 +1333,8 @@ class MasterAgent:
             f"你上一次的回答：{(last_answer or '')[:300]}\n"
             f"请重新分析并给出更完整、准确的回答（必要时重新调用工具）。"
         )
+        # 反思重试算**新一轮**：它本来就可能需要重新查数据（护栏预算重新计）
+        self._begin_turn()
         return self.agent.invoke(
             {
                 "messages": [
@@ -1322,7 +1343,7 @@ class MasterAgent:
                     HumanMessage(content=retry_msg),
                 ]
             },
-            config={"thread_id": session_id},
+            config={"thread_id": session_id, "recursion_limit": AGENT_RECURSION_LIMIT},
         )
 
     def _analyze_result(self, result: dict) -> tuple:

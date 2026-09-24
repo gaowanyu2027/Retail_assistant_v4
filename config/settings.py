@@ -385,6 +385,16 @@ LLM_PRICE_OUT_PER_MTOK = float(os.environ.get("LLM_PRICE_OUT_PER_MTOK") or 0)
 #     ② 本闸门：按账号 + 全局的**每日提问数**上限，超限直接 429、**不打 LLM**。
 #   两个上限都为 0 时闸门关闭 —— 此时**一次计数查询都不做**（零开销）。
 LLM_DAILY_QUOTA_PER_USER = int(os.environ.get("LLM_DAILY_QUOTA_PER_USER") or 0)
+
+# ==================== Agent 工具调用护栏（防"空数据时反复重试"）====================
+# 背景（CI 实测）：库为空/采集未启动时，Agent 曾把同一对工具反复调用约 30 次，
+# 回答退化成"重复查询不会有新结果"，成本与延迟被放大十几倍。
+#   - 每轮（一次提问）内"相同工具 + 相同参数"只执行一次（返回首次结果 + 说明）；
+#   - 每轮工具调用总数上限，超出则返回提示，让模型基于已有信息作答；
+#   - 0 = 关闭护栏（回到旧行为）。
+AGENT_MAX_TOOL_CALLS_PER_TURN = int(os.environ.get("AGENT_MAX_TOOL_CALLS_PER_TURN") or 8)
+# LangGraph 递归上限（兜底：即使护栏被绕过，也不会无限循环）
+AGENT_RECURSION_LIMIT = int(os.environ.get("AGENT_RECURSION_LIMIT") or 25)
 LLM_DAILY_QUOTA_GLOBAL = int(os.environ.get("LLM_DAILY_QUOTA_GLOBAL") or 0)
 # OpenAI 兼容接口地址
 LLM_BASE_URL = "https://api.deepseek.com"
