@@ -48,6 +48,7 @@
 | 构建突然要十几分钟 | 改动 Dockerfile 里**安装步骤那条 `RUN` 的文本**（或传 `--build-arg`）会使 pip 层缓存失效 |
 | 服务器上 `git pull` 失败 | 该 ECS **访问不了 GitHub** → 部署走"本机打包 → `scp` → 解包 → 重建"，文档里不要写 `git pull` |
 | 脚本遍历文件名时漏掉中文名文件 | `git ls-files` 默认把非 ASCII 名转成八进制转义 → 用 `git -c core.quotepath=false ls-files` |
+| 代码或文档里看到 `run#N` | 指 **2026-09-25 仓库迁移之前**该 workflow 的运行编号；迁移后同名 workflow 从 `#1` 重新计数，旧运行记录不随仓库提供 → 要复现请按 `改进记录.md` 里的本地步骤重跑（需要 LLM Key 与 MySQL 两处外部条件） |
 
 ## 5. 权限与数据隔离（改相关代码前必读）
 

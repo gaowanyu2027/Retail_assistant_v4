@@ -53,7 +53,7 @@ curl.exe -H "Authorization: Bearer <会话令牌>" http://127.0.0.1:8000/api/met
 |---|---|---|---|
 | `01-chat.png` | 1440x182 | 43KB | 自然语言问答：**到访 23 人次 / 2号货架热度 100 / 3号 47.7 / 1号零到访** + **数据可信度提示**（"视频源未启动…不代表真实客流"） |
 | `02-eval.png` | 1440x859 | 262KB | 本机评测：`85/85 / 100.0%` + 完整明细表 |
-| `03-ci.png` | 1440x794 | 71KB | GitHub Actions run#10 **双绿**（unit ✅ + eval ✅）+ eval summary 85/85 |
+| `03-ci.png` | 1440x794 | 71KB | GitHub Actions 双 job **全绿**（unit ✅ + eval ✅）+ eval summary 85/85 |
 | `04-monitor.png` | 762x531 | 53KB | 实时监控：`Frame:245 Tracks:1` + 三个货架 ROI + `帧号245 活跃轨迹1 总访客1`；**人脸已高斯模糊脱敏** |
 | `05-dashboard.png` | 813x624 | 16KB | 货架热度排行（2号100 / 3号37 / 1号0）+ 榜单 |
 | `06-metrics.png` | 1440x260 | 117KB | `GET /api/metrics/llm` 真实返回：calls/tokens/latency(p50,p95)/by_tag/by_model/**report_gate**（Bearer 已打码） |
