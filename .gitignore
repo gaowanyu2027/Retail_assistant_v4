@@ -38,20 +38,9 @@ venv/
 *.log
 data/_*_tmp/
 *.tmp
-测试图片.png
-Docker截图.png
 Thumbs.db
 Desktop.ini
 evals/reports/
-
-# ===== 仓库外笔记（勿推送） =====
-*STAR*.md
-JD*.md
-# 与项目无关的笔记与中间产物（非项目文档）
-agent.md
-# PDF 一律不入库（含笔记类与生成的文档；确实要入库时用 git add -f）
-*.pdf
-.pdf_text_*.txt
 
 # ===== 临时安装 / 测试残留 =====
 # pip 的临时工作目录（用 --temp .pip_tmp 就地安装留下的解包/构建目录）
@@ -62,10 +51,6 @@ __wtest/
 # ===== 生成物 / 杂图 =====
 # 由 gen_kb_pdf.py 生成，可随时重新生成
 业务知识库_*.pdf
-微信图片_*.jpg
-
-# ===== 测试截图（含真实对话内容） =====
-ScreenShot_*.png
 
 # ===== 数据库文件（保险） =====
 *.db
