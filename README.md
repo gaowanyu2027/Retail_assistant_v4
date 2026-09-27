@@ -94,7 +94,7 @@ flowchart TB
 | **感知层（CV）** | YOLO 行人检测 + 跟踪 + ROI 热度、异常行为告警、人脸表情识别；按机位类型加载模块 |
 | **交付** | Docker Compose 四服务、**非 root** 容器、镜像 `tag@digest`、`requirements.lock.txt` 精确重建 |
 
-## Agent 侧证据（最常被追问的三件事）
+## Agent 侧证据
 
 ### ① "你的 Agent 怎么评测？" —— 85 条**断言式**用例，不靠 LLM 自评
 
