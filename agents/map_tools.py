@@ -62,9 +62,20 @@ def _request(path: str, params: dict) -> dict:
         params["sn"] = sn
     try:
         resp = httpx.get(f"{_BASE}{path}", params=params, timeout=_TIMEOUT)
-        data = resp.json()
     except Exception as e:
         return {"status": "error", "message": f"百度地图请求失败: {e}", "path": path}
+    # 先判 HTTP 状态：百度对"服务路径不匹配/权限不符"会 302 到错误页（空 body），
+    # 直接 resp.json() 只会得到一句无意义的 "Expecting value"（实测踩过）。
+    if resp.status_code != 200:
+        return {"status": "error",
+                "message": f"百度地图 HTTP {resp.status_code}（服务路径或权限不匹配）",
+                "path": path}
+    try:
+        data = resp.json()
+    except Exception:
+        return {"status": "error",
+                "message": "百度地图返回非 JSON（可能是错误页或被网关拦截）",
+                "path": path, "body_head": resp.text[:120]}
     if data.get("status") != 0:
         return {"status": "error", "message": f"百度地图返回{data.get('status')}: {data.get('message','')}", "path": path}
     return data
@@ -191,12 +202,21 @@ def batch_geocode(addresses: list) -> str:
     return out
 
 
+_ROUTE_PATH = "/routematrix/v2/driving"   # 批量算路（开放平台"批量算路"服务）
+# 注：旧路径 /distancematrix/v1/driving 会 302 到百度错误页（实测），不要用。
+
+
 def calc_distances(origin_lng: float, origin_lat: float, dests: list) -> str:
     """
     距离测算：计算仓库/门店(origin)到多个目标点(dests)的驾车距离，辅助供货调度。
 
     参数 origin_lng/origin_lat: 起点坐标
     参数 dests: 目标点列表 [{"lng":..., "lat":...} , ...] 或 [lng,lat] 对
+
+    返回 `mode`：
+      - `driving`：真实驾车距离（批量算路，`/routematrix/v2/driving`）
+      - `straight_line`：算路不可用（配额/权限/网络）时的**直线距离降级**，
+        同时给 `degrade_reason`，避免把直线距离当成驾车距离用。
     """
     if not dests:
         return json.dumps({"status": "error", "message": "dests 不能为空"}, ensure_ascii=False)
@@ -206,25 +226,62 @@ def calc_distances(origin_lng: float, origin_lat: float, dests: list) -> str:
             dest_coords.append(f"{d['lat']},{d['lng']}")
         elif isinstance(d, (list, tuple)):
             dest_coords.append(f"{d[1]},{d[0]}")
-    data = _request("/distancematrix/v1/driving", {
+
+    cache_key = "dist:" + hashlib.md5(
+        (f"{origin_lng},{origin_lat}|" + "|".join(dest_coords)).encode()
+    ).hexdigest()
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    data = _request(_ROUTE_PATH, {
         "origins": f"{origin_lat},{origin_lng}",
         "destinations": "|".join(dest_coords),
     })
-    if data.get("status") != 0:
-        return json.dumps(data, ensure_ascii=False)
-    rows = data.get("result", {}).get("rows", [])
-    elems = rows[0].get("elements", []) if rows else []
-    out = []
-    for i, e in enumerate(elems):
-        dist = e.get("distance", {}).get("value", 0)
-        dur = e.get("duration", {}).get("value", 0)
-        out.append({
-            "dest_index": i, "dest": dest_coords[i] if i < len(dest_coords) else None,
-            "distance_m": dist, "duration_s": dur,
-        })
-    total_route = sum(d["distance_m"] for d in out)
-    return json.dumps({
+
+    routes = []
+    if data.get("status") == 0:
+        # routematrix 的 result 是**平铺列表**（按 destinations 顺序，一条一个终点），
+        # 不是 distancematrix 那种 result.rows[0].elements 嵌套结构。
+        for i, e in enumerate(data.get("result", []) or []):
+            dist = e.get("distance", {}) or {}
+            dur = e.get("duration", {}) or {}
+            routes.append({
+                "dest_index": i,
+                "dest": dest_coords[i] if i < len(dest_coords) else None,
+                "distance_m": dist.get("value", 0),
+                "distance_text": dist.get("text", ""),
+                "duration_s": dur.get("value", 0),
+                "duration_text": dur.get("text", ""),
+                "mode": "driving",
+            })
+
+    degrade_reason = None
+    if not routes:
+        degrade_reason = data.get("message") or "算路服务不可用"
+        for i, c in enumerate(dest_coords):
+            try:
+                lat_s, lng_s = c.split(",")
+                meters = _haversine(origin_lng, origin_lat, float(lng_s), float(lat_s))
+            except Exception:
+                meters = 0.0
+            routes.append({
+                "dest_index": i, "dest": c,
+                "distance_m": round(meters, 1),
+                "distance_text": f"{meters / 1000:.1f}公里(直线)",
+                "duration_s": None, "duration_text": "",
+                "mode": "straight_line",
+            })
+
+    total = sum(r["distance_m"] or 0 for r in routes)
+    out = {
         "origin": {"lng": origin_lng, "lat": origin_lat},
-        "routes": out,
-        "total_distance_m": None if not total_route else total_route,
-    }, ensure_ascii=False)
+        "routes": routes,
+        "mode": routes[0]["mode"] if routes else "unknown",
+        "total_distance_m": round(total, 1) if total else None,
+    }
+    if degrade_reason:
+        out["degrade_reason"] = degrade_reason
+    text = json.dumps(out, ensure_ascii=False)
+    _cache_set(cache_key, text)
+    return text

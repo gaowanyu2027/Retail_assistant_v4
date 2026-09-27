@@ -905,9 +905,10 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计：
 
 竞品/商圈/地理编码/距离测算，WebAPI 定制 + MCP 可选：
 
-- `agents/map_tools.py`：4 个业务工具（`check_competitors` / `analyze_surrounding` / `batch_geocode` / `calc_distances`），服务端 AK + SW 签名
+- `agents/map_tools.py`：4 个业务工具（`check_competitors` / `analyze_surrounding` / `batch_geocode` / `calc_distances`），服务端 AK + SK（sn 签名）
+  - 距离测算走**批量算路** `/routematrix/v2/driving`；算路不可用时**降级为直线距离**，返回带 `mode: straight_line` 与 `degrade_reason`（不把直线当驾车用）
 - `agents/mcp_maps.py`：百度官方 MCP（14 个通用地图工具），设 `BAIDU_MCP_ENABLED=1` 叠加
-- 环境变量：`baidu_map_ak` / `baidu_map_sk`
+- 环境变量：`baidu_map_ak` / `baidu_map_sk`（**未配置时工具返回可读错误，不阻塞主流程**）
 - 接口：`/api/maps/geocode` / `competitors` / `surrounding` / `distance`
 
 Agent 可回答："我门店周边竞争如何"→ 返回竞品数量/分布/商圈潜力 + 业务建议。
