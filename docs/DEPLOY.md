@@ -173,7 +173,8 @@ sudo docker compose logs --tail=100 backend # 看日志
 
 - **数据**：`mysql8_volume` / `qdrant-docker` / `redis_data` 是命名卷；应用侧 `./data` 是 bind mount
   （含 `auth.db`）。`down` 不加 `-v` 都不会删数据；
-- **换版本**：`git pull && docker compose up -d --build`；
+- **换版本**：走 CD（Actions → `deploy`，见下节），或手工"本机打包 → `scp` → 服务器解包 → `docker compose up -d --build`"；
+  **不要**在服务器上 `git pull`（这台 ECS 访问不了 GitHub，见 §13）；
 - **费用**：实例免费试用期到 **2026-12-02**（之后按小时计费）；EIP 单独出账单；
   流量按 GB 计费（免费额度 20GB）→ 演示时把 `VIDEO_FPS` 调低、别长时间挂着看视频。
 
@@ -195,6 +196,9 @@ GitHub Actions（runner 上有代码）──scp 源码包──> 服务器 /tmp
 
 **安全要点**：服务器上建**单独的部署账号**（只加 `docker` 组、不用 root）、禁密码登录、`PermitRootLogin no`；
 `.env` 不进仓库（本来就没进，见 `.gitignore`）。首次部署前手动跑过一遍 `docker compose up -d --build` 最稳。
+
+> 部署账号的**具体命令与部署前自查**（属主、公钥、落地目录权限该量哪几项）见 `部署流程.md` §3.15；
+> "以 root 跑过的环境换账号"踩过的坑记在同文件坑 23。
 
 ### 13.1 版本保留与回滚（任意往期）
 

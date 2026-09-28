@@ -28,13 +28,17 @@
 #   DEPLOY_USER     部署用户（**不要用 root**，见下）
 #   DEPLOY_SSH_KEY  部署专用私钥（ed25519）；对应公钥加到该用户 ~/.ssh/authorized_keys
 #
-# ## 四、服务器侧一次性准备（最小权限）
+# ## 四、服务器侧一次性准备（最小权限；完整自查见 部署流程.md §3.15）
 #   adduser --disabled-password --gecos "" deploy
-#   usermod -aG docker deploy
-#   mkdir -p /home/deploy/.ssh && chmod 700 /home/deploy/.ssh
-#   echo '<部署公钥>' >> /home/deploy/.ssh/authorized_keys && chmod 600 /home/deploy/.ssh/authorized_keys
+#   usermod -aG docker deploy                      # 组权限在**新登录会话**才生效
+#   install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
 #   chown -R deploy:deploy /opt/retail-assistant /opt/releases
-#   # 加固：/etc/ssh/sshd_config → PermitRootLogin no（确认能登录后再改）
+#   rm -rf /tmp/retail-deploy                      # 以 root 跑过的 CD 留下的落地目录，deploy 写不进（见 部署流程.md 坑 23）
+#   # 公钥**别手抄**成 echo '<部署公钥>'：占位符会被原样写进 authorized_keys（已踩两次，坑 19/23）。在本机用管道直送：
+#   #   cat ~/.ssh/retail_deploy.pub | ssh root@<服务器IP> \
+#   #     'cat > /tmp/k && install -m 600 -o deploy -g deploy /tmp/k /home/deploy/.ssh/authorized_keys && rm -f /tmp/k'
+#   #   ssh -i ~/.ssh/retail_deploy deploy@<服务器IP> "whoami && id -nG && docker ps --format '{{.Names}}'"
+#   # 加固：/etc/ssh/sshd_config → PermitRootLogin no（确认 deploy 能登录之后再改）
 #
 # ## 五、注意
 # - **数据不参与回滚**：`data/`（auth.db）与 MySQL/Qdrant/Redis 卷原地继续用；
