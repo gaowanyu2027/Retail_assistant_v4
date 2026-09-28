@@ -66,14 +66,15 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 打包源码（排除 .git 与本地文件）
+      - name: 打包源码（只含已跟踪文件，排除 .git 与本地文件）
         if: ${{ inputs.rollback_to == '' }}
         run: |
-          tar --exclude=.git \
-              --exclude=node_modules \
-              --exclude=__pycache__ \
-              -czf src.tar.gz .
+          # 用 git archive：只打包已跟踪文件（自动排除 .git / .env / data / 模型等），
+          # 也避免 `tar -czf src.tar.gz .` 把输出写进被归档目录导致
+          # "tar: .: file changed as we read it"（实测踩过，见 部署流程.md 坑 21）。
+          git archive --format=tar.gz -o src.tar.gz HEAD
           ls -lh src.tar.gz
+          tar -tzf src.tar.gz | wc -l
 
       - name: 上传到服务器
         if: ${{ inputs.rollback_to == '' }}
