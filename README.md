@@ -4,7 +4,7 @@
   <a href="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml">
     <img src="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml/badge.svg?branch=main" alt="CI（单测门禁 + 评测门禁）">
   </a>
-  <img src="https://img.shields.io/badge/unit%20tests-161%20passed-2ea44f" alt="161 个单测用例">
+  <img src="https://img.shields.io/badge/unit%20tests-205%20passed-2ea44f" alt="205 个单测用例">
   <img src="https://img.shields.io/badge/eval%20cases-85-1f6feb" alt="85 条评测集">
   <img src="https://img.shields.io/badge/python-3.13-3776AB" alt="Python 3.13">
   <img src="https://img.shields.io/badge/docker-compose-2496ED" alt="Docker Compose">
@@ -85,12 +85,12 @@ flowchart TB
 | 维度 | 现状 |
 |---|---|
 | **Agent** | **21 个模块**：意图路由 → LangGraph StateGraph 编排 → DeepSeek；工具含 SQL 查询、业务分析、地图 MCP、向量记忆；**LLM 用量/延迟/成本可观测**（按用途归因） |
-| **评测与质量** | **85 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **161** 个单测用例 + Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
+| **评测与质量** | **85 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **205** 个单测用例（`python tests/run_tests.py`，秒级跑完）+ Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
 | **可靠性** | 向量层熔断 + 舱壁、外部依赖降级、**静默失败治理**（错误通道、看门狗）、健康检查 liveness/readiness 分离 |
 | **数据可信度** | 断流与真实零值分离、来源显式标注（`pos`/`simulated`/`test`/`video`）、问答链路带可信度门禁 |
 | **接口** | 约 **105** 个（13 个路由模块：问答 / 分析 / 报告 / 视频流 / 鉴权 / 地图 / 语音 / TTS） |
 | **数据层** | MySQL（业务）+ SQLite（鉴权 / 降级回退）+ Qdrant（向量，熔断 + 舱壁）+ Redis（常驻） |
-| **安全** | 登录鉴权 + 双角色权限矩阵（26 个门禁点）、会话滑动续期、**工具调用的入参校验与 SSRF 守卫**、上传四道约束、安全响应头 |
+| **安全** | 登录鉴权 + **三档权限矩阵**（`root` / `platform` / `viewer`；`require_perm` 30 处调用，写路由 22 条挂权限 + 17 条有意白名单、由守卫测试固化）、会话滑动续期、**工具调用的入参校验与 SSRF 守卫**、上传四道约束、安全响应头 |
 | **感知层（CV）** | YOLO 行人检测 + 跟踪 + ROI 热度、异常行为告警、人脸表情识别；按机位类型加载模块 |
 | **交付** | Docker Compose 四服务、**非 root** 容器、镜像 `tag@digest`、`requirements.lock.txt` 精确重建 |
 
@@ -199,7 +199,7 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 
 | 维度 | v3 | v4 |
 |---|---|---|
-| 鉴权 | 完全开放 | 账号密码登录 + root/platform 双角色 + 限流 + 一次性票据 |
+| 鉴权 | 完全开放 | 账号密码登录 + 三档角色（root/platform/viewer）+ 限流 + 一次性票据 |
 | 端 | 仅网页 | 网页 + **微信小程序**（各自适配鉴权） |
 | Agent | 8 个工具、函数式汇报 | **15 个工具** + **LangGraph StateGraph** 汇报工作流 |
 | 数据可信 | 无 | **可信度门禁** + **来源显式标注**（pos/simulated/test） |
