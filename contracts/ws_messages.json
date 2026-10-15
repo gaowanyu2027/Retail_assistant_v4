@@ -1,0 +1,217 @@
+{
+  "schema": 1,
+  "generated_by": "contracts/export_fixtures.py",
+  "source": "ws_protocol.py（唯一协议定义处）",
+  "frame_packet": {
+    "description": "[4B 大端 frame_id][JPEG 原始字节]。与迁移前 base64 往返的下发字节逐字等价 —— 去往返只改内部存储形态，对客户端零感知。",
+    "header_bytes": 4,
+    "byte_order": "big-endian",
+    "examples": [
+      {
+        "frame_id": 1,
+        "jpeg_hex": "ffd8ffd9",
+        "packet_hex": "00000001ffd8ffd9"
+      },
+      {
+        "frame_id": 617,
+        "jpeg_hex": "ffd8ffd9",
+        "packet_hex": "00000269ffd8ffd9"
+      },
+      {
+        "frame_id": 100000,
+        "jpeg_hex": "ffd8ff",
+        "packet_hex": "000186a0ffd8ff"
+      }
+    ]
+  },
+  "metadata_schedule": {
+    "interval_setting": "config.settings.WS_METADATA_INTERVAL",
+    "interval": 5,
+    "rule": "frame_id == 1 or frame_id % interval == 0",
+    "examples": {
+      "1": true,
+      "2": false,
+      "4": false,
+      "5": true,
+      "6": false,
+      "10": true,
+      "11": false,
+      "100": true
+    }
+  },
+  "frame_metadata_examples": [
+    {
+      "result": {
+        "frame_id": 617,
+        "timestamp": 1729000000.25,
+        "tracks": [
+          {
+            "track_id": 1,
+            "center": [
+              640,
+              360
+            ],
+            "is_staff": false,
+            "anomaly_score": 0.12
+          }
+        ],
+        "events": [
+          {
+            "type": "zone_enter",
+            "zone_id": "shelf_1",
+            "track_id": 1,
+            "detail": "进入货架区"
+          }
+        ],
+        "active_suspicious": [
+          {
+            "track_id": 1,
+            "score": 0.66
+          }
+        ]
+      },
+      "mode": "retail",
+      "note": "零售模式（无 faces 键）",
+      "expect": {
+        "type": "frame",
+        "frame_id": 617,
+        "timestamp": 1729000000.25,
+        "tracks": [
+          {
+            "track_id": 1,
+            "center": [
+              640,
+              360
+            ],
+            "is_staff": false,
+            "anomaly_score": 0.12
+          }
+        ],
+        "events": [
+          {
+            "type": "zone_enter",
+            "zone_id": "shelf_1",
+            "track_id": 1,
+            "detail": "进入货架区"
+          }
+        ],
+        "active_suspicious": [
+          {
+            "track_id": 1,
+            "score": 0.66
+          }
+        ],
+        "mode": "retail"
+      }
+    },
+    {
+      "result": {
+        "frame_id": 5,
+        "timestamp": 1729000000.5,
+        "tracks": [],
+        "events": [],
+        "active_suspicious": [],
+        "faces": [
+          {
+            "emotion": "happy",
+            "emotion_cn": "高兴",
+            "conf": 0.91
+          }
+        ]
+      },
+      "mode": "emotion",
+      "note": "表情模式（带 faces 键）",
+      "expect": {
+        "type": "frame",
+        "frame_id": 5,
+        "timestamp": 1729000000.5,
+        "tracks": [],
+        "events": [],
+        "active_suspicious": [],
+        "mode": "emotion",
+        "faces": [
+          {
+            "emotion": "happy",
+            "emotion_cn": "高兴",
+            "conf": 0.91
+          }
+        ]
+      }
+    }
+  ],
+  "source_status_examples": [
+    {
+      "kwargs": {
+        "state": "running",
+        "echo": {
+          "kind": "file",
+          "path": "/x.mp4"
+        },
+        "message": "视频源已开始输出画面",
+        "extra": {
+          "frame_id": 1
+        }
+      },
+      "expect": {
+        "type": "source_status",
+        "state": "running",
+        "source": {
+          "kind": "file",
+          "path": "/x.mp4"
+        },
+        "message": "视频源已开始输出画面",
+        "frame_id": 1
+      }
+    },
+    {
+      "kwargs": {
+        "state": "error",
+        "echo": {},
+        "code": "open_timeout",
+        "message": "打开超时：超过等待上限没有产出画面，已停止。"
+      },
+      "expect": {
+        "type": "source_status",
+        "state": "error",
+        "source": {},
+        "code": "open_timeout",
+        "message": "打开超时：超过等待上限没有产出画面，已停止。"
+      }
+    },
+    {
+      "kwargs": {
+        "state": "stopped",
+        "echo": {},
+        "message": "视频已停止"
+      },
+      "expect": {
+        "type": "source_status",
+        "state": "stopped",
+        "source": {},
+        "message": "视频已停止"
+      }
+    },
+    {
+      "kwargs": {
+        "state": "finished",
+        "echo": {
+          "kind": "client"
+        },
+        "code": "finished",
+        "message": "视频播放完毕"
+      },
+      "expect": {
+        "type": "source_status",
+        "state": "finished",
+        "source": {
+          "kind": "client"
+        },
+        "code": "finished",
+        "message": "视频播放完毕"
+      }
+    }
+  ],
+  "messages": {
+    "client_camera_busy": "已有其他用户正在使用「本机摄像头」模式，请稍后重试；多人同时观看请使用「服务器摄像头」。（若那是你之前失效的连接，刷新/关闭那个页面即可释放）"
+  }
+}

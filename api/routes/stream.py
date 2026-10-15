@@ -40,10 +40,16 @@ from config.settings import (
     VIDEO_IDLE_SLEEP_SECONDS,
     VIDEO_OPEN_TIMEOUT_SECONDS,
     WS_FPS_LOG_INTERVAL,
-    WS_METADATA_INTERVAL,
     WS_POLL_SLEEP_SECONDS,
     WS_RECEIVE_TIMEOUT_SECONDS,
     WS_SEND_INTERVAL_SECONDS,
+)
+from ws_protocol import (
+    CLIENT_CAMERA_BUSY_MESSAGE,
+    frame_metadata_message,
+    frame_packet,
+    should_send_metadata,
+    source_status_message,
 )
 
 router = APIRouter()
@@ -69,14 +75,16 @@ _active: dict[str, Any] = {
 _run_token = object()
 
 _latest_result: dict | None = None
-_latest_frame_b64: str | None = None
+# 最新一帧的**原始 JPEG 字节**（曾以 base64 字符串存放；去掉了 encode/decode 往返，
+# 下发字节逐字不变 —— 见 ws_protocol.frame_packet 与 contracts/ws_messages.json）
+_latest_frame_jpeg: bytes | None = None
 # 当前处理线程的引用：供 get_stream_status() 做「线程是否真在跑」的校验，
 # 避免出现"线程已死但状态仍报 running"的假象（见 _guard_processing_thread）
 _bg_thread_ref: "threading.Thread | None" = None
 # 「本机摄像头模式」的会话归属者（websocket 对象）。
 #
 # 为什么需要这个：本项目的视频处理会话是**进程级单份**的（_active / _run_token /
-# _latest_result / _latest_frame_b64 / _client_frames 都是模块级），这对
+# _latest_result / _latest_frame_jpeg / _client_frames 都是模块级），这对
 # 「服务端摄像头」是合理设计——一个源、多人观看。但「本机摄像头」模式是把**每个
 # 浏览器自己的摄像头帧**推进同一个 _client_frames 队列，就必然互相踩：
 #
@@ -261,7 +269,7 @@ def stop_emotion_camera() -> dict:
 
 def _stop_internal():
     """内部停止（统一复位运行态，含表情模式状态）"""
-    global _latest_result, _latest_frame_b64
+    global _latest_result, _latest_frame_jpeg
     with _lock:
         _active["running"] = False
         _active["source"] = None
@@ -269,7 +277,7 @@ def _stop_internal():
         _emo_state["running"] = False
         _emo_state["start_time"] = 0.0
     _latest_result = None
-    _latest_frame_b64 = None
+    _latest_frame_jpeg = None
 
 
 async def shutdown_websockets():
@@ -308,7 +316,7 @@ def _adaptive_fps_wait(frame_start: float):
 
 def _processing_thread_emotion(cap_source, face_emotion, run_token):
     """表情模式后台线程：仅做人脸检测+表情识别+SQLite入库"""
-    global _latest_result, _latest_frame_b64
+    global _latest_result, _latest_frame_jpeg
     if face_emotion is None:
         print("[WS] 表情检测器未加载，表情模式处理线程无法启动")
         return
@@ -420,7 +428,7 @@ def _processing_thread_emotion(cap_source, face_emotion, run_token):
         if SANITIZE_FACES and faces:
             annotated = face_emotion.mask_faces(annotated, faces)
         _, buffer = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, EMOTION_JPEG_QUALITY])
-        _latest_frame_b64 = base64.b64encode(buffer).decode()
+        _latest_frame_jpeg = buffer.tobytes()
 
         _latest_result = {
             "frame_id": frame_id,
@@ -480,7 +488,7 @@ def _guard_processing_thread(fn, *args) -> None:
 
 def _processing_thread_retail(cap_source, processor, pop_skill, anom_skill, emo_skill, event_detector, run_token):
     """零售模式后台线程：完整推理管线"""
-    global _latest_result, _latest_frame_b64
+    global _latest_result, _latest_frame_jpeg
     from config.settings import VIDEO_OUTPUT_WIDTH, VIDEO_JPEG_QUALITY
     # 注意：函数体内任意位置有 `from datetime import datetime` 时，
     # datetime 在整个函数作用域都是局部变量，必须在所有使用点之前导入
@@ -615,14 +623,14 @@ def _processing_thread_retail(cap_source, processor, pop_skill, anom_skill, emo_
             result.tracks, result.frame_id, processor.fps, result.timestamp)
 
         is_detection_frame = (result.frame_id % processor.frame_skip == 0)
-        if is_detection_frame or _latest_frame_b64 is None:
+        if is_detection_frame or _latest_frame_jpeg is None:
             display_frame = result.annotated_frame
             h, w = display_frame.shape[:2]
             if w != VIDEO_OUTPUT_WIDTH:
                 scale = VIDEO_OUTPUT_WIDTH / w
                 display_frame = cv2.resize(display_frame, (VIDEO_OUTPUT_WIDTH, max(1, int(h * scale))))
             _, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, VIDEO_JPEG_QUALITY])
-            _latest_frame_b64 = base64.b64encode(buffer).decode()
+            _latest_frame_jpeg = buffer.tobytes()
 
         _latest_result = {
             "frame_id": result.frame_id,
@@ -650,12 +658,7 @@ async def _emit_source_status(websocket, state: str, echo: dict | None = None,
     为什么与老的 `{"type":"status"}` 并存：老前端只认 status，新前端需要
     **机器可读的 code** 与**源回显**（谁在跑、为什么失败）。两者同时发，迁移期零破坏。
     """
-    payload = {"type": "source_status", "state": state, "source": echo or {}}
-    if code:
-        payload["code"] = code
-    if message:
-        payload["message"] = message
-    payload.update(extra)
+    payload = source_status_message(state, echo, code, message, **extra)
     try:
         await websocket.send_json(payload)
     except Exception as e:                      # 连接已断：不能影响主流程
@@ -712,7 +715,7 @@ async def video_stream(websocket: WebSocket):
     # 统一在函数顶部声明（同一函数内重复 global 声明会触发
     # "name is used prior to global declaration" 语法错误；
     # 而漏声明则会被当成局部变量，赋值后再读取会 UnboundLocalError）
-    global _latest_result, _latest_frame_b64, _client_camera_owner, _client_camera_owner_ws
+    global _latest_result, _latest_frame_jpeg, _client_camera_owner, _client_camera_owner_ws
 
     await websocket.accept()
     print("[WS] 客户端已连接")
@@ -722,7 +725,7 @@ async def video_stream(websocket: WebSocket):
     _active_ws.add(websocket)
 
     _latest_result = None
-    _latest_frame_b64 = None
+    _latest_frame_jpeg = None
 
     from api.dependencies import (
         get_detector, get_roi_manager, reset_tracker,
@@ -779,7 +782,7 @@ async def video_stream(websocket: WebSocket):
              共用实例才能保证"判定 / 展示 / 落库"三处口径一致。
         """
         nonlocal bg_thread
-        global _run_token, _latest_result, _latest_frame_b64, _bg_thread_ref
+        global _run_token, _latest_result, _latest_frame_jpeg, _bg_thread_ref
         target_processor = use_processor or processor
         target_event_detector = use_event_detector or event_detector
         target_roi = use_roi or roi_mgr
@@ -807,7 +810,7 @@ async def video_stream(websocket: WebSocket):
 
         nonlocal _last_pushed_frame_id
         _latest_result = None
-        _latest_frame_b64 = None
+        _latest_frame_jpeg = None
         _last_pushed_frame_id = -1
 
         if mode == "retail":
@@ -1064,9 +1067,8 @@ async def video_stream(websocket: WebSocket):
                     if owner_ws is not None and owner_ws is not websocket:
                         await websocket.send_json({
                             "type": "status", "status": "error",
-                            "message": "已有其他用户正在使用「本机摄像头」模式，请稍后重试；"
-                                       "多人同时观看请使用「服务器摄像头」。"
-                                       "（若那是你之前失效的连接，刷新/关闭那个页面即可释放）",
+                            # 协议面文案（唯一来源 ws_protocol.CLIENT_CAMERA_BUSY_MESSAGE，逐字冻结）
+                            "message": CLIENT_CAMERA_BUSY_MESSAGE,
                         })
                         continue
                     if cap:
@@ -1127,7 +1129,7 @@ async def video_stream(websocket: WebSocket):
                         cap.release()
                         cap = None
                     _latest_result = None
-                    _latest_frame_b64 = None
+                    _latest_frame_jpeg = None
                     await websocket.send_json({
                         "type": "status",
                         "status": "stopped",
@@ -1142,12 +1144,12 @@ async def video_stream(websocket: WebSocket):
                 pass
 
             # 推送最新帧
-            frame_b64 = _latest_frame_b64
+            frame_jpeg = _latest_frame_jpeg
             result_to_send = _latest_result
 
             # ⚠ 控制类消息（error / finished）必须**先于**"没有帧就 continue"处理。
             # 实测踩过的坑：处理线程可能在产出**第一帧之前**就异常退出（依赖缺失、
-            # 模型加载失败、源打不开都是这一类），此时 `_latest_frame_b64` 恒为 None，
+            # 模型加载失败、源打不开都是这一类），此时 `_latest_frame_jpeg` 恒为 None，
             # 若把错误分支放在下面那个判断之后，它就**永远不会执行** ——
             # 客户端只看到"正在打开"，然后一直转圈，没有任何提示。
             # （当初验证者是在"第 30 帧抛异常"的场景下测的，那时已有帧，恰好绕过了这个盲区。）
@@ -1163,7 +1165,7 @@ async def video_stream(websocket: WebSocket):
                     )
                     _stop_internal()
                     _latest_result = None
-                    _latest_frame_b64 = None
+                    _latest_frame_jpeg = None
                     continue
 
                 if result_to_send.get("type") == "finished":
@@ -1175,10 +1177,10 @@ async def video_stream(websocket: WebSocket):
                                               code="finished", message="视频播放完毕")
                     _stop_internal()
                     _latest_result = None
-                    _latest_frame_b64 = None
+                    _latest_frame_jpeg = None
                     continue
 
-            if frame_b64 is None or result_to_send is None:
+            if frame_jpeg is None or result_to_send is None:
                 # 「打开超时」看门狗：到点了还没有**任何一帧**产出，客户端不该无限等下去。
                 # 首帧前失败/卡住是最常见的故障形态（依赖缺失、模型加载慢/失败、源不可达），
                 # 上面那条通道能覆盖"崩溃"，这条覆盖"线程还活着但一直不出画面"。
@@ -1219,25 +1221,12 @@ async def video_stream(websocket: WebSocket):
                     message="视频源已开始输出画面", frame_id=new_frame_id,
                 )
 
-            msg_to_send = {
-                "type": "frame",
-                "frame_id": result_to_send["frame_id"],
-                "timestamp": result_to_send.get("timestamp", 0),
-                "tracks": result_to_send.get("tracks", []),
-                "events": result_to_send.get("events", []),
-                "active_suspicious": result_to_send.get("active_suspicious", []),
-                "mode": _active.get("mode", "retail"),
-            }
-            # 表情模式额外推送人脸信息
-            if "faces" in result_to_send:
-                msg_to_send["faces"] = result_to_send["faces"]
+            msg_to_send = frame_metadata_message(result_to_send, _active.get("mode", "retail"))
 
-            if new_frame_id == 1 or new_frame_id % WS_METADATA_INTERVAL == 0:
+            if should_send_metadata(new_frame_id):
                 await websocket.send_json(msg_to_send)
             try:
-                frame_bytes = base64.b64decode(frame_b64)
-                frame_header = int(new_frame_id).to_bytes(4, "big")
-                await websocket.send_bytes(frame_header + frame_bytes)
+                await websocket.send_bytes(frame_packet(new_frame_id, frame_jpeg))
             except Exception as e:
                 print(f"[WS] 二进制帧发送失败: {e}")
             _push_count += 1

@@ -1,0 +1,306 @@
+{
+  "schema": 1,
+  "generated_by": "contracts/export_fixtures.py",
+  "source": "video_sources.py",
+  "note": "守卫的唯一来源是 video_sources.py（安全关键代码不复制）。这些案例是跨语言 golden：任何调用方（Python 现有实现 / 将来的 Go 边缘）对同一输入必须给出相同的放行或拒绝结论；拒绝时 error 即 SourceError.code。",
+  "guard_url": [
+    {
+      "url": "rtsp://127.0.0.1:554/x",
+      "expect": {
+        "error": "host_blocked"
+      }
+    },
+    {
+      "url": "rtsp://localhost:554/x",
+      "expect": {
+        "error": "host_blocked"
+      },
+      "note": "依赖系统把 localhost 解析到环回（标准行为）"
+    },
+    {
+      "url": "rtsp://[::1]:554/x",
+      "expect": {
+        "error": "host_blocked"
+      }
+    },
+    {
+      "url": "rtsp://169.254.169.254/latest/meta-data/",
+      "expect": {
+        "error": "host_blocked"
+      },
+      "note": "云元数据（链路本地）"
+    },
+    {
+      "url": "rtsp://224.0.0.1/x",
+      "expect": {
+        "error": "host_blocked"
+      },
+      "note": "组播"
+    },
+    {
+      "url": "rtsp://0.0.0.0/x",
+      "expect": {
+        "error": "host_blocked"
+      },
+      "note": "未指定地址"
+    },
+    {
+      "url": "rtsp://[::ffff:127.0.0.1]:554/x",
+      "expect": {
+        "error": "host_blocked"
+      },
+      "note": "IPv4 映射 IPv6：必须先还原成 IPv4 再判断"
+    },
+    {
+      "url": "rtsp://2130706433:554/x",
+      "expect": {
+        "error_in": [
+          "dns_failed",
+          "host_blocked"
+        ]
+      },
+      "note": "十进制 IP"
+    },
+    {
+      "url": "rtsp://127.1:554/x",
+      "expect": {
+        "error_in": [
+          "dns_failed",
+          "host_blocked"
+        ]
+      },
+      "note": "短写 IP"
+    },
+    {
+      "url": "rtsp://8.8.8.8:554/x",
+      "expect": {
+        "error": "host_blocked"
+      },
+      "note": "公网地址默认拒绝（门店摄像头在内网）"
+    },
+    {
+      "url": "rtsp://192.168.10.20:554/stream",
+      "expect": {
+        "ok": "rtsp://192.168.10.20:554/stream"
+      },
+      "note": "私网相机：正常用法必须放行"
+    },
+    {
+      "url": "file:///etc/passwd",
+      "expect": {
+        "error": "unsupported_scheme"
+      }
+    },
+    {
+      "url": "http://192.168.1.10/x",
+      "expect": {
+        "error": "unsupported_scheme"
+      }
+    },
+    {
+      "url": "rtsp://x\\y",
+      "expect": {
+        "error": "unc_not_allowed"
+      },
+      "note": "UNC 形态"
+    },
+    {
+      "url": "rtsp://192.168.1.10/x\nHost: evil",
+      "expect": {
+        "error": "bad_request"
+      },
+      "note": "换行注入"
+    },
+    {
+      "url": "rtsp://192.168.1.10/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expect": {
+        "error": "bad_request"
+      },
+      "note": "超长 URL"
+    },
+    {
+      "url": "",
+      "expect": {
+        "error": "bad_request"
+      }
+    }
+  ],
+  "guard_path": [
+    {
+      "path": "/app/mmpose/demo/resources/demo.mp4",
+      "client_supplied": true,
+      "expect": {
+        "error": "file_not_allowed"
+      }
+    },
+    {
+      "path": "/app/data/../mmpose/demo/resources/demo.mp4",
+      "client_supplied": true,
+      "expect": {
+        "error": "file_not_allowed"
+      }
+    },
+    {
+      "path": "\\\\attacker\\share\\x.mp4",
+      "client_supplied": true,
+      "expect": {
+        "error": "unc_not_allowed"
+      }
+    },
+    {
+      "path": "data/sources/nope.mp4",
+      "client_supplied": true,
+      "expect": {
+        "error": "file_not_found"
+      }
+    },
+    {
+      "path": "\\\\a\\b.mp4",
+      "client_supplied": false,
+      "expect": {
+        "error": "unc_not_allowed"
+      }
+    },
+    {
+      "path": "../secret.mp4",
+      "client_supplied": true,
+      "expect": {
+        "error": "file_not_allowed"
+      }
+    }
+  ],
+  "guard_source": [
+    {
+      "in": "webcam",
+      "expect": {
+        "ok": "webcam"
+      }
+    },
+    {
+      "in": "0",
+      "expect": {
+        "ok": "0"
+      }
+    },
+    {
+      "in": "2",
+      "expect": {
+        "ok": "2"
+      }
+    }
+  ],
+  "normalize": [
+    {
+      "in": {
+        "kind": "rtsp",
+        "url": "rtsp://192.168.10.20:554/s"
+      },
+      "expect": {
+        "ok": {
+          "kind": "rtsp",
+          "legacy_action": "start_file",
+          "params": {
+            "file_path": "rtsp://192.168.10.20:554/s"
+          },
+          "echo": {
+            "kind": "rtsp",
+            "url": "rtsp://192.168.10.20:554/s"
+          }
+        }
+      }
+    },
+    {
+      "in": {
+        "kind": "rtsp",
+        "url": "rtsp://169.254.169.254/x"
+      },
+      "expect": {
+        "error": "host_blocked"
+      }
+    },
+    {
+      "in": {
+        "kind": "rtsp",
+        "url": "rtsp://127.0.0.1/x"
+      },
+      "expect": {
+        "error": "host_blocked"
+      }
+    },
+    {
+      "in": {
+        "kind": "rtsp",
+        "url": "rtsp://8.8.8.8/x"
+      },
+      "expect": {
+        "error": "host_blocked"
+      }
+    },
+    {
+      "in": {
+        "kind": "rtsp"
+      },
+      "expect": {
+        "error": "bad_request"
+      }
+    },
+    {
+      "in": {
+        "kind": "nope"
+      },
+      "expect": {
+        "error": "unsupported_kind"
+      }
+    },
+    {
+      "in": null,
+      "expect": {
+        "error": "bad_request"
+      }
+    }
+  ],
+  "mask_credentials": [
+    {
+      "in": "rtsp://admin:secret@192.168.10.20:554/s",
+      "expect": {
+        "ok": "rtsp://***:***@192.168.10.20:554/s"
+      }
+    },
+    {
+      "in": "/app/data/x.mp4",
+      "expect": {
+        "ok": "/app/data/x.mp4"
+      }
+    }
+  ],
+  "echo_for_legacy": [
+    {
+      "action": "start_file",
+      "params": {
+        "file_path": "/x.mp4"
+      },
+      "expect": {
+        "ok": {
+          "kind": "file",
+          "path": "/x.mp4"
+        }
+      }
+    },
+    {
+      "action": "start_client_camera",
+      "params": {},
+      "expect": {
+        "ok": {
+          "kind": "client"
+        }
+      }
+    },
+    {
+      "action": "ping",
+      "params": {},
+      "expect": {
+        "ok": {}
+      }
+    }
+  ]
+}

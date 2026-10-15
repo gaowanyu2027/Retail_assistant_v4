@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "generated_by": "contracts/export_fixtures.py",
+  "source": "api/security.py（ROLES / ROLE_LABELS / PERMISSIONS；perms_of() 是唯一读取入口）",
+  "note": "角色三档与权限矩阵是安全契约：服务端 require_perm(...) 强制，前端置灰只是体验。任何改动必须同步更新本夹具，让 diff 显式可见。",
+  "roles": [
+    "root",
+    "platform",
+    "viewer"
+  ],
+  "role_labels": {
+    "root": "平台管理员（root）",
+    "platform": "平台账户",
+    "viewer": "只读账户"
+  },
+  "perms_of": {
+    "root": [
+      "data:read",
+      "data:write",
+      "system:manage",
+      "user:manage"
+    ],
+    "platform": [
+      "data:read",
+      "data:write"
+    ],
+    "viewer": [
+      "data:read"
+    ]
+  }
+}
