@@ -22,6 +22,13 @@ type Config struct {
 	// DistDir 前端构建产物目录，环境变量 EDGE_DIST_DIR，默认 "frontend-vue/dist"。
 	// edge 直接托管它（不经过 Python）——Python 挂掉后页面仍可用是 S1 的故障隔离目标。
 	DistDir string
+	// EdgeAuth 是否启用边缘鉴权早拒，环境变量 EDGE_AUTH（取值 "1"），默认关。
+	// 关 = 一切照旧全部反代（回退成本为零）；开 = 无凭据 / 凭据明确无效的
+	// `/api/**` 请求在 edge 就拿到与 Python 逐字一致的 401。
+	EdgeAuth bool
+	// InternalToken 与 Python 共享的内部端点密钥，环境变量 INTERNAL_API_TOKEN。
+	// edge 用它调 `/internal/auth/verify`；为空且 EdgeAuth=1 时早拒自动禁用（响亮告警）。
+	InternalToken string
 }
 
 func Load() Config {
@@ -29,12 +36,16 @@ func Load() Config {
 		Listen: envOr("EDGE_LISTEN", ":8000"),
 		BackendURL: strings.TrimRight(
 			envOr("EDGE_BACKEND_URL", "http://127.0.0.1:8000"), "/"),
-		DistDir: envOr("EDGE_DIST_DIR", "frontend-vue/dist"),
+		DistDir:       envOr("EDGE_DIST_DIR", "frontend-vue/dist"),
+		EdgeAuth:      envOr("EDGE_AUTH", "0") == "1",
+		InternalToken: strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN")),
 	}
 }
 
+// String 供启动日志使用：**刻意不打印 InternalToken**（密钥不进日志）。
 func (c Config) String() string {
-	return fmt.Sprintf("listen=%s backend=%s dist=%s", c.Listen, c.BackendURL, c.DistDir)
+	return fmt.Sprintf("listen=%s backend=%s dist=%s edge_auth=%t internal_token_set=%t",
+		c.Listen, c.BackendURL, c.DistDir, c.EdgeAuth, c.InternalToken != "")
 }
 
 func envOr(key, def string) string {

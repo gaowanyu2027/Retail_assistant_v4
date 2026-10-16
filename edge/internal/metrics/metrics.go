@@ -30,6 +30,12 @@ type Metrics struct {
 	s3xx        atomic.Int64
 	s4xx        atomic.Int64
 	s5xx        atomic.Int64
+
+	// 边缘鉴权早拒（EDGE_AUTH=1 时才有非零值）
+	authDenied atomic.Int64
+	verifyOK   atomic.Int64
+	verifyErr  atomic.Int64
+	cacheHits  atomic.Int64
 }
 
 func New(backendURL string) *Metrics {
@@ -64,9 +70,22 @@ func (m *Metrics) IncStatus(code int) {
 	}
 }
 
-func (m *Metrics) IncInflight()  { m.inflight.Add(1) }
-func (m *Metrics) DecInflight()  { m.inflight.Add(-1) }
+func (m *Metrics) IncInflight()   { m.inflight.Add(1) }
+func (m *Metrics) DecInflight()   { m.inflight.Add(-1) }
 func (m *Metrics) IncProxyError() { m.proxyErrors.Add(1) }
+
+// IncAuthDenied edge 直接拒掉的请求数（无凭据 / 凭据明确无效）。
+func (m *Metrics) IncAuthDenied() { m.authDenied.Add(1) }
+
+// IncVerify 回源校验**拿到权威结论**的次数（缓存未命中且调用成功）。
+func (m *Metrics) IncVerify() { m.verifyOK.Add(1) }
+
+// IncVerifyError 回源校验未拿到结论的次数（超时/网络错/非 200/解析失败）。
+// 这些请求一律放行交 Python 判定 —— 数字大不一定是故障，也可能是 Python 版本较旧。
+func (m *Metrics) IncVerifyError() { m.verifyErr.Add(1) }
+
+// IncCacheHit 命中本地 TTL 缓存（未回源）。
+func (m *Metrics) IncCacheHit() { m.cacheHits.Add(1) }
 
 type snapshot struct {
 	UptimeSeconds float64          `json:"uptime_seconds"`
@@ -75,6 +94,15 @@ type snapshot struct {
 	Requests      map[string]int64 `json:"requests"`
 	Responses     map[string]int64 `json:"responses"`
 	ProxyErrors   int64            `json:"proxy_errors"`
+	EdgeAuth      authStats        `json:"edge_auth"`
+}
+
+// authStats 边缘鉴权早拒的计数（未启用时全 0）。
+type authStats struct {
+	Denied      int64 `json:"denied"`
+	VerifyOK    int64 `json:"verify_ok"`
+	VerifyError int64 `json:"verify_error"`
+	CacheHits   int64 `json:"cache_hits"`
 }
 
 // Serve 处理 /metrics（仅内网可达；GET/HEAD）。
@@ -104,6 +132,12 @@ func (m *Metrics) Serve(w http.ResponseWriter, r *http.Request) {
 			"4xx": m.s4xx.Load(), "5xx": m.s5xx.Load(),
 		},
 		ProxyErrors: m.proxyErrors.Load(),
+		EdgeAuth: authStats{
+			Denied:      m.authDenied.Load(),
+			VerifyOK:    m.verifyOK.Load(),
+			VerifyError: m.verifyErr.Load(),
+			CacheHits:   m.cacheHits.Load(),
+		},
 	}
 	body, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {

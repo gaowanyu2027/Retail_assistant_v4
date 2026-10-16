@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "generated_by": "contracts/export_fixtures.py",
+  "source": "api/security.py（_PUBLIC_PATHS / needs_auth / 未登录响应的常量）",
+  "note": "鉴权策略是跨语言的对外契约：Go edge 会按这几条判断\"这个请求明显没凭据吗\"，并按 unauthorized 逐字复刻 401。edge 只可能**提前拒绝**，放行与否的权威判定永远在 Python（每个请求到 Python 后仍会自行鉴权）。改动本夹具即改动对外契约。",
+  "public_paths": [
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/frontend/fallback",
+    "/api/health",
+    "/api/health/ready"
+  ],
+  "needs_auth_rules": [
+    "path in public_paths → 免登录",
+    "path.startswith('/api/') → 需登录",
+    "path.startswith(('/docs','/redoc','/openapi.json')) → 需登录（AUTH_PUBLIC_DOCS=1 时免）"
+  ],
+  "cookie_name": "retail_sid",
+  "bearer_prefix": "bearer ",
+  "unauthorized": {
+    "status": 401,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"detail\": \"未登录或登录已过期\"}"
+  },
+  "not_found": {
+    "status": 404,
+    "content_type": "application/json",
+    "body": "{\"detail\":\"Not Found\"}"
+  }
+}

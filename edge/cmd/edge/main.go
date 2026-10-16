@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"retail-assistant/edge/internal/auth"
 	"retail-assistant/edge/internal/config"
 	"retail-assistant/edge/internal/health"
 	"retail-assistant/edge/internal/httpx"
@@ -27,9 +28,10 @@ import (
 )
 
 type app struct {
-	m  *metrics.Metrics
-	st *static.Handler
-	px *proxy.Proxy
+	m    *metrics.Metrics
+	st   *static.Handler
+	px   *proxy.Proxy
+	gate *auth.Gate
 }
 
 // ServeHTTP 是唯一的请求入口：先归类（决定本地处理还是反代），
@@ -69,7 +71,18 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.serveFallback(rw, r)
 	case routing.Metrics:
 		a.m.Serve(rw, r)
+	case routing.Internal:
+		// Python 的内部端点路径：公网请求到此为止，不出网（Python 侧另有独立门禁）。
+		auth.ServeInternalNotFound(rw, r)
 	default:
+		if dec, reason := a.gate.Inspect(r); dec == auth.Deny {
+			a.m.IncAuthDenied()
+			slog.Info("auth denied",
+				"path", r.URL.Path, "reason", reason,
+				"ip", httpx.ClientIP(r.RemoteAddr))
+			auth.ServeDenied(rw, r)
+			return
+		}
 		a.px.ServeHTTP(rw, r)
 	}
 }
@@ -105,7 +118,19 @@ func main() {
 		slog.Error("edge 配置错误", "err", err)
 		os.Exit(1)
 	}
-	a := &app{m: m, st: static.New(cfg.DistDir), px: px}
+	// 边缘鉴权早拒（可选，EDGE_AUTH=1）。缺密钥即禁用：宁可退回"全部反代"，
+	// 也不能让 edge 在拿不到权威结论时自行其是。
+	gateEnabled := cfg.EdgeAuth && cfg.InternalToken != ""
+	if cfg.EdgeAuth && !gateEnabled {
+		slog.Warn("EDGE_AUTH=1 但 INTERNAL_API_TOKEN 为空：鉴权早拒已禁用，全部请求照旧反代")
+	}
+	verifier := auth.NewVerifier(cfg.BackendURL, cfg.InternalToken, auth.Observer{
+		OnVerify:      m.IncVerify,
+		OnCacheHit:    m.IncCacheHit,
+		OnVerifyError: m.IncVerifyError,
+	})
+	a := &app{m: m, st: static.New(cfg.DistDir), px: px,
+		gate: auth.NewGate(verifier, gateEnabled)}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

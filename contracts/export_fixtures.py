@@ -11,6 +11,7 @@
 """
 import json
 import sys
+import warnings
 from pathlib import Path
 
 CONTRACTS_DIR = Path(__file__).resolve().parent
@@ -239,10 +240,71 @@ def export_ws_messages() -> dict:
     }
 
 
+# ---------------- auth_policy.json ----------------
+
+def measure_fastapi_error_shape() -> dict:
+    """**实测** FastAPI 默认异常处理器的 404 渲染结果（不手抄、不推测）。
+
+    用一次性最小应用驱动：`/internal/**` 的兜底 404 与任何未知路径的 404
+    都走 FastAPI 默认处理器，形状只取决于框架版本。
+    edge 侧对 `/internal/**` 的本地 404 必须与之逐字一致（公网请求不出网，
+    两条路径上同一个探测请求得到同样的响应）。
+    """
+    from fastapi import FastAPI, HTTPException
+    from starlette.testclient import TestClient
+
+    app = FastAPI()
+
+    @app.get("/boom")
+    def boom():
+        raise HTTPException(status_code=404)
+
+    with warnings.catch_warnings():
+        # starlette 对 testclient 的传输后端有过渡期弃用提示；这里只借它量一次渲染结果
+        warnings.simplefilter("ignore")
+        client = TestClient(app)
+    with client:
+        resp = client.get("/boom")
+        return {
+            "status": resp.status_code,
+            "content_type": resp.headers.get("content-type", ""),
+            "body": resp.text,
+        }
+
+
+def export_auth_policy() -> dict:
+    import api.security as sec
+
+    return {
+        "schema": 1,
+        "generated_by": "contracts/export_fixtures.py",
+        "source": "api/security.py（_PUBLIC_PATHS / needs_auth / 未登录响应的常量）",
+        "note": ("鉴权策略是跨语言的对外契约：Go edge 会按这几条判断"
+                 "\"这个请求明显没凭据吗\"，并按 unauthorized 逐字复刻 401。"
+                 "edge 只可能**提前拒绝**，放行与否的权威判定永远在 Python"
+                 "（每个请求到 Python 后仍会自行鉴权）。改动本夹具即改动对外契约。"),
+        "public_paths": sorted(sec._PUBLIC_PATHS),
+        "needs_auth_rules": [
+            "path in public_paths → 免登录",
+            "path.startswith('/api/') → 需登录",
+            "path.startswith(('/docs','/redoc','/openapi.json')) → 需登录（AUTH_PUBLIC_DOCS=1 时免）",
+        ],
+        "cookie_name": sec.COOKIE_NAME,
+        "bearer_prefix": sec.BEARER_PREFIX,
+        "unauthorized": {
+            "status": sec.UNAUTHORIZED_STATUS,
+            "content_type": sec.UNAUTHORIZED_CONTENT_TYPE,
+            "body": sec.UNAUTHORIZED_BODY,
+        },
+        "not_found": measure_fastapi_error_shape(),
+    }
+
+
 def main() -> None:
     _dump("guard_cases.json", export_guard_cases())
     _dump("permissions.json", export_permissions())
     _dump("ws_messages.json", export_ws_messages())
+    _dump("auth_policy.json", export_auth_policy())
 
 
 if __name__ == "__main__":

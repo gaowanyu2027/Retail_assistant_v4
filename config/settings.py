@@ -571,6 +571,10 @@ AUTH_SESSION_TOUCH_SECONDS = int(os.environ.get("AUTH_SESSION_TOUCH_SECONDS", "6
 # 该口径同时用于会话审计展示与**登录失败限流**：反代下若仍按对端计数，
 # 全体用户共享同一个键，跨账号累计失败会把所有人一起锁死。
 AUTH_TRUST_FORWARDED_FOR = os.environ.get("AUTH_TRUST_FORWARDED_FOR", "0") == "1"
+# 内部端点共享密钥：Go edge 调 Python 的 `/internal/**` 时携带（请求头 X-Internal-Token）。
+# 默认空 = 内部端点一律 404（当作路径不存在，避免误暴露）；edge 拓扑下由覆盖文件
+# 把同一个值注入两侧。轮换方式：改 .env 后 `docker compose up -d`（容器创建时才读环境）。
+INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "")
 # 首次启动自动创建的 root 账号名
 AUTH_ROOT_USERNAME = os.environ.get("AUTH_ROOT_USERNAME", "root")
 # 初始 root 密码；不设则随机生成并在终端打印一次

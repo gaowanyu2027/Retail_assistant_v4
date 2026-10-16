@@ -9,9 +9,10 @@
 ## 为什么还要守卫"写路由有没有挂权限"
 
 台账 B2 的教训是"权限矩阵声明了、实际没校验"。加只读角色时我做了一次逐个复核：
-`api/routes/*.py` 里 **39 条写路由**，其中 22 条挂了 `require_perm`（`data:write` 7 / `system:manage` 14 /
-`user:manage` 4 —— 有重叠计数），另外 17 条属于"登录即可"的**有意白名单**
-（登录/登出、改自己口令、自己的会话 CRUD、问答、地图查询、语音指令）。
+`api/routes/*.py` 里 **42 条写路由**，其中 22 条挂了 `require_perm`（`data:write` 7 / `system:manage` 14 /
+`user:manage` 4 —— 有重叠计数），另外 20 条属于**有意白名单**：其中 17 条是"登录即可"
+（登录/登出、改自己口令、自己的会话 CRUD、问答、地图查询、语音指令），另有 3 条是
+Go edge 专用的 `/internal/**` 内部端点（门禁是共享密钥 + 内网对端，不走角色权限）。
 本文件把这份结论**固化成断言**：以后新增写接口若忘了挂权限，CI 会直接红。
 """
 import io
@@ -25,12 +26,20 @@ if str(PROJECT_ROOT) not in sys.path:
 
 ROUTES_DIR = PROJECT_ROOT / "api" / "routes"
 
-_DEC = re.compile(r"^@router\.(get|post|put|patch|delete)\(\s*['\"]([^'\"]+)['\"]")
+_DEC = re.compile(r"^@router\.(get|post|put|patch|delete|api_route)\(\s*['\"]([^'\"]+)['\"]")
 _PERM = re.compile(r"require_perm\(\s*['\"]([^'\"]+)['\"]")
 
+# 注：_DEC 扫描 get/post/put/patch/delete **与 api_route** —— 只认前六个装饰器时，
+# 用 api_route 写的路由会整体绕过这道守卫（内部端点的兜底路由就是这种写法）。
 # 「登录即可」的有意白名单：这些写路由**不该**要求额外权限，逐条给出理由。
 # 键 = (文件名, 路径)；漏挂权限的新写路由若不在此表，测试即失败。
 INTENTIONAL_LOGIN_ONLY = {
+    # ---- 内部端点（Go edge 专用，不面向公网）----
+    # 它们不在登录态/权限矩阵体系里：门禁是「共享密钥 + 对端必须内网 + 未配置即 404」
+    # 三道（见 api/routes/internal.py），且 edge 对 /internal/** 一律本地 404。
+    ("internal.py", "/auth/verify"): "内部端点：门禁=共享密钥+内网对端，不走角色权限",
+    ("internal.py", "/auth/consume-ticket"): "内部端点：同上（票据消费的原子性留在 Python）",
+    ("internal.py", "/{_path:path}"): "内部路径兜底：任何未匹配路径/方法一律 404，不读不写",
     ("auth.py", "/auth/login"): "登录本身当然不能要求登录/权限",
     ("auth.py", "/auth/logout"): "登出只吊销**自己**的会话",
     ("auth.py", "/auth/ws-ticket"): "签发**自己**的 WS 一次性票据",

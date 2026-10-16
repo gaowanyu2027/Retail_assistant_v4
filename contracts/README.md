@@ -7,6 +7,7 @@
 | `ws_messages.json` | WS 视频流协议：帧包头（4B 大端 frame_id）、元数据节拍、frame/source_status 消息结构、本机摄像头拒绝文案 | [ws_protocol.py](../ws_protocol.py) | `tests/test_ws_protocol_fixtures.py` |
 | `permissions.json` | 角色三档（root/platform/viewer）与权限矩阵 | `api/security.py`（`roles` / `ROLE_LABELS` / `perms_of()`） | `tests/test_contract_fixtures.py` |
 | `guard_cases.json` | 视频源守卫（SSRF/路径）绕过清单：输入 → 放行或拒绝（含错误码） | `video_sources.py` | `tests/test_contract_fixtures.py` |
+| `auth_policy.json` | 鉴权策略与两种错误响应：免登录白名单、Cookie 名、Bearer 前缀、401（状态/类型/响应体逐字节）、404（`FastAPI` 默认渲染，实测导出） | `api/security.py`（`_PUBLIC_PATHS` / `needs_auth` / 未登录响应常量） | `tests/test_contract_fixtures.py`、`edge/internal/auth/policy_test.go` |
 
 ## 为什么有这层
 
@@ -19,6 +20,10 @@
 `guard_cases.json` 里有两条 `error_in`（十进制/短写 IP）：共同契约是**必须拒绝**，
 错误码随平台解析行为不同（Windows `getaddrinfo` 失败=`dns_failed`；Linux 可能解析成功
 =`host_blocked`），跨平台跑测试时两者都算通过。
+
+`auth_policy.json` 由两侧同时比对：Python 侧看常量，Go 侧（`edge/internal/auth`）看
+`needs_auth` 的判定与 401 响应字节。Go 单测读不到本目录时**直接失败**（避免夹具缺失被
+当成通过）；确要在仓库外单独跑 edge 时设 `EDGE_TEST_ALLOW_MISSING_FIXTURES=1` 跳过。
 
 ## 更新夹具（仅当有意变更行为时）
 

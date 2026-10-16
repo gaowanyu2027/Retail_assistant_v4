@@ -96,3 +96,27 @@ def test_echo_for_legacy_cases_match_fixture():
         action, params = case["action"], case["params"]
         _assert_expect(lambda a=action, p=params: vs.echo_for_legacy(a, p), case["expect"],
                        f"echo_for_legacy({action!r}, {params!r})")
+
+
+def test_auth_policy_fixture_matches_implementation():
+    """鉴权策略夹具 == 当前实现（edge 的早拒按这份复刻，改动必须显式化）。"""
+    fx = _fixture("auth_policy.json")
+    assert fx["public_paths"] == sorted(sec._PUBLIC_PATHS)
+    assert fx["cookie_name"] == sec.COOKIE_NAME
+    assert fx["bearer_prefix"] == sec.BEARER_PREFIX
+    assert fx["unauthorized"] == {
+        "status": sec.UNAUTHORIZED_STATUS,
+        "content_type": sec.UNAUTHORIZED_CONTENT_TYPE,
+        "body": sec.UNAUTHORIZED_BODY,
+    }
+    # 401 响应体是**逐字节**契约：分隔符必须与默认 json.dumps 一致（`": ` 带空格）
+    assert fx["unauthorized"]["body"] == '{"detail": "未登录或登录已过期"}'
+
+
+def test_needs_auth_rule_matches_fixture_public_paths():
+    """needs_auth 与夹具白名单一致：白名单里的免登录，其余 /api/** 一律需登录。"""
+    fx = _fixture("auth_policy.json")
+    for path in fx["public_paths"]:
+        assert sec.needs_auth(path) is False, f"{path} 应免登录"
+    for path in ("/api/queries", "/api/auth/users", "/api/cameras", "/api/health-nonexistent"):
+        assert sec.needs_auth(path) is True, f"{path} 应需登录"

@@ -287,6 +287,7 @@ from api.routes.maps import router as maps_router
 from api.routes.cameras import router as cameras_router
 from api.routes.multi_stream import router as multi_stream_router
 from api.routes.auth import router as auth_router
+from api.routes.internal import router as internal_router
 
 app.include_router(query_router, prefix="/api")
 app.include_router(report_router, prefix="/api")
@@ -301,6 +302,11 @@ app.include_router(maps_router, prefix="/api")
 app.include_router(cameras_router, prefix="/api")
 app.include_router(multi_stream_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
+
+# 内部端点（Go edge 专用，不对外）：三道门禁见 api/routes/internal.py，
+# 未配置 INTERNAL_API_TOKEN 时全部 404。不带 /api 前缀，故鉴权中间件不拦它，
+# 由端点自身的 require_internal_token 兜住。
+app.include_router(internal_router, prefix="/internal")
 
 # ==================== 前端入口（Vue 版为唯一浏览器前端，原生 JS 版已移除） ====================
 

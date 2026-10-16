@@ -40,6 +40,9 @@ services:
       # 这里让 backend 采信第一跳。
       # 直连形态（不带本 overlay）该变量为默认 "0"，行为与之前完全一致。
       AUTH_TRUST_FORWARDED_FOR: "1"
+      # 内部端点共享密钥（edge 调 /internal/auth/verify 用）。**两侧必须是同一个值**，
+      # 由 .env 注入；为空时内部端点一律 404，edge 的早拒也自动禁用（见下）。
+      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
 
   # ---------------- 边缘网关（Go，唯一对外进程） ----------------
   edge:
@@ -63,3 +66,8 @@ services:
       EDGE_BACKEND_URL: "http://backend:8000"
       # 前端产物在 edge 镜像内部（阶段 1 构建后 COPY 进 /srv/dist）
       EDGE_DIST_DIR: "/srv/dist"
+      # 鉴权早拒：无凭据 / 凭据明确无效的 /api/** 请求在 edge 就得到与 Python
+      # 逐字一致的 401（回源校验带 5s/2s 缓存）。下设 0 或清空密钥即回退为
+      # "全部反代"，行为与不带早拒时完全一致。
+      EDGE_AUTH: "1"
+      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"

@@ -1049,6 +1049,20 @@ _PUBLIC_PATHS = {
 }
 _DOC_PREFIXES = ("/docs", "/redoc", "/openapi.json")
 
+# ==================== 未登录响应的对外契约 ====================
+# 边缘网关（edge/）对"明显无效凭据"做提前拒绝时，必须逐字复刻这里的响应，
+# 否则同一个客户端会在两条路径上看到两种 401。常量与夹具双向钉住：
+#   - 实现改动 → tests/test_contract_fixtures.py 与 Go 侧 fixtures 比对变红
+#   - 只改夹具不改实现 → 同样变红
+# 注意分隔符：这里用 `json.dumps` 的**默认**分隔符（`,`/`:` 后带空格），
+# 与 FastAPI 路由级 HTTPException 的紧凑格式不同 —— 客户端实际看到的是**这份**。
+UNAUTHORIZED_STATUS = 401
+UNAUTHORIZED_CONTENT_TYPE = "application/json; charset=utf-8"
+UNAUTHORIZED_BODY = _json.dumps({"detail": "未登录或登录已过期"}, ensure_ascii=False)
+
+# 凭据来源的优先级顺序（台账 B13：显式 Bearer 优先于隐式 Cookie）。
+BEARER_PREFIX = "bearer "
+
 
 def needs_auth(path: str) -> bool:
     """默认封启策略：/api/* 一律需要登录（白名单除外）。
@@ -1195,13 +1209,13 @@ class AuthMiddleware:
                 await send({"type": "websocket.accept"})
                 await send({"type": "websocket.close", "code": 1008})
                 return
-            body = _json.dumps({"detail": "未登录或登录已过期"},
-                               ensure_ascii=False).encode("utf-8")
+            # 响应体与状态码取自上方契约常量（edge 侧按同一份夹具复刻，勿就地改写）
+            body = UNAUTHORIZED_BODY.encode("utf-8")
             await send({
                 "type": "http.response.start",
-                "status": 401,
+                "status": UNAUTHORIZED_STATUS,
                 "headers": [
-                    (b"content-type", b"application/json; charset=utf-8"),
+                    (b"content-type", UNAUTHORIZED_CONTENT_TYPE.encode()),
                     (b"content-length", str(len(body)).encode()),
                 ],
             })

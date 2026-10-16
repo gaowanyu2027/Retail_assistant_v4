@@ -7,6 +7,8 @@
 //	/api/health                 liveness；匿名本地应答，带凭据时反代（拿完整信息）
 //	/api/frontend/fallback      前端加载失败上报（本地记录，Python 挂了也能收到）
 //	/metrics                    内网指标（Python 侧不存在该路径，仅私网可访问）
+//	/internal/**                本地 404（Python 的内部端点路径：公网请求不出网；
+//	                            Python 侧另有共享密钥 + 对端 IP 三道门禁，互不依赖）
 //
 // 其余一切——包括 21 个 include_in_schema=False 的兼容别名、/docs、
 // /openapi.json、/api/health/ready（真探测必须打 Python）——一律兜底反代。
@@ -31,12 +33,15 @@ const (
 	Fallback
 	// Metrics /metrics（内网）。
 	Metrics
+	// Internal /internal/**：本进程服务的内部端点（Python 用它给 edge 做鉴权判定）。
+	// edge 一律本地 404 —— 公网请求根本到不了这些端点（Python 侧另有独立的三道门禁）。
+	Internal
 )
 
 // AllKinds 全部处理方式（配置遍历 / 指标初始化用，顺序稳定）。
-var AllKinds = [...]Kind{Proxy, Index, Static, Health, Fallback, Metrics}
+var AllKinds = [...]Kind{Proxy, Index, Static, Health, Fallback, Metrics, Internal}
 
-var kindNames = [...]string{"proxy", "index", "static", "health", "fallback", "metrics"}
+var kindNames = [...]string{"proxy", "index", "static", "health", "fallback", "metrics", "internal"}
 
 func (k Kind) String() string {
 	if int(k) < 0 || int(k) >= len(kindNames) {
@@ -57,6 +62,8 @@ func Classify(path string) Kind {
 		return Fallback
 	case path == "/metrics":
 		return Metrics
+	case strings.HasPrefix(path, "/internal/"):
+		return Internal
 	case strings.HasPrefix(path, "/css/"),
 		strings.HasPrefix(path, "/js/"),
 		strings.HasPrefix(path, "/assets/"):
