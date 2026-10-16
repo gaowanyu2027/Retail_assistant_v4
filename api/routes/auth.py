@@ -105,7 +105,11 @@ def _set_session_cookie(response: Response, token: str,
 @router.post("/auth/login")
 async def login(req: LoginRequest, response: Response, request: Request):
     """账号密码登录（带失败限流，防暴力破解）。"""
-    ip = (request.client.host if request.client else "") or ""
+    # 限流键与审计展示共用同一个来源 IP（client_ip_from_request）：
+    # 直连部署（默认 AUTH_TRUST_FORWARDED_FOR=0）等价于原先的直连对端 IP；
+    # 反代部署（Go edge，overlay 里置 1）下对端全是 edge 容器 IP，若不采信
+    # edge 重设的 XFF，跨账号累计失败会把**所有用户**一起锁死。
+    ip = client_ip_from_request(request)
     result = login_with_throttle(req.username, req.password, ip)
 
     if not result.get("ok"):

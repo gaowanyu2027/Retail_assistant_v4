@@ -564,9 +564,12 @@ AUTH_SESSION_RENEW_THRESHOLD_HOURS = int(
 )
 # 同一会话两次续期写库的最小间隔（秒）——get_session 跑在每个请求上，必须节流
 AUTH_SESSION_TOUCH_SECONDS = int(os.environ.get("AUTH_SESSION_TOUCH_SECONDS", "60"))
-# 会话来源 IP：默认记录**直连对端** IP。若部署在反向代理后面（此时对端是代理 IP），
+# 来源 IP 口径：默认取**直连对端** IP。若部署在反向代理后面（此时对端是代理 IP），
 # 可置 1 改为信任 `X-Forwarded-For` 的第一跳 —— ⚠ 该头可被客户端伪造，
-# 所以默认关闭；它只用于审计展示，不参与任何安全判定。
+# **必须由入口代理剥离入站 XFF 并重设**（本项目的 Go edge 即如此）才可置 1；
+# Python 直连暴露时保持默认 0。
+# 该口径同时用于会话审计展示与**登录失败限流**：反代下若仍按对端计数，
+# 全体用户共享同一个键，跨账号累计失败会把所有人一起锁死。
 AUTH_TRUST_FORWARDED_FOR = os.environ.get("AUTH_TRUST_FORWARDED_FOR", "0") == "1"
 # 首次启动自动创建的 root 账号名
 AUTH_ROOT_USERNAME = os.environ.get("AUTH_ROOT_USERNAME", "root")

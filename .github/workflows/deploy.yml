@@ -13,11 +13,18 @@
 #   /opt/releases/<sha8>.tar.gz   ← 每次部署过的**源码包**（保留最近 3 个）
 #   /opt/releases/CURRENT         ← 当前版本 sha8
 #   /opt/releases/PREVIOUS        ← 上一个版本 sha8（供"回退一步"）
-#   retail-assistant:v4           ← 正在运行的镜像
-#   retail-assistant:sha-<sha8>   ← 每个版本的镜像（保留最近 3 个）
+#   retail-assistant:v4           ← 正在运行的后端镜像
+#   retail-assistant:sha-<sha8>   ← 每个版本的后端镜像（保留最近 3 个）
+#   retail-edge:v1                ← edge 网关镜像（有 edge 拓扑时）
+#   retail-edge:sha-<sha8>        ← 每个版本的 edge 镜像（保留最近 3 个）
 #
 # 因此**回滚不需要重新构建**（2 核机器一次构建要 ~20 分钟）：
 # 只要把旧镜像重新 tag 成 `retail-assistant:v4` + 把旧源码包解包回去 + 重建容器（秒级）。
+#
+# **拓扑随目标版本走**：源码包里带 `docker-compose.edge.yml` 就用"Go edge 对外
+# 8000 + backend 只在 compose 内网"的拓扑；没有就退回 backend 直连拓扑（并清掉
+# 目录里残留的覆盖文件、释放 8000）。`!reset` 需要 compose ≥ 2.20（服务器实测
+# v5.5.1）；解析不了时**直接失败**而不是静默退回——避免"以为上了 edge 其实没有"。
 #
 #   回滚到指定版本：Actions → Run workflow → rollback_to 填 sha 前缀（如 59cc78c）
 #   回退一步：      rollback_to 填 previous
@@ -123,13 +130,47 @@ jobs:
               done
               return 1
             }
-            prune_old() {
-              # 镜像：保留最近 KEEP 个 sha 标签
+            prune_tags() {
+              # 某仓库的 sha 标签：保留最近 KEEP 个
               docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' \
-                | grep '^retail-assistant:sha-' | sort -k2 -r | tail -n +$((KEEP + 1)) \
+                | grep "^$1:sha-" | sort -k2 -r | tail -n +$((KEEP + 1)) \
                 | awk '{print $1}' | xargs -r docker rmi -f >/dev/null 2>&1 || true
+            }
+            prune_old() {
+              prune_tags retail-assistant
+              prune_tags retail-edge
               # 源码包：同样只留最近 KEEP 个
               ls -1t "$REL"/*.tar.gz 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f || true
+            }
+
+            # 按"目标版本"选定拓扑，并让落地目录与目标版本一致。
+            # 传源码包路径 = 按包内清单判定；传空串 = 以磁盘上刚解包的源码为准。
+            # 设置两个全局量：COMPOSE（后续所有 compose 调用的前缀）与 HAS_EDGE。
+            use_topology() {
+              HAS_EDGE=0
+              if [ -n "$1" ] && [ -f "$1" ]; then
+                tar -tzf "$1" | grep -qx 'docker-compose.edge.yml' && HAS_EDGE=1 || true
+              elif [ -f docker-compose.edge.yml ]; then
+                HAS_EDGE=1
+              fi
+              if [ "$HAS_EDGE" = "1" ]; then
+                if docker compose -f docker-compose.yml -f docker-compose.edge.yml config --quiet 2>/dev/null; then
+                  COMPOSE="docker compose -f docker-compose.yml -f docker-compose.edge.yml"
+                  echo "  拓扑：Go edge 对外 8000（backend 不发布端口）"
+                else
+                  echo "❌ 源码含 docker-compose.edge.yml，但本机 compose 解析不了它"
+                  echo "   （ports: !reset 需 compose ≥ 2.20；实测服务器为 v5.5.1）"
+                  exit 1
+                fi
+              else
+                COMPOSE="docker compose -f docker-compose.yml"
+                echo "  拓扑：backend 直连 8000"
+                # 目标版本没有 edge：删掉目录里可能残留的覆盖文件（tar 解包只覆盖、
+                # 不删除旧文件；残留会让"部署失败 → 自动回滚"回不到直连形态），
+                # 并释放 8000（现役 edge 容器占着它，backend 直连绑不上端口）。
+                rm -f docker-compose.edge.yml
+                docker ps -aq -f label=com.docker.compose.service=edge | xargs -r docker rm -f || true
+              fi
             }
 
             # ==================== 回滚分支 ====================
@@ -156,18 +197,25 @@ jobs:
               else
                 echo "  ⚠ 没有 $TARGET 的源码包（只回滚镜像；下次构建会变回新代码）"
               fi
+              use_topology "$REL/$TARGET.tar.gz"
               CUR=$(cat "$REL/CURRENT" 2>/dev/null || true)
               [ -n "$CUR" ] && echo "$CUR" > "$REL/PREVIOUS"
               echo "$TARGET" > "$REL/CURRENT"
               docker tag "$IMG" retail-assistant:v4
-              docker compose up -d --force-recreate backend
+              if [ "$HAS_EDGE" = "1" ] && docker image inspect "retail-edge:sha-$TARGET" >/dev/null 2>&1; then
+                docker tag "retail-edge:sha-$TARGET" retail-edge:v1   # edge 镜像一起回退
+              fi
+              $COMPOSE up -d --force-recreate backend
+              if [ "$HAS_EDGE" = "1" ]; then
+                $COMPOSE up -d --force-recreate edge
+              fi
               if wait_healthy; then
                 echo "✅ 已回滚到 $TARGET"
-                docker compose ps
+                $COMPOSE ps
                 exit 0
               fi
               echo "❌ 回滚后健康检查仍失败"
-              docker compose logs --tail=60 backend || true
+              $COMPOSE logs --tail=60 backend || true
               exit 1
             fi
 
@@ -181,29 +229,42 @@ jobs:
             tar -xzf /tmp/retail-deploy/src.tar.gz -C /opt/retail-assistant
             rm -f /tmp/retail-deploy/src.tar.gz
 
+            # 2.5) 拓扑选择：以刚解包的源码为准（顺带清理与本版本不符的残留）
+            use_topology ""
+
             # 3) 重建并启动
-            docker compose up -d --build
+            $COMPOSE up -d --build
 
             # 4) 无论成败都打版本标签，便于事后回滚
             docker tag retail-assistant:v4 "retail-assistant:sha-$SHORT"
+            if docker image inspect retail-edge:v1 >/dev/null 2>&1; then
+              docker tag retail-edge:v1 "retail-edge:sha-$SHORT"
+            fi
 
-            # 5) 健康检查：后端 ready + 首页引用了前端产物
+            # 5) 健康检查：后端 ready + 首页引用了前端产物（均经 8000，拓扑无关）
             if wait_healthy && front_ok; then
               echo "✅ 部署成功 $SHORT"
               prune_old
-              docker compose ps
+              $COMPOSE ps
               exit 0
             fi
 
             # 6) 失败 → 自动回滚到上一个版本
             echo "❌ 健康检查/前端可用性检查失败，尝试回滚到上一个版本"
-            docker compose logs --tail=80 backend || true
+            $COMPOSE logs --tail=80 backend || true
             PREV=$(cat "$REL/PREVIOUS" 2>/dev/null || true)
             if [ -n "$PREV" ] && docker images --format '{{.Tag}}' | grep -q "^sha-$PREV\$"; then
               if [ -f "$REL/$PREV.tar.gz" ]; then tar -xzf "$REL/$PREV.tar.gz" -C /opt/retail-assistant || true; fi
+              use_topology "$REL/$PREV.tar.gz"
               echo "$PREV" > "$REL/CURRENT"
               docker tag "retail-assistant:sha-$PREV" retail-assistant:v4
-              docker compose up -d --force-recreate backend || true
+              if [ "$HAS_EDGE" = "1" ] && docker image inspect "retail-edge:sha-$PREV" >/dev/null 2>&1; then
+                docker tag "retail-edge:sha-$PREV" retail-edge:v1
+              fi
+              $COMPOSE up -d --force-recreate backend || true
+              if [ "$HAS_EDGE" = "1" ]; then
+                $COMPOSE up -d edge || true
+              fi
               echo "已回滚到 $PREV"
             else
               echo "⚠ 没有可用的上一版本镜像，保持现状（需人工处理）"

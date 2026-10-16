@@ -1,0 +1,65 @@
+# ============================================================
+# 边缘网关覆盖文件（Go edge 上线形态）
+#
+# 用法（在基础拓扑之上叠加）：
+#   启动：docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d --build
+#   回退：docker compose -f docker-compose.yml -f docker-compose.edge.yml down
+#         docker compose -f docker-compose.yml up -d --build
+#   （回退必须连 overlay 一起 down：edge 不在基础文件里，直接 up 会留下孤儿
+#     容器继续占用 8000，backend 反而绑不上端口。）
+#
+# 拓扑变化：
+#   - 对外 8000 从 backend 换到 edge（静态托管 / 健康 / 兜底反代全在 Go 侧）；
+#   - backend 不再发布任何宿主机端口，只经 compose 内网被 edge 访问；
+#
+# ⚠ 版本要求：`ports: !reset` 需要 compose ≥ 2.20（见 deploy.yml 的部署时自检，
+#   解析失败会自动退回基础拓扑并告警——不在部署脚本里假设远端版本）。
+#
+# ⚠ YAML anchor 不跨文件：本文件里用到的 &default-logging 必须在**本文件内**
+#   重新定义一次，否则 compose 报 unknown anchor。
+# ============================================================
+
+name: retail-assistant
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+  # ---------------- 业务后端（转为纯内网服务） ----------------
+  backend:
+    # 基础文件里 ports 是 ["8000:8000"]，而 compose 对**列表默认是合并/追加**
+    # 语义——只写 `ports: []` 不会生效（仍会发布 8000，与 edge 冲突）。
+    # `!reset` 才是"丢弃基础值、使用此处值"。
+    ports: !reset []
+    environment:
+      # 反代拓扑下登录限流的 IP 口径修正（见 api/routes/auth.py 的
+      # client_ip_from_request）：edge 会剥离入站伪造头并重设 X-Forwarded-For，
+      # 这里让 backend 采信第一跳。
+      # 直连形态（不带本 overlay）该变量为默认 "0"，行为与之前完全一致。
+      AUTH_TRUST_FORWARDED_FOR: "1"
+
+  # ---------------- 边缘网关（Go，唯一对外进程） ----------------
+  edge:
+    logging: *default-logging
+    build:
+      context: .
+      dockerfile: edge.Dockerfile
+    image: retail-edge:v1
+    restart: unless-stopped
+    # 只保证"backend 容器先起来"，**不等待其健康**：edge 的职责之一就是
+    # 后端不可用时仍对外提供静态页与 liveness（故障隔离），等待健康反而
+    # 会把整站可用性重新绑回 Python。
+    depends_on:
+      - backend
+    ports:
+      - "8000:8000"
+    environment:
+      # 容器内监听地址（与镜像默认一致，显式写出便于排错时一眼看到）
+      EDGE_LISTEN: ":8000"
+      # 经 compose 内网用服务名访问 backend；backend 已不发布宿主机端口
+      EDGE_BACKEND_URL: "http://backend:8000"
+      # 前端产物在 edge 镜像内部（阶段 1 构建后 COPY 进 /srv/dist）
+      EDGE_DIST_DIR: "/srv/dist"

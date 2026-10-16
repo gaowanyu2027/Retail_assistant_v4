@@ -12,6 +12,7 @@ from langchain_core.tools import tool
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.base_agent import create_llm, create_memory, langfuse_available, observe_langfuse
+from agents.langfuse_client import get_langfuse
 from agents import tool_guard
 from agents.intent_router import infer_intent_from_tools
 from config.settings import AGENT_MAX_TOOL_CALLS_PER_TURN, AGENT_RECURSION_LIMIT
@@ -654,10 +655,12 @@ class MasterAgent:
         if not langfuse_available():
             return None, None, None
         try:
-            from langfuse import Langfuse
+            lf = get_langfuse()
+            if lf is None:
+                return None, None, None
             # session_id 必须作为顶层参数（而非仅放 metadata）：
             # Langfuse 的 Sessions 页面按 trace.sessionId 聚合，放 metadata 里页面会为空
-            trace = Langfuse().trace(
+            trace = lf.trace(
                 name=name, input=query,
                 session_id=session_id,
                 metadata={"session_id": session_id},
@@ -677,14 +680,17 @@ class MasterAgent:
 
     @staticmethod
     def _lf_finish(gen, span, output: str, usage: dict | None = None):
-        """结束 generation/span 并刷盘（失败不影响主流程）。"""
+        """结束 generation/span（失败不影响主流程）。
+
+        **不调 flush()**：实测单个事件的 flush≈560ms（同步等 ingestion POST），
+        且共享客户端下高并发会在同一条队列上排队（压测实测 c100 被拖到 <3 QPS）。
+        事件入队后由客户端后台线程按间隔批量上报，延迟 ~1s，与手动 flush 无感差异。
+        """
         try:
             if gen is not None:
                 gen.end(output=output, usage=usage or {})
             if span is not None:
                 span.end(output=output)
-            from langfuse import Langfuse
-            Langfuse().flush()
         except Exception as e:
             print(f"[Langfuse] 打点结束失败: {e}")
 
@@ -694,8 +700,10 @@ class MasterAgent:
         if not langfuse_available() or result is None:
             return
         try:
-            from langfuse import Langfuse
-            trace = Langfuse().trace(
+            lf = get_langfuse()
+            if lf is None:
+                return
+            trace = lf.trace(
                 name="quick_answer",
                 input=query,
                 session_id=session_id,
@@ -707,7 +715,7 @@ class MasterAgent:
                 metadata={"intent": intent, "session_id": session_id},
             )
             span.end(output=result.get("answer", ""))
-            Langfuse().flush()
+            # 不 flush：见 _lf_finish 的说明（请求路径上的同步 flush 是 c100 灾难）
         except Exception as e:
             print(f"[Langfuse] 模板回答打点失败: {e}")
 
@@ -997,9 +1005,9 @@ class MasterAgent:
         full_answer = ""
         usage_meta = None
         try:
-            if langfuse_available():
-                from langfuse import Langfuse
-                trace = Langfuse().trace(
+            lf = get_langfuse() if langfuse_available() else None
+            if lf is not None:
+                trace = lf.trace(
                     name="query_stream",
                     input=query,
                     session_id=session_id,

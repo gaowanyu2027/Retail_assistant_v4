@@ -9,7 +9,8 @@
     template  → 模板路由快路径（零 LLM，验证毫秒级 + 高并发 QPS）
     agent     → 完整 Agent 路径（LLM + 工具编排，验证异步并发与吞吐）
     mixed     → 混合流量（模板为主，少量 Agent，验证整体稳定性）
-- 会话池：固定 N 个 bench_* session_id，模拟真实用户复用会话
+- 会话池：固定 N 个 `bench_*` session_id，模拟真实用户复用会话
+  （前缀可用 LOADTEST_SESSION_PREFIX 换；多轮对比时用一次性前缀避免吃上一轮的历史）
 
 用法:
     python benchmark/loadtest.py --mode template --concurrency 200 --requests 1500
@@ -17,6 +18,7 @@
 """
 import argparse
 import asyncio
+import os
 import random
 import sys
 import time
@@ -25,8 +27,14 @@ from pathlib import Path
 
 import httpx
 
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = os.environ.get("LOADTEST_BASE_URL", "http://127.0.0.1:8000")
 REPORT_DIR = Path(__file__).resolve().parent / "reports"
+
+# 会话池前缀。默认 bench：同一批 session_id 反复复用（贴近真实用户复访）。
+# 做**多轮对比**（如"直连 vs 经网关"）时改用一次性前缀（LOADTEST_SESSION_PREFIX=ab1
+# 之类）——模板轮会把一问一答写进该会话的检查点，复用同一批 session 会让后面
+# 的轮次背着前面轮次积累的会话历史起跑，两边就不是同一起点了。
+SESSION_PREFIX = os.environ.get("LOADTEST_SESSION_PREFIX", "bench")
 
 # 模板问题池（来自评测集 router 用例，保证走模板路由：强词命中 + 无分析结构。
 # 注意：不能混入"那热度呢"这类弱词单独问题——保守化设计会让它走 LLM，
@@ -131,7 +139,7 @@ async def run_round(
         questions = TEMPLATE_QUESTIONS * 9 + AGENT_QUESTIONS  # 模板为主（约 90/10）
     else:
         questions = TEMPLATE_QUESTIONS
-    session_pool = [f"bench_{mode}_{i}" for i in range(session_pool_size)]
+    session_pool = [f"{SESSION_PREFIX}_{mode}_{i}" for i in range(session_pool_size)]
     results: list[tuple[float, int]] = []
     sem = asyncio.Semaphore(concurrency)
 
@@ -166,7 +174,9 @@ def render_report(rounds: list[dict]) -> str:
         f"# 并发压测报告 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
         f"- 目标接口: `POST /api/queries`（模板快路径 + Agent LLM 路径）",
+        f"- 压测目标: `{BASE_URL}`（直连后端或经 Go edge；用 LOADTEST_BASE_URL 指定）",
         f"- 压测方法: asyncio+httpx 客户端并发（信号量限流），每轮预热后计时",
+        f"- 会话池前缀: `{SESSION_PREFIX}_*`（LOADTEST_SESSION_PREFIX 可换，多轮对比时用一次性前缀）",
         "",
         "## 结果矩阵",
         "",

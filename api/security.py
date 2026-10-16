@@ -983,14 +983,15 @@ def cookie_secure(request: Request | None) -> bool:
 
 
 def client_ip_from_request(request: Request | None) -> str:
-    """取**审计展示**用的来源 IP。
+    """取来源 IP（会话审计展示 + 登录失败限流共用）。
 
     默认取直连对端（`request.client.host`）；只有显式打开
     `AUTH_TRUST_FORWARDED_FOR=1` 时才采信 `X-Forwarded-For` 的第一跳
     （反向代理场景，此时对端是代理 IP，没意义）。
 
-    ⚠ 这个值可以伪造（XFF 头由客户端随意填），因此**只用于会话列表展示**：
-    登录限流仍使用直连对端 IP（见 `api/routes/auth.py` 的 login）。
+    ⚠ 置 1 即**采信 XFF**，而该头可被客户端伪造 —— 只有当入口代理会
+    **剥离入站 XFF 并重设**时才可置 1（本项目的 Go edge 即如此，见
+    `edge/internal/proxy/proxy.go`）；Python 直连暴露时保持默认 0。
     """
     if request is None:
         return ""
