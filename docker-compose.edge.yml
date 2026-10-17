@@ -67,7 +67,12 @@ services:
       # 前端产物在 edge 镜像内部（阶段 1 构建后 COPY 进 /srv/dist）
       EDGE_DIST_DIR: "/srv/dist"
       # 鉴权早拒：无凭据 / 凭据明确无效的 /api/** 请求在 edge 就得到与 Python
-      # 逐字一致的 401（回源校验带 5s/2s 缓存）。下设 0 或清空密钥即回退为
-      # "全部反代"，行为与不带早拒时完全一致。
-      EDGE_AUTH: "1"
+      # 逐字一致的 401（回源校验带 5s/2s 缓存）。默认开启；在 .env 设
+      # EDGE_AUTH=0 或清空密钥即回退为"全部反代"，行为与不带早拒时完全一致。
+      # ⚠ .env 只参与 compose 变量插值，不会自动进容器——开关必须在这里显式透传。
+      EDGE_AUTH: "${EDGE_AUTH:-1}"
+      # 视频数据面（S3）：1 = 观看连接 / 会话仲裁 / 扇出由 edge 接管；
+      # 默认 0 = /api/ws/** 整条反代给 Python。接管还要求 EDGE_AUTH=1 且
+      # INTERNAL_API_TOKEN 非空，任一不满足即静默回退（《部署流程》§3.16.2、坑 28）。
+      EDGE_VIDEO: "${EDGE_VIDEO:-0}"
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
