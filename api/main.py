@@ -288,6 +288,7 @@ from api.routes.cameras import router as cameras_router
 from api.routes.multi_stream import router as multi_stream_router
 from api.routes.auth import router as auth_router
 from api.routes.internal import router as internal_router
+from api.routes.vision_internal import router as vision_internal_router
 
 app.include_router(query_router, prefix="/api")
 app.include_router(report_router, prefix="/api")
@@ -306,6 +307,9 @@ app.include_router(auth_router, prefix="/api")
 # 内部端点（Go edge 专用，不对外）：三道门禁见 api/routes/internal.py，
 # 未配置 INTERNAL_API_TOKEN 时全部 404。不带 /api 前缀，故鉴权中间件不拦它，
 # 由端点自身的 require_internal_token 兜住。
+# ⚠ 注册顺序有意义：video 的端点必须排在 internal_router **之前** ——
+# 后者带一条 `/{_path:path}` 兜底（未匹配路径一律 404），会吞掉之后注册的一切。
+app.include_router(vision_internal_router, prefix="/internal")
 app.include_router(internal_router, prefix="/internal")
 
 # ==================== 前端入口（Vue 版为唯一浏览器前端，原生 JS 版已移除） ====================

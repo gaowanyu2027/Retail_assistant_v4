@@ -4,7 +4,7 @@
   1. golden：对照 contracts/ws_messages.json 逐字比对 ws_protocol.py 的输出；
   2. 字节等价：新协议（内部直存 JPEG 字节）的下行字节 == 迁移前 base64 往返的产出
      —— 证明"去 base64"对客户端零感知（这是 S0 改动的核心安全性证据）；
-  3. 静态守卫（AST）：stream.py 不再持有 base64 字符串帧、帧发送必经 frame_packet，
+  3. 静态守卫（AST）：帧路径不再持有 base64 字符串帧、帧发送必经 frame_packet，
      任何人回退这套做法都会在这里红。
 
 依赖约定：只依赖 stdlib + ws_protocol（其本体只依赖 config.settings）。
@@ -102,23 +102,39 @@ def test_ws_protocol_minimal_deps():
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
 
 
-def test_stream_module_has_no_base64_frame_roundtrip():
-    """静态守卫：stream.py 不再持有 base64 字符串帧；帧发送必经 ws_protocol.frame_packet。
+def test_no_base64_frame_roundtrip_in_frame_path():
+    """静态守卫：帧路径不再持有 base64 字符串帧；帧发送必经 ws_protocol.frame_packet。
 
     断言的是**源码结构**（AST），不是运行时行为 —— 目的是防回退。
-    注意 b64decode 不做禁止：上行入口（浏览器推帧 inject_client_frame）的入参
-    本来就是 base64 字符串（canvas.toDataURL 产物），那是协议另一侧，保留。
+    注意 b64decode 不做禁止：上行入口（浏览器推帧 client_frame 的入参）本来就是
+    base64 字符串（canvas.toDataURL 产物），那是协议另一侧，保留。
+
+    帧状态的位置（S3 迁走前是 stream.py 的模块级全局，现在是会话对象字段）：
+    `vision/session.py` 存**原始 JPEG 字节**，`vision/pipeline.py` 负责编码。
     """
-    tree = ast.parse((PROJECT_ROOT / "api" / "routes" / "stream.py").read_text(encoding="utf-8"))
+    stream_src = (PROJECT_ROOT / "api" / "routes" / "stream.py").read_text(encoding="utf-8")
+    session_src = (PROJECT_ROOT / "vision" / "session.py").read_text(encoding="utf-8")
+    pipeline_src = (PROJECT_ROOT / "vision" / "pipeline.py").read_text(encoding="utf-8")
 
-    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-    assert "_latest_frame_b64" not in names, "旧的 base64 帧全局量回来了"
-    assert "_latest_frame_jpeg" in names, "未找到直存 JPEG 字节的全局量"
+    stream_tree = ast.parse(stream_src)
+    session_tree = ast.parse(session_src)
+    pipeline_tree = ast.parse(pipeline_src)
 
-    called_attrs = {n.func.attr for n in ast.walk(tree)
-                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-    assert "b64encode" not in called_attrs, "下行侧又出现了 base64 编码（应为直存 JPEG 字节）"
+    stream_names = {n.id for n in ast.walk(stream_tree) if isinstance(n, ast.Name)}
+    session_names = {n.id for n in ast.walk(session_tree) if isinstance(n, ast.Name)}
+    assert "_latest_frame_b64" not in stream_names | session_names, "旧的 base64 帧全局量回来了"
+    # 帧状态是会话字段（self.latest_jpeg），属性名不在 ast.Name 里 —— 属性也要看
+    session_attrs = {n.attr for n in ast.walk(session_tree) if isinstance(n, ast.Attribute)}
+    assert "latest_jpeg" in session_names | session_attrs, "会话里未找到直存 JPEG 字节的字段"
 
-    called_names = {n.func.id for n in ast.walk(tree)
+    for tree in (stream_tree, session_tree, pipeline_tree):
+        called_attrs = {n.func.attr for n in ast.walk(tree)
+                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        assert "b64encode" not in called_attrs, "下行侧又出现了 base64 编码（应为直存 JPEG 字节）"
+
+    called_names = {n.func.id for n in ast.walk(stream_tree)
                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "frame_packet" in called_names, "帧发送未经过 ws_protocol.frame_packet"
+    assert "imencode" in {n.func.attr for n in ast.walk(pipeline_tree)
+                          if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}, \
+        "编码帧仍应走 cv2.imencode（处理线程侧）"

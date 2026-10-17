@@ -27,6 +27,7 @@ from starlette.requests import Request  # noqa: E402
 
 from api import security as S  # noqa: E402
 from api.routes import internal  # noqa: E402
+from config.settings import AUTH_ENABLED  # noqa: E402
 from test_auth import _cleanup, _fresh_db  # noqa: E402
 
 GOOD_TOKEN = "internal-token-for-tests"
@@ -129,14 +130,19 @@ def test_verify_returns_limited_user_fields():
 
         out = internal.verify_session(internal.TokenRequest(token=token))
         assert out == {"valid": True,
-                       "user": {"id": user["id"], "username": "alice", "role": "platform"}}, \
+                       "user": {"id": user["id"], "username": "alice", "role": "platform"},
+                       "auth_enabled": AUTH_ENABLED}, \
             f"判定结果形状不符：{out}"
         # 最小暴露面：会话令牌、过期时间、昵称等一概不出网
         assert "token" not in out["user"] and "session_expires_at" not in out["user"]
 
+        # 无凭据也要能问到"这台后端开着鉴权吗"：edge 据此决定 WS 是否本地接管
+        assert out["auth_enabled"] == AUTH_ENABLED
+
         for bad in ("", "nope", token + "x"):
             assert internal.verify_session(internal.TokenRequest(token=bad)) == \
-                {"valid": False, "user": None}, f"无效令牌 {bad!r} 应得否定结论"
+                {"valid": False, "user": None, "auth_enabled": AUTH_ENABLED}, \
+                f"无效令牌 {bad!r} 应得否定结论"
     finally:
         _cleanup()
 
@@ -149,7 +155,7 @@ def test_verify_rejects_expired_and_disabled():
 
         S.update_user(user["id"], enabled=False)          # 停用账号 → 已有会话立即失效
         assert internal.verify_session(internal.TokenRequest(token=token)) == \
-            {"valid": False, "user": None}
+            {"valid": False, "user": None, "auth_enabled": AUTH_ENABLED}
     finally:
         _cleanup()
 
@@ -162,11 +168,13 @@ def test_consume_ticket_is_one_shot():
 
         first = internal.consume_ws_ticket(internal.TicketRequest(ticket=ticket))
         assert first == {"valid": True,
-                         "user": {"id": user["id"], "username": "alice", "role": "platform"}}, \
+                         "user": {"id": user["id"], "username": "alice", "role": "platform"},
+                         "auth_enabled": AUTH_ENABLED}, \
             f"首次消费应有效：{first}"
         # 用后即焚：原子消费（SELECT+DELETE）留在 Python 单写者内
         second = internal.consume_ws_ticket(internal.TicketRequest(ticket=ticket))
-        assert second == {"valid": False, "user": None}, "票据不得二次使用"
+        assert second == {"valid": False, "user": None, "auth_enabled": AUTH_ENABLED}, \
+            "票据不得二次使用"
 
         assert internal.consume_ws_ticket(internal.TicketRequest(ticket="nope"))["valid"] is False
     finally:

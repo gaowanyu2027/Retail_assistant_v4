@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/netip"
+	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -36,7 +37,13 @@ type Metrics struct {
 	verifyOK   atomic.Int64
 	verifyErr  atomic.Int64
 	cacheHits  atomic.Int64
+
+	// 视频数据面快照（S3 接线；nil = 未接线，输出 null）
+	videoSource func() any
 }
+
+// SetVideoSource 挂上视频数据面的快照函数（main 启动时调用一次）。
+func (m *Metrics) SetVideoSource(fn func() any) { m.videoSource = fn }
 
 func New(backendURL string) *Metrics {
 	m := &Metrics{start: time.Now(), backendURL: backendURL,
@@ -89,12 +96,16 @@ func (m *Metrics) IncCacheHit() { m.cacheHits.Add(1) }
 
 type snapshot struct {
 	UptimeSeconds float64          `json:"uptime_seconds"`
+	Goroutines    int              `json:"goroutines"`
 	BackendURL    string           `json:"backend_url"`
 	Inflight      int64            `json:"inflight"`
 	Requests      map[string]int64 `json:"requests"`
 	Responses     map[string]int64 `json:"responses"`
 	ProxyErrors   int64            `json:"proxy_errors"`
 	EdgeAuth      authStats        `json:"edge_auth"`
+	// Video 视频数据面（S3）的计数，由 video.Stats.Snapshot 提供；
+	// 未接线时为 null。字段是 any：metrics 包不该认识视频内部结构。
+	Video any `json:"video"`
 }
 
 // authStats 边缘鉴权早拒的计数（未启用时全 0）。
@@ -124,6 +135,7 @@ func (m *Metrics) Serve(w http.ResponseWriter, r *http.Request) {
 	}
 	snap := snapshot{
 		UptimeSeconds: math.Round(time.Since(m.start).Seconds()*10) / 10,
+		Goroutines:    runtime.NumGoroutine(),
 		BackendURL:    m.backendURL,
 		Inflight:      m.inflight.Load(),
 		Requests:      req,
@@ -138,6 +150,9 @@ func (m *Metrics) Serve(w http.ResponseWriter, r *http.Request) {
 			VerifyError: m.verifyErr.Load(),
 			CacheHits:   m.cacheHits.Load(),
 		},
+	}
+	if m.videoSource != nil {
+		snap.Video = m.videoSource()
 	}
 	body, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {

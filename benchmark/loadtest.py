@@ -36,6 +36,10 @@ REPORT_DIR = Path(__file__).resolve().parent / "reports"
 # 的轮次背着前面轮次积累的会话历史起跑，两边就不是同一起点了。
 SESSION_PREFIX = os.environ.get("LOADTEST_SESSION_PREFIX", "bench")
 
+# 登录 Cookie（可选，如 retail_sid=...）。AUTH_ENABLED=1 的部署下 /api/queries
+# 需要登录态；压测脚本没有登录流程，因此由调用方把**已建好的会话**从环境传入。
+COOKIE = os.environ.get("LOADTEST_COOKIE", "").strip()
+
 # 模板问题池（来自评测集 router 用例，保证走模板路由：强词命中 + 无分析结构。
 # 注意：不能混入"那热度呢"这类弱词单独问题——保守化设计会让它走 LLM，
 # 混入会污染"纯模板"压测统计）
@@ -143,7 +147,7 @@ async def run_round(
     results: list[tuple[float, int]] = []
     sem = asyncio.Semaphore(concurrency)
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers={"Cookie": COOKIE} if COOKIE else None) as client:
         # 预热（模板：首个请求 skill 懒加载；agent：会话/模型冷启动）
         for _ in range(min(warmup, total)):
             await _fire(client, sem, questions, session_pool, results, mode)
@@ -175,6 +179,7 @@ def render_report(rounds: list[dict]) -> str:
         "",
         f"- 目标接口: `POST /api/queries`（模板快路径 + Agent LLM 路径）",
         f"- 压测目标: `{BASE_URL}`（直连后端或经 Go edge；用 LOADTEST_BASE_URL 指定）",
+        f"- 登录态: {'已通过 LOADTEST_COOKIE 传入' if COOKIE else '匿名（AUTH_ENABLED=0 的部署）'}",
         f"- 压测方法: asyncio+httpx 客户端并发（信号量限流），每轮预热后计时",
         f"- 会话池前缀: `{SESSION_PREFIX}_*`（LOADTEST_SESSION_PREFIX 可换，多轮对比时用一次性前缀）",
         "",

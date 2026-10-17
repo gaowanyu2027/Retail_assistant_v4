@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from api.security import consume_ticket, get_session
-from config.settings import INTERNAL_API_TOKEN
+from config.settings import AUTH_ENABLED, INTERNAL_API_TOKEN
 
 router = APIRouter(tags=["internal"], include_in_schema=False)
 
@@ -79,20 +79,26 @@ def require_internal_token(request: Request) -> None:
 # ==================== 响应构造 ====================
 
 def _verdict(user: dict | None) -> dict:
-    """统一的判定结果：只回 edge 用得上的三个字段（最小暴露面）。
+    """统一的判定结果：只回 edge 用得上的四个字段（最小暴露面）。
 
     会话令牌 / 过期时间 / 昵称等一概不出网 —— edge 只需要"有效吗、是谁、什么角色"。
+
+    `auth_enabled`：本进程是否开着鉴权。关掉鉴权时中间件直接放行（不解析登录态），
+    edge 拿这个开关决定"WS 要不要本地接管"——关着就整条代理回 Python，
+    视频数据面在原地继续工作（见 `api/routes/vision_internal.py` 与部署文档）。
     """
-    if not user:
-        return {"valid": False, "user": None}
-    return {
-        "valid": True,
-        "user": {
+    payload = {
+        "valid": bool(user),
+        "user": None,
+        "auth_enabled": AUTH_ENABLED,
+    }
+    if user:
+        payload["user"] = {
             "id": user.get("id"),
             "username": user.get("username"),
             "role": user.get("role"),
-        },
-    }
+        }
+    return payload
 
 
 # ==================== 端点 ====================

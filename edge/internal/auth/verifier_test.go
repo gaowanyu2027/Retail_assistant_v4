@@ -46,10 +46,11 @@ func verdictBackend(t *testing.T) (*fakeBackend, *httptest.Server) {
 		_ = json.Unmarshal([]byte(body), &req)
 		w.Header().Set("Content-Type", "application/json")
 		if req["token"] == "good" || req["ticket"] == "good-ticket" {
-			_, _ = w.Write([]byte(`{"valid":true,"user":{"id":7,"username":"alice","role":"platform"}}`))
+			_, _ = w.Write([]byte(`{"valid":true,"auth_enabled":true,` +
+				`"user":{"id":7,"username":"alice","role":"platform"}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"valid":false,"user":null}`))
+		_, _ = w.Write([]byte(`{"valid":false,"user":null,"auth_enabled":true}`))
 	})
 }
 
@@ -119,7 +120,8 @@ func TestVerifySingleFlight(t *testing.T) {
 	fb, srv := newFakeBackend(t, func(w http.ResponseWriter, _ string) {
 		<-release // 卡住第一次回源，逼并发请求汇入同一次调用
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"valid":true,"user":{"id":1,"username":"u","role":"viewer"}}`))
+		_, _ = w.Write([]byte(`{"valid":true,"auth_enabled":true,` +
+			`"user":{"id":1,"username":"u","role":"viewer"}}`))
 	})
 	v := NewVerifier(srv.URL, "k", Observer{})
 
@@ -178,7 +180,8 @@ func TestVerifyFailureIsUnknownNotDeny(t *testing.T) {
 			w.WriteHeader(500)
 			return
 		}
-		_, _ = w.Write([]byte(`{"valid":true,"user":{"id":1,"username":"u","role":"root"}}`))
+		_, _ = w.Write([]byte(`{"valid":true,"auth_enabled":true,` +
+			`"user":{"id":1,"username":"u","role":"root"}}`))
 	})
 	v2 := NewVerifier(srv.URL, "k", Observer{})
 	if got := v2.Verify("t"); got.Known {
@@ -187,6 +190,32 @@ func TestVerifyFailureIsUnknownNotDeny(t *testing.T) {
 	fail.Store(false)
 	if got := v2.Verify("t"); !got.Known || !got.Valid {
 		t.Errorf("上游恢复后应立即得到权威结论：%+v（回源 %d 次）", got, fb.calls.Load())
+	}
+}
+
+// TestAuthDisabledIsUnknownNotDeny AUTH_ENABLED=0 的 Python 对谁都放行，
+// `valid:false` 只说明"没有登录态"。edge 若照字面拒绝，就会出现
+// "直连 200、经 edge 401"的分裂 —— 必须按"未知"处理（放行给 Python）。
+func TestAuthDisabledIsUnknownNotDeny(t *testing.T) {
+	_, srv := newFakeBackend(t, func(w http.ResponseWriter, _ string) {
+		_, _ = w.Write([]byte(`{"valid":false,"user":null,"auth_enabled":false}`))
+	})
+	v := NewVerifier(srv.URL, "k", Observer{})
+	if got := v.Verify("any"); got.Known {
+		t.Fatalf("鉴权关着时应得 Known=false，实得 %+v", got)
+	}
+	// 结论不入缓存（不权威），且 gate 必须放行
+	if _, ok := v.cache["any"]; ok {
+		t.Errorf("非权威结论不该进缓存")
+	}
+
+	// 旧版 Python（没有这个字段）走同一条路：宁可退化为"全部反代"，不可误拒
+	_, srv2 := newFakeBackend(t, func(w http.ResponseWriter, _ string) {
+		_, _ = w.Write([]byte(`{"valid":false,"user":null}`))
+	})
+	v2 := NewVerifier(srv2.URL, "k", Observer{})
+	if got := v2.Verify("any"); got.Known {
+		t.Fatalf("无 auth_enabled 字段时应得 Known=false，实得 %+v", got)
 	}
 }
 

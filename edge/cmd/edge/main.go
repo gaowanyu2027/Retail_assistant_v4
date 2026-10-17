@@ -25,6 +25,7 @@ import (
 	"retail-assistant/edge/internal/proxy"
 	"retail-assistant/edge/internal/routing"
 	"retail-assistant/edge/internal/static"
+	"retail-assistant/edge/internal/video"
 )
 
 type app struct {
@@ -32,6 +33,7 @@ type app struct {
 	st   *static.Handler
 	px   *proxy.Proxy
 	gate *auth.Gate
+	vid  *video.Handler // nil = 视频数据面未启用（WS 照旧反代）
 }
 
 // ServeHTTP 是唯一的请求入口：先归类（决定本地处理还是反代），
@@ -54,6 +56,16 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"ip", httpx.ClientIP(r.RemoteAddr),
 		)
 	}()
+
+	// 视频 WS（/api/ws/stream、/api/ws/client）：归类之前先问数据面。
+	// 它只认真正的升级请求；不接管（没开、拿不准结论、正在关闭）就返回 false，
+	// 请求原样落到下面的 switch —— 仍是 Proxy，走兜底反代。
+	if a.vid != nil {
+		if k, handled := a.vid.Handle(rw, r); handled {
+			kind = k
+			return
+		}
+	}
 
 	switch kind {
 	case routing.Index:
@@ -132,6 +144,22 @@ func main() {
 	a := &app{m: m, st: static.New(cfg.DistDir), px: px,
 		gate: auth.NewGate(verifier, gateEnabled)}
 
+	// 视频数据面（S3，可选，EDGE_VIDEO=1）。与早拒共用同一个判定器：
+	// 同一份 TTL 缓存，"这条连接能不能算登录了"两侧答案一致。
+	vid := video.New(video.Options{
+		Video: cfg.EdgeVideo, AuthEnabled: cfg.EdgeAuth,
+		BackendURL: cfg.BackendURL, InternalToken: cfg.InternalToken,
+		Verifier: verifier,
+	})
+	if vid.Enabled() {
+		a.vid = vid
+		vid.Start()
+	} else if cfg.EdgeVideo {
+		slog.Warn("EDGE_VIDEO=1 但 EDGE_AUTH=0 或 INTERNAL_API_TOKEN 为空：" +
+			"视频数据面未接管，/api/ws/** 照旧反代给 Python")
+	}
+	m.SetVideoSource(vid.MetricsSource()) // 未启用也挂上：/metrics 里能看出"没在接管"
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           a,
@@ -153,6 +181,12 @@ func main() {
 		os.Exit(1)
 	case sig := <-stop:
 		slog.Info("收到退出信号，开始优雅关闭", "signal", sig.String())
+	}
+
+	// 视频连接**必须在 Shutdown 之前**收掉：WS 握手时连接已被 Hijack，
+	// 不在 http.Server 的管理范围内 —— Shutdown 既不等它们，也关不掉它们。
+	if a.vid != nil {
+		a.vid.Close()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

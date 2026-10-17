@@ -21,8 +21,13 @@ type User struct {
 type Verdict struct {
 	Valid bool  `json:"valid"`
 	User  *User `json:"user"`
-	// Known：是否拿到了**权威结论**。false = 回源没成功（超时/网络错/非 200/解析失败），
-	// 调用方必须按"放行、交 Python 判定"处理 —— 早拒只做减法，不做加法。
+	// AuthEnabled：Python 侧是否开着鉴权（内部端点回的同名字段）。关掉鉴权时
+	// 中间件直接放行（不解析登录态），此时 `valid:false` 不表示"该拒绝"——
+	// 它只表示"没有登录态"，所以**只有这一位为真时结论才算权威**（见 fetch）。
+	AuthEnabled bool `json:"auth_enabled"`
+	// Known：是否拿到了**权威结论**。false = 回源没成功（超时/网络错/非 200/解析失败）
+	// 或 Python 侧根本没开鉴权。调用方必须按"放行、交 Python 判定"处理 ——
+	// 早拒只做减法，不做加法。
 	Known bool `json:"-"`
 }
 
@@ -221,6 +226,13 @@ func (v *Verifier) fetch(action, field, value string) Verdict {
 	}
 	var out Verdict
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&out); err != nil {
+		v.obs.verifyError()
+		return Verdict{}
+	}
+	// 只有 Python 自报"鉴权开着"时结论才权威：AUTH_ENABLED=0 时中间件直接放行，
+	// `valid:false` 只是"没有登录态"，按它拒绝会与直连行为不一致（旧版 Python
+	// 没有这个字段，同样落到这里 → 退化为放行，不会误拒）。
+	if !out.AuthEnabled {
 		v.obs.verifyError()
 		return Verdict{}
 	}

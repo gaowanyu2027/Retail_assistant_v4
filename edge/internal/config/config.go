@@ -29,6 +29,13 @@ type Config struct {
 	// InternalToken 与 Python 共享的内部端点密钥，环境变量 INTERNAL_API_TOKEN。
 	// edge 用它调 `/internal/auth/verify`；为空且 EdgeAuth=1 时早拒自动禁用（响亮告警）。
 	InternalToken string
+	// EdgeVideo 视频数据面是否由 edge 接管，环境变量 EDGE_VIDEO（取值 "1"），默认关。
+	// 关 = `/api/ws/**` 照旧反代给 Python（回退成本为零，秒级生效）。
+	//
+	// **启用前提**：同时 EDGE_AUTH=1 且 INTERNAL_API_TOKEN 非空 —— 接管 WS 要求
+	// edge 能拿到权威鉴权结论（`/api/ws/**` 未登录在 Python 侧是 accept 后
+	// close(1008)，没有结论就分不清"该拒"与"该接管"）。缺一即整套禁用并告警。
+	EdgeVideo bool
 }
 
 func Load() Config {
@@ -39,13 +46,14 @@ func Load() Config {
 		DistDir:       envOr("EDGE_DIST_DIR", "frontend-vue/dist"),
 		EdgeAuth:      envOr("EDGE_AUTH", "0") == "1",
 		InternalToken: strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN")),
+		EdgeVideo:     envOr("EDGE_VIDEO", "0") == "1",
 	}
 }
 
 // String 供启动日志使用：**刻意不打印 InternalToken**（密钥不进日志）。
 func (c Config) String() string {
-	return fmt.Sprintf("listen=%s backend=%s dist=%s edge_auth=%t internal_token_set=%t",
-		c.Listen, c.BackendURL, c.DistDir, c.EdgeAuth, c.InternalToken != "")
+	return fmt.Sprintf("listen=%s backend=%s dist=%s edge_auth=%t internal_token_set=%t edge_video=%t",
+		c.Listen, c.BackendURL, c.DistDir, c.EdgeAuth, c.InternalToken != "", c.EdgeVideo)
 }
 
 func envOr(key, def string) string {

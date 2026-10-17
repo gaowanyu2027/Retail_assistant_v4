@@ -118,6 +118,16 @@ func (w *RespWriter) ReadFrom(r io.Reader) (int64, error) {
 // Unwrap 供 http.ResponseController 解包（Go 1.20+ 取 Hijack/Flush 的推荐路径）。
 func (w *RespWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// MarkUpgraded 记录一次协议升级（WebSocket 握手）。
+//
+// 升级响应是 Hijack 之后直写裸连接的，绕过了本包装器 —— 不显式告知，访问日志
+// 与 /metrics 就会把它记成 200。只记第一个状态码，与 WriteHeader 同语义。
+func (w *RespWriter) MarkUpgraded(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+}
+
 // WriteString 固定字节输出：显式 Content-Length，HEAD 请求只回头部。
 //
 // 显式 Content-Length 是为了对齐 FastAPI/Starlette 的行为（响应体长度已知时

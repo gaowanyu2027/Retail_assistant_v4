@@ -11,6 +11,8 @@
     CI 单测 job 只装最小依赖集，本模块必须在那里可导入（tests/test_ws_protocol_fixtures.py
     有一条子进程用例把这个约束钉住）。
 """
+import json
+
 from config.settings import WS_METADATA_INTERVAL
 
 # 帧包头部：4 字节**大端** frame_id，随后是**原始 JPEG 字节**（无 base64）。
@@ -31,6 +33,20 @@ CLIENT_CAMERA_BUSY_MESSAGE = (
 def frame_packet(frame_id: int, jpeg: bytes) -> bytes:
     """组装一帧二进制消息：[4B 大端 frame_id][JPEG 原始字节]。"""
     return int(frame_id).to_bytes(FRAME_HEADER_BYTES, "big") + jpeg
+
+
+def dumps_message(payload: dict) -> str:
+    """把消息对象序列化成**下发的 WS 文本**。
+
+    参数与 starlette 的 `send_json` 一致（紧凑分隔符 + 不转义非 ASCII）——
+    数据面迁 Go 后文本由 Python 组装、Go 逐字节转发，两侧必须字节相同。
+    """
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+
+def pong_message(ts) -> dict:
+    """心跳应答（前端 15s 一发、8s 无 pong 即主动重连，格式属协议面）。"""
+    return {"type": "pong", "ts": ts}
 
 
 def should_send_metadata(frame_id: int, interval: int | None = None) -> bool:

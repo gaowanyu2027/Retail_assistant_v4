@@ -13,6 +13,10 @@
 // 其余一切——包括 21 个 include_in_schema=False 的兼容别名、/docs、
 // /openapi.json、/api/health/ready（真探测必须打 Python）——一律兜底反代。
 // 兜底是**零枚举**的：Python 侧新增/改名路由，edge 无需同步修改。
+//
+// 唯一在归类之前被截走的是两条视频 WS（/api/ws/stream、/api/ws/client）：
+// EDGE_VIDEO=1 且拿得到权威鉴权结论时由 video.Handler 接管；拿不准或没开，
+// 它原样落回这里 —— 仍是 Proxy，走兜底反代（归类结果不变，语义不变）。
 package routing
 
 import "strings"
@@ -36,12 +40,16 @@ const (
 	// Internal /internal/**：本进程服务的内部端点（Python 用它给 edge 做鉴权判定）。
 	// edge 一律本地 404 —— 公网请求根本到不了这些端点（Python 侧另有独立的三道门禁）。
 	Internal
+	// Video 视频 WS：由 edge 的数据面接管（EDGE_VIDEO=1）。**只能由
+	// video.Handler.Handle 判定后指派**，Classify 不会返回它 —— 同一个路径上的
+	// 普通 HTTP 请求与"未接管（交回反代）"的 WS 请求都还是 Proxy。
+	Video
 )
 
 // AllKinds 全部处理方式（配置遍历 / 指标初始化用，顺序稳定）。
-var AllKinds = [...]Kind{Proxy, Index, Static, Health, Fallback, Metrics, Internal}
+var AllKinds = [...]Kind{Proxy, Index, Static, Health, Fallback, Metrics, Internal, Video}
 
-var kindNames = [...]string{"proxy", "index", "static", "health", "fallback", "metrics", "internal"}
+var kindNames = [...]string{"proxy", "index", "static", "health", "fallback", "metrics", "internal", "video"}
 
 func (k Kind) String() string {
 	if int(k) < 0 || int(k) >= len(kindNames) {

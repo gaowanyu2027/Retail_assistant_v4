@@ -211,7 +211,62 @@
       }
     }
   ],
+  "upstream_envelope": {
+    "description": "上行帧流 GET /internal/vision/events 的信封（HTTP/1.1 chunked，单向；两端纯标准库，`curl -N` 可直接观察）",
+    "magic": "DSHF",
+    "version": 1,
+    "kinds": {
+      "frame": 1,
+      "control": 2,
+      "heartbeat": 3
+    },
+    "layout": "magic(4B) | ver(1B) | kind(1B) | frame_id(4B 大端) | metaLen(4B 大端) | jpegLen(4B 大端) | meta(UTF-8 JSON) | jpeg(原始字节)",
+    "heartbeat_interval_seconds": 1.0,
+    "note": "文本消息一律由 Python 组装（含中文与 JSON 键序），Go 只转发 —— kind=1 时把 meta.msg 逐字作为 WS 文本下发、jpeg 用 [4B 大端 frame_id] 前缀后作为二进制下发；kind=2 时按 texts 顺序下发、framed_tail 只给「已收到过帧」的观看者（判据在 clear 复位之前求值）、except 指定的观看者跳过、clear 表示丢弃待发帧并复位帧号。",
+    "examples": [
+      {
+        "name": "frame",
+        "kind": 1,
+        "frame_id": 617,
+        "meta_utf8": "{\"gen\":1,\"frame_id\":617,\"msg\":\"{\\\"type\\\":\\\"frame\\\",\\\"frame_id\\\":617,\\\"mode\\\":\\\"retail\\\"}\"}",
+        "jpeg_hex": "ffd8ffe000104a46494600010100000100010000ffd9",
+        "envelope_hex": "445348460101000002690000005a000000167b2267656e223a312c226672616d655f6964223a3631372c226d7367223a227b5c22747970655c223a5c226672616d655c222c5c226672616d655f69645c223a3631372c5c226d6f64655c223a5c2272657461696c5c227d227dffd8ffe000104a46494600010100000100010000ffd9",
+        "note": "帧：meta 是 JSON 文本（含 gen/frame_id/msg），jpeg 是原始帧字节"
+      },
+      {
+        "name": "control_stop",
+        "kind": 2,
+        "frame_id": 0,
+        "meta_utf8": "{\"gen\":2,\"clear\":true,\"except\":\"v3\",\"framed_tail\":\"{\\\"type\\\":\\\"status\\\",\\\"status\\\":\\\"stopped\\\",\\\"message\\\":\\\"视频流已停止\\\"}\",\"texts\":[\"{\\\"type\\\":\\\"status\\\",\\\"status\\\":\\\"stopped\\\",\\\"message\\\":\\\"视频已停止，WebSocket 保持连接\\\",\\\"segment_analysis\\\":null}\",\"{\\\"type\\\":\\\"source_status\\\",\\\"state\\\":\\\"stopped\\\",\\\"source\\\":{\\\"kind\\\":\\\"file\\\",\\\"path\\\":\\\"/x.mp4\\\"},\\\"message\\\":\\\"视频已停止\\\"}\"]}",
+        "jpeg_hex": "",
+        "envelope_hex": "4453484601020000000000000198000000007b2267656e223a322c22636c656172223a747275652c22657863657074223a227633222c226672616d65645f7461696c223a227b5c22747970655c223a5c227374617475735c222c5c227374617475735c223a5c2273746f707065645c222c5c226d6573736167655c223a5c22e8a786e9a291e6b581e5b7b2e5819ce6ada25c227d222c227465787473223a5b227b5c22747970655c223a5c227374617475735c222c5c227374617475735c223a5c2273746f707065645c222c5c226d6573736167655c223a5c22e8a786e9a291e5b7b2e5819ce6ada2efbc8c576562536f636b657420e4bf9de68c81e8bf9ee68ea55c222c5c227365676d656e745f616e616c797369735c223a6e756c6c7d222c227b5c22747970655c223a5c22736f757263655f7374617475735c222c5c2273746174655c223a5c2273746f707065645c222c5c22736f757263655c223a7b5c226b696e645c223a5c2266696c655c222c5c22706174685c223a5c222f782e6d70345c227d2c5c226d6573736167655c223a5c22e8a786e9a291e5b7b2e5819ce6ada25c227d225d7d",
+        "note": "控制：停止（含 texts / framed_tail / clear / except）"
+      },
+      {
+        "name": "control_error",
+        "kind": 2,
+        "frame_id": 0,
+        "meta_utf8": "{\"gen\":2,\"clear\":true,\"except\":null,\"framed_tail\":null,\"texts\":[\"{\\\"type\\\":\\\"source_status\\\",\\\"state\\\":\\\"error\\\",\\\"source\\\":{},\\\"code\\\":\\\"open_timeout\\\",\\\"message\\\":\\\"打开超时：……\\\"}\"]}",
+        "jpeg_hex": "",
+        "envelope_hex": "44534846010200000000000000c2000000007b2267656e223a322c22636c656172223a747275652c22657863657074223a6e756c6c2c226672616d65645f7461696c223a6e756c6c2c227465787473223a5b227b5c22747970655c223a5c22736f757263655f7374617475735c222c5c2273746174655c223a5c226572726f725c222c5c22736f757263655c223a7b7d2c5c22636f64655c223a5c226f70656e5f74696d656f75745c222c5c226d6573736167655c223a5c22e68993e5bc80e8b685e697b6efbc9ae280a6e280a65c227d225d7d",
+        "note": "控制：终止类错误广播（except 为 null）"
+      },
+      {
+        "name": "heartbeat",
+        "kind": 3,
+        "frame_id": 0,
+        "meta_utf8": "",
+        "jpeg_hex": "",
+        "envelope_hex": "445348460103000000000000000000000000",
+        "note": "心跳：1s 无事件发一次，meta 与 jpeg 皆空"
+      }
+    ]
+  },
   "messages": {
-    "client_camera_busy": "已有其他用户正在使用「本机摄像头」模式，请稍后重试；多人同时观看请使用「服务器摄像头」。（若那是你之前失效的连接，刷新/关闭那个页面即可释放）"
+    "client_camera_busy": "已有其他用户正在使用「本机摄像头」模式，请稍后重试；多人同时观看请使用「服务器摄像头」。（若那是你之前失效的连接，刷新/关闭那个页面即可释放）",
+    "ready": "{\"event\":\"ready\"}",
+    "pong_int": "{\"type\":\"pong\",\"ts\":0}",
+    "pong_float": "{\"type\":\"pong\",\"ts\":1729000000.25}",
+    "stream_stopped_tail": "{\"type\":\"status\",\"status\":\"stopped\",\"message\":\"视频流已停止\"}"
   }
 }

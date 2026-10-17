@@ -156,6 +156,75 @@ def export_permissions() -> dict:
 
 # ---------------- ws_messages.json ----------------
 
+def export_upstream_envelopes() -> dict:
+    """上行帧流（Python→Go）的信封样本：**实测**调用 `_envelope` 导出，不手抄。
+
+    Go 侧的解析器与它成对；这一节就是"两侧字节相同"的判据。
+    """
+    from api.routes import vision_internal as vi
+
+    jpeg = bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffd9")
+    frame_meta = wsp.dumps_message({
+        "gen": 1, "frame_id": 617,
+        # 帧元数据 WS 文本：Go 只做转发，**不解包也不重组**
+        "msg": wsp.dumps_message({"type": "frame", "frame_id": 617, "mode": "retail"}),
+    })
+    control_meta_stop = wsp.dumps_message({
+        "gen": 2, "clear": True, "except": "v3",
+        "framed_tail": wsp.dumps_message({"type": "status", "status": "stopped",
+                                          "message": "视频流已停止"}),
+        "texts": [wsp.dumps_message({"type": "status", "status": "stopped",
+                                     "message": "视频已停止，WebSocket 保持连接",
+                                     "segment_analysis": None}),
+                  wsp.dumps_message(wsp.source_status_message(
+                      "stopped", {"kind": "file", "path": "/x.mp4"},
+                      message="视频已停止"))],
+    })
+    control_meta_error = wsp.dumps_message({
+        "gen": 2, "clear": True, "except": None, "framed_tail": None,
+        "texts": [wsp.dumps_message(wsp.source_status_message(
+            "error", {}, code="open_timeout", message="打开超时：……"))],
+    })
+
+    cases = [
+        ("frame", vi._KIND_FRAME, 617, frame_meta.encode("utf-8"), jpeg,
+         "帧：meta 是 JSON 文本（含 gen/frame_id/msg），jpeg 是原始帧字节"),
+        ("control_stop", vi._KIND_CONTROL, 0, control_meta_stop.encode("utf-8"), b"",
+         "控制：停止（含 texts / framed_tail / clear / except）"),
+        ("control_error", vi._KIND_CONTROL, 0, control_meta_error.encode("utf-8"), b"",
+         "控制：终止类错误广播（except 为 null）"),
+        ("heartbeat", vi._KIND_HEARTBEAT, 0, b"", b"",
+         "心跳：1s 无事件发一次，meta 与 jpeg 皆空"),
+    ]
+    examples = []
+    for name, kind, frame_id, meta, payload, note in cases:
+        examples.append({
+            "name": name, "kind": kind, "frame_id": frame_id,
+            "meta_utf8": meta.decode("utf-8"),
+            "jpeg_hex": payload.hex(),
+            "envelope_hex": vi._envelope(kind, frame_id, meta, payload).hex(),
+            "note": note,
+        })
+
+    return {
+        "description": ("上行帧流 GET /internal/vision/events 的信封（HTTP/1.1 chunked，"
+                        "单向；两端纯标准库，`curl -N` 可直接观察）"),
+        "magic": vi._MAGIC.decode("ascii"),
+        "version": vi._VERSION,
+        "kinds": {"frame": vi._KIND_FRAME, "control": vi._KIND_CONTROL,
+                  "heartbeat": vi._KIND_HEARTBEAT},
+        "layout": ("magic(4B) | ver(1B) | kind(1B) | frame_id(4B 大端) | "
+                   "metaLen(4B 大端) | jpegLen(4B 大端) | meta(UTF-8 JSON) | jpeg(原始字节)"),
+        "heartbeat_interval_seconds": vi._HEARTBEAT_SECONDS,
+        "note": ("文本消息一律由 Python 组装（含中文与 JSON 键序），Go 只转发 —— "
+                 "kind=1 时把 meta.msg 逐字作为 WS 文本下发、jpeg 用 [4B 大端 frame_id] "
+                 "前缀后作为二进制下发；kind=2 时按 texts 顺序下发、framed_tail 只给"
+                 "「已收到过帧」的观看者（判据在 clear 复位之前求值）、except 指定的"
+                 "观看者跳过、clear 表示丢弃待发帧并复位帧号。"),
+        "examples": examples,
+    }
+
+
 def export_ws_messages() -> dict:
     packet_examples = []
     for frame_id, jpeg_hex in ((1, "ffd8ffd9"), (617, "ffd8ffd9"), (100000, "ffd8ff")):
@@ -234,8 +303,17 @@ def export_ws_messages() -> dict:
         },
         "frame_metadata_examples": meta_examples,
         "source_status_examples": status_examples,
+        "upstream_envelope": export_upstream_envelopes(),
         "messages": {
             "client_camera_busy": wsp.CLIENT_CAMERA_BUSY_MESSAGE,
+            # 数据面迁 Go 后由 Go **自行合成**的两条文本消息（其余文本一律由 Python 组装、
+            # Go 逐字转发）—— 它们必须与 Python 的字节完全一致
+            "ready": wsp.dumps_message({"event": "ready"}),
+            "pong_int": wsp.dumps_message(wsp.pong_message(0)),
+            "pong_float": wsp.dumps_message(wsp.pong_message(1729000000.25)),
+            # "视频流已停止"：停止/终止时发给「已收到过帧」的观看者
+            "stream_stopped_tail": wsp.dumps_message(
+                {"type": "status", "status": "stopped", "message": "视频流已停止"}),
         },
     }
 

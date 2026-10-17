@@ -40,6 +40,10 @@ INTENTIONAL_LOGIN_ONLY = {
     ("internal.py", "/auth/verify"): "内部端点：门禁=共享密钥+内网对端，不走角色权限",
     ("internal.py", "/auth/consume-ticket"): "内部端点：同上（票据消费的原子性留在 Python）",
     ("internal.py", "/{_path:path}"): "内部路径兜底：任何未匹配路径/方法一律 404，不读不写",
+    # ---- 视频数据面内部端点（Go edge 专用；同上，鉴权/归属判定在端点内部）----
+    ("vision_internal.py", "/vision/action"): "内部端点：门禁=共享密钥+内网对端（动作转发）",
+    ("vision_internal.py", "/vision/viewer"): "内部端点：同上（观看者登记/注销）",
+    ("vision_internal.py", "/vision/client-frame"): "内部端点：同上（本机摄像头帧，归属校验在会话管理里）",
     ("auth.py", "/auth/login"): "登录本身当然不能要求登录/权限",
     ("auth.py", "/auth/logout"): "登出只吊销**自己**的会话",
     ("auth.py", "/auth/ws-ticket"): "签发**自己**的 WS 一次性票据",
