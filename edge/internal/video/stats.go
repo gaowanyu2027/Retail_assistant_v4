@@ -22,6 +22,9 @@ type Stats struct {
 	reconnects   atomic.Int64
 	lastEventAt  atomic.Int64 // 最近一次上行事件（unix nano；0 = 还没收到过）
 	viewers      atomic.Int64
+	// 入库事件（S4）：ingest_no_sink = 收到了但本进程没开店（两侧开关不一致）
+	ingest       atomic.Int64
+	ingestNoSink atomic.Int64
 
 	mu         sync.Mutex
 	hub        *Hub
@@ -57,6 +60,8 @@ type videoSnapshot struct {
 	Heartbeats      int64                    `json:"heartbeats"`
 	DecodeErrors    int64                    `json:"decode_errors"`
 	Reconnects      int64                    `json:"reconnects"`
+	Ingest          int64                    `json:"ingest"`
+	IngestNoSink    int64                    `json:"ingest_no_sink"`
 	Endpoints       map[string]endpointCount `json:"endpoints"`
 	Connections     []viewerStats            `json:"connections"`
 }
@@ -87,6 +92,8 @@ func (s *Stats) heartbeat()           { s.heartbeats.Add(1) }
 func (s *Stats) decodeError()         { s.decodeErrors.Add(1) }
 func (s *Stats) reconnect()           { s.reconnects.Add(1) }
 func (s *Stats) heartbeatAt(ts int64) { s.lastEventAt.Store(ts) }
+func (s *Stats) ingestEvent()         { s.ingest.Add(1) }
+func (s *Stats) ingestDropped()       { s.ingestNoSink.Add(1) }
 
 // setViewers 当前在管连接数（hub 每次增删都调）。
 func (s *Stats) setViewers(n int) { s.viewers.Store(int64(n)) }
@@ -117,6 +124,8 @@ func (s *Stats) Snapshot() any {
 		Heartbeats:   s.heartbeats.Load(),
 		DecodeErrors: s.decodeErrors.Load(),
 		Reconnects:   s.reconnects.Load(),
+		Ingest:       s.ingest.Load(),
+		IngestNoSink: s.ingestNoSink.Load(),
 		Endpoints:    make(map[string]endpointCount, len(s.byEndpoint)),
 		Connections:  []viewerStats{},
 	}

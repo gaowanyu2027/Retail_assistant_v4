@@ -23,10 +23,17 @@ import (
 // 返回 (Handler, ws://地址)。
 func newTestHandler(t *testing.T, py *fakePython) (*Handler, string) {
 	t.Helper()
+	return newTestHandlerWithIngest(t, py, nil)
+}
+
+// newTestHandlerWithIngest 同上，但挂一个入库事件 sink（S4 用例使用）。
+func newTestHandlerWithIngest(t *testing.T, py *fakePython, sink IngestSink) (*Handler, string) {
+	t.Helper()
 	backend := py.start()
 	h := New(Options{
 		Video: true, AuthEnabled: true, BackendURL: backend,
 		InternalToken: "k", Verifier: auth.NewVerifier(backend, "k", auth.Observer{}),
+		Ingest: sink,
 	})
 	if !h.Enabled() {
 		t.Fatal("测试用 Handler 应为启用状态")
@@ -238,6 +245,83 @@ func TestUpstreamFramesAndControlReachClient(t *testing.T) {
 	snap := h.MetricsSource()().(videoSnapshot)
 	if !snap.Upstream || snap.Frames != 3 || snap.Heartbeats != 1 {
 		t.Errorf("上行计数不符：%+v", snap)
+	}
+}
+
+// recordingIngest 记录 kind=4 事件（S4）。
+type recordingIngest struct {
+	mu    sync.Mutex
+	items []struct {
+		gen, seq int64
+		meta     string
+	}
+}
+
+func (r *recordingIngest) EnqueueIngest(gen, seq int64, meta []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.items = append(r.items, struct {
+		gen, seq int64
+		meta     string
+	}{gen, seq, string(meta)})
+}
+
+func (r *recordingIngest) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.items)
+}
+
+func (r *recordingIngest) first() (int64, int64, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	it := r.items[0]
+	return it.gen, it.seq, it.meta
+}
+
+// TestUpstreamIngestForwardedToSink kind=4 入库事件原样交给 sink（gen/seq/meta），
+// 且不产生任何浏览器下发消息。
+func TestUpstreamIngestForwardedToSink(t *testing.T) {
+	py := newFakePython(t)
+	sink := &recordingIngest{}
+	h, _ := newTestHandlerWithIngest(t, py, sink)
+
+	meta := `"alerts":[{"alert_type":"anomaly","zone_id":"z1","person_id":7}]`
+	py.events <- ingestEnvelope(2, 17, meta)
+	if !waitFor(2*time.Second, func() bool { return sink.count() == 1 }) {
+		t.Fatalf("sink 未收到入库事件，实际 %d 条", sink.count())
+	}
+	gen, seq, got := sink.first()
+	if gen != 2 || seq != 17 || !strings.Contains(got, `"person_id":7`) {
+		t.Errorf("sink 收到 gen=%d seq=%d meta=%s", gen, seq, got)
+	}
+	snap := h.MetricsSource()().(videoSnapshot)
+	if snap.Ingest != 1 || snap.IngestNoSink != 0 {
+		t.Errorf("入库计数不符：%+v", snap)
+	}
+
+	// gen/seq 缺失的事件视为坏 meta：丢弃 + decode_errors，不进 sink
+	py.events <- envelopeBytes(envelopeKindIngest, 0, `{"alerts":[]}`, nil)
+	if !waitFor(2*time.Second, func() bool {
+		return h.MetricsSource()().(videoSnapshot).DecodeErrors == 1
+	}) {
+		t.Error("非法入库事件应记 decode_errors")
+	}
+	if sink.count() != 1 {
+		t.Errorf("非法事件不该进 sink，实际 %d 条", sink.count())
+	}
+}
+
+// TestUpstreamIngestWithoutSinkCountsDropped 两侧开关不一致（Python 开、edge 没开）
+// 时不能静默：计数可见，且日志只提醒一次（不刷屏）。
+func TestUpstreamIngestWithoutSinkCountsDropped(t *testing.T) {
+	py := newFakePython(t)
+	h, _ := newTestHandler(t, py)
+	py.events <- ingestEnvelope(2, 18, `"alerts":[]`)
+	if !waitFor(2*time.Second, func() bool {
+		return h.MetricsSource()().(videoSnapshot).IngestNoSink == 1
+	}) {
+		t.Errorf("无 sink 时应计 ingest_no_sink：%+v", h.MetricsSource()().(videoSnapshot))
 	}
 }
 

@@ -185,6 +185,15 @@ def export_upstream_envelopes() -> dict:
         "texts": [wsp.dumps_message(wsp.source_status_message(
             "error", {}, code="open_timeout", message="打开超时：……"))],
     })
+    # kind=4：入库事件（S4）。字段契约见 contracts/ingest_events.json；
+    # 这里只验证信封形状与"gen/seq 在 meta 里"这一位置，不重复整份样例。
+    ingest_meta = wsp.dumps_message({
+        "gen": 2, "seq": 9,
+        "alerts": [{"alert_type": "anomaly", "zone_id": "shelf_1",
+                    "person_id": 7, "level": "watch", "score": 5,
+                    "reason": "在货架区长时间徘徊", "frame_id": 123,
+                    "created_at": "2026-10-17 16:05:01"}],
+    })
 
     cases = [
         ("frame", vi._KIND_FRAME, 617, frame_meta.encode("utf-8"), jpeg,
@@ -195,6 +204,8 @@ def export_upstream_envelopes() -> dict:
          "控制：终止类错误广播（except 为 null）"),
         ("heartbeat", vi._KIND_HEARTBEAT, 0, b"", b"",
          "心跳：1s 无事件发一次，meta 与 jpeg 皆空"),
+        ("ingest", vi._KIND_INGEST, 0, ingest_meta.encode("utf-8"), b"",
+         "入库：meta 含 gen/seq 与待写行，jpeg 空；仅内网，不下发浏览器"),
     ]
     examples = []
     for name, kind, frame_id, meta, payload, note in cases:
@@ -212,7 +223,7 @@ def export_upstream_envelopes() -> dict:
         "magic": vi._MAGIC.decode("ascii"),
         "version": vi._VERSION,
         "kinds": {"frame": vi._KIND_FRAME, "control": vi._KIND_CONTROL,
-                  "heartbeat": vi._KIND_HEARTBEAT},
+                  "heartbeat": vi._KIND_HEARTBEAT, "ingest": vi._KIND_INGEST},
         "layout": ("magic(4B) | ver(1B) | kind(1B) | frame_id(4B 大端) | "
                    "metaLen(4B 大端) | jpegLen(4B 大端) | meta(UTF-8 JSON) | jpeg(原始字节)"),
         "heartbeat_interval_seconds": vi._HEARTBEAT_SECONDS,

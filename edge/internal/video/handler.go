@@ -39,6 +39,9 @@ type Options struct {
 	InternalToken string
 	// Verifier 与早拒共用同一个判定器（同一份 TTL 缓存，不重复回源）。
 	Verifier *auth.Verifier
+	// Ingest kind=4 入库事件的消费者（store.Store）。nil = 本进程只转发入库
+	// 事件但不落库；是否非 nil 由 GO_OWNS_INGEST_WRITES 决定。
+	Ingest IngestSink
 }
 
 // Handler 接管 `/api/ws/stream` 与 `/api/ws/client` 两条 WS 端点。
@@ -65,7 +68,7 @@ func New(o Options) *Handler {
 	h.api = NewAPI(o.BackendURL, o.InternalToken)
 	h.hub = newHub(h.stats)
 	h.stats.attachHub(h.hub)
-	h.upstream = newUpstream(h.api, h.hub, h.stats)
+	h.upstream = newUpstream(h.api, h.hub, h.stats, o.Ingest)
 	return h
 }
 

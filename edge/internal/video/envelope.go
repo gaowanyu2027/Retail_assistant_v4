@@ -35,6 +35,9 @@ const (
 	envelopeKindFrame     = 1
 	envelopeKindControl   = 2
 	envelopeKindHeartbeat = 3
+	// envelopeKindIngest 仅内网（S4）：Python 把三张视频派生表的待写行发来，
+	// 由 store.Store 落库。**永不下发浏览器**，ws_protocol 里没有对应消息。
+	envelopeKindIngest = 4
 )
 
 // 单段上限：meta 是一小段 JSON，jpeg 是 1280×720 q70（实测 ~90KB）。

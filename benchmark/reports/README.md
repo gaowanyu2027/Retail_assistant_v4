@@ -25,7 +25,19 @@
 
 | 报告 | 写者 | 差异 |
 |---|---|---|
-| （尚无） | — | S4 的 Go 写者实现后补录 |
+| `ingest_parity_python_20261017_163038.json` / `ingest_parity_go_20261017_163117.json` → `ingest_parity_diff_20261017_163126.json` | 真实视频两轮（`data/sources/demo_loop.mp4`，150 帧；Python 直写 vs `GO_OWNS_INGEST_WRITES=1`） | `retail_stats` 3 vs 3，容差 0.2 下 **0**；`alert_record` / `track_visit_paths` 两轮均为 0 行 |
+| `ingest_parity_replay_python_20261017_163230.json` / `ingest_parity_replay_go_20261017_163230.json` → `ingest_parity_diff_replay_20261017_163230.json` | 同一份 `kind=4` 载荷：Python `apply_local` 直写 vs 经假上行流交给真实 edge 写入 | `retail_stats` 2 / `alert_record` 1 / `track_visit_paths` 1，容差 **0** 下 **0** |
+
+说明：
+
+- 两轮视频快照的时间窗按 **MySQL 时钟**（`SELECT NOW()`）取且互不重叠。本机 MySQL 为 UTC、
+  应用为 UTC+8，而 `retail_stats.created_at` 与 `track_visit_paths.recorded_at` 由数据库
+  `CURRENT_TIMESTAMP` 生成——按墙钟取窗会差 8 小时、查不到行。
+- 真实视频轮次中 `alert_record` 与 `track_visit_paths` 两轮都为空，原因是片段内每条轨迹只
+  经过 1 个区域（动线要求 `min_zones=2`），且默认 `FRAME_SKIP=1` 时 `cleanup()` 不会被调用、
+  没有轨迹退役（详见 `改进记录.md` 模块 D 续9）。两张表的写入等价性由回放轮覆盖。
+- 回放轮的载荷包含 2 个区域、1 条告警、1 条跨 2 区域动线，`session_id` 用 140 个字符验证
+  128 字符截断；Go 侧经真实 edge 二进制的 `internal/store` 落库，两边容差 0 逐字段相等。
 
 ## 并发压测（loadtest）
 

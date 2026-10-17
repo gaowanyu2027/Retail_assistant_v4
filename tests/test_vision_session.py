@@ -594,7 +594,8 @@ def test_envelope_matches_fixture():
     assert fx["magic"] == vi._MAGIC.decode("ascii")
     assert fx["version"] == vi._VERSION
     assert fx["kinds"] == {"frame": vi._KIND_FRAME, "control": vi._KIND_CONTROL,
-                           "heartbeat": vi._KIND_HEARTBEAT}
+                           "heartbeat": vi._KIND_HEARTBEAT,
+                           "ingest": vi._KIND_INGEST}
     for ex in fx["examples"]:
         got = vi._envelope(ex["kind"], ex["frame_id"],
                            ex["meta_utf8"].encode("utf-8"),
@@ -629,6 +630,13 @@ def test_stream_chunks_emits_frames_controls_and_heartbeats():
         assert ctl["kind"] == vi._KIND_CONTROL and ctl["frame_id"] == 0 and ctl["jpeg"] == b""
         assert json.loads(ctl["meta_utf8"]) == {"gen": gen, "clear": True, "except": "vX",
                                                 "framed_tail": "TAIL", "texts": ["T1", "T2"]}
+
+        mgr.log.publish_ingest(gen, {"alerts": [{"person_id": 7}]})
+        ing = _parse_envelope(next(stream))
+        assert ing["kind"] == vi._KIND_INGEST and ing["frame_id"] == 0 and ing["jpeg"] == b""
+        ing_meta = json.loads(ing["meta_utf8"])
+        assert ing_meta["gen"] == gen and isinstance(ing_meta["seq"], int)
+        assert ing_meta["alerts"] == [{"person_id": 7}]
 
         hb = _parse_envelope(next(stream))          # 没有新事件 → 心跳
         assert hb["kind"] == vi._KIND_HEARTBEAT and hb["meta_utf8"] == "" and hb["jpeg"] == b""

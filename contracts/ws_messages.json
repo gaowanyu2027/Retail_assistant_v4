@@ -218,7 +218,8 @@
     "kinds": {
       "frame": 1,
       "control": 2,
-      "heartbeat": 3
+      "heartbeat": 3,
+      "ingest": 4
     },
     "layout": "magic(4B) | ver(1B) | kind(1B) | frame_id(4B 大端) | metaLen(4B 大端) | jpegLen(4B 大端) | meta(UTF-8 JSON) | jpeg(原始字节)",
     "heartbeat_interval_seconds": 1.0,
@@ -259,6 +260,15 @@
         "jpeg_hex": "",
         "envelope_hex": "445348460103000000000000000000000000",
         "note": "心跳：1s 无事件发一次，meta 与 jpeg 皆空"
+      },
+      {
+        "name": "ingest",
+        "kind": 4,
+        "frame_id": 0,
+        "meta_utf8": "{\"gen\":2,\"seq\":9,\"alerts\":[{\"alert_type\":\"anomaly\",\"zone_id\":\"shelf_1\",\"person_id\":7,\"level\":\"watch\",\"score\":5,\"reason\":\"在货架区长时间徘徊\",\"frame_id\":123,\"created_at\":\"2026-10-17 16:05:01\"}]}",
+        "jpeg_hex": "",
+        "envelope_hex": "44534846010400000000000000ca000000007b2267656e223a322c22736571223a392c22616c65727473223a5b7b22616c6572745f74797065223a22616e6f6d616c79222c227a6f6e655f6964223a227368656c665f31222c22706572736f6e5f6964223a372c226c6576656c223a227761746368222c2273636f7265223a352c22726561736f6e223a22e59ca8e8b4a7e69eb6e58cbae995bfe697b6e997b4e5be98e5be8a222c226672616d655f6964223a3132332c22637265617465645f6174223a22323032362d31302d31372031363a30353a3031227d5d7d",
+        "note": "入库：meta 含 gen/seq 与待写行，jpeg 空；仅内网，不下发浏览器"
       }
     ]
   },

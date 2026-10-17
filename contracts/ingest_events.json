@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "kind": 4,
+  "source": "vision/ingest.py（整形）+ api/routes/vision_internal.py（上行信封）",
+  "description": "Python→Go 上行流中的入库事件（仅内网，不下发浏览器）。一条事件是一批待写行；retail/alerts/paths 三者可出现其一或多项。gen 为会话代际，seq 为该事件在事件日志中的全局序号，Go 按 (gen, seq) 去重。",
+  "samples": [
+    {
+      "name": "retail",
+      "meta": {
+        "gen": 2,
+        "seq": 17,
+        "retail": {
+          "period_key": "202610171605",
+          "saved_at": "2026-10-17 16:05:00",
+          "zones": [
+            {
+              "zone_id": "shelf_1",
+              "zone_type": "shelf",
+              "zone_label": "货架A",
+              "visit_count": 3,
+              "deep_interest_count": 1,
+              "total_dwell_seconds": 12.5,
+              "heat_score": 61.2,
+              "source": "video"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "alerts",
+      "meta": {
+        "gen": 2,
+        "seq": 18,
+        "alerts": [
+          {
+            "alert_type": "anomaly",
+            "zone_id": "shelf_1",
+            "person_id": 7,
+            "level": "watch",
+            "score": 5,
+            "reason": "在货架区长时间徘徊；多次折返",
+            "frame_id": 123,
+            "created_at": "2026-10-17 16:05:01"
+          }
+        ]
+      }
+    },
+    {
+      "name": "paths",
+      "meta": {
+        "gen": 2,
+        "seq": 19,
+        "paths": [
+          {
+            "session_id": "video_1760697900",
+            "track_id": 7,
+            "source": "video",
+            "path": [
+              {
+                "zone_id": "shelf_1",
+                "zone_label": "货架A",
+                "dwell_seconds": 1.5
+              },
+              {
+                "zone_id": "shelf_2",
+                "zone_label": "货架B",
+                "dwell_seconds": 2.3
+              }
+            ],
+            "zone_count": 2,
+            "total_dwell_seconds": 3.8,
+            "recorded_at": "2026-10-17 16:05:02"
+          }
+        ]
+      }
+    }
+  ],
+  "sql_columns": {
+    "retail_stats": [
+      "period_key",
+      "zone_id",
+      "zone_type",
+      "zone_label",
+      "period_start",
+      "period_end",
+      "visit_count",
+      "deep_interest_count",
+      "total_dwell_seconds",
+      "heat_score",
+      "source"
+    ],
+    "alert_record": [
+      "alert_type",
+      "zone_id",
+      "person_id",
+      "level",
+      "score",
+      "reason",
+      "frame_id",
+      "created_at"
+    ],
+    "track_visit_paths": [
+      "session_id",
+      "track_id",
+      "source",
+      "path",
+      "zone_count",
+      "total_dwell_seconds"
+    ]
+  },
+  "field_notes": {
+    "retail.saved_at": "同时作为 period_start 与 period_end（与 mysql_db.save_retail_stats 的默认口径一致）",
+    "retail.zones[].zone_type": "Insert 时使用；ON DUPLICATE KEY UPDATE 不更新该列（与迁移前一致）",
+    "paths[].session_id": "Go 落库前截断到 128 个字符（与 mysql_db.save_track_visit_path 一致）",
+    "paths[].path": "JSON 数组，按访问顺序；Go 用 encoding/json 序列化并以 utf8mb4 写入",
+    "created_at/recorded_at": "已是 'YYYY-MM-DD HH:MM:SS' 文本，Go 直接写入 DATETIME 列"
+  }
+}

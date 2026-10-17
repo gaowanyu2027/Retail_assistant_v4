@@ -1,0 +1,72 @@
+{
+  "tool": "ingest_parity",
+  "version": 1,
+  "kind": "diff",
+  "checked_at": "2026-10-17 16:33:06",
+  "tolerance": 0.2,
+  "ignore": [],
+  "max_samples": 20,
+  "baseline": {
+    "label": "python",
+    "snapshot_at": "2026-10-17 16:32:59",
+    "window": {
+      "since": "2026-10-17 08:30:25",
+      "until": "2026-10-17 08:30:40",
+      "bounds": "[since, until)"
+    }
+  },
+  "candidate": {
+    "label": "go",
+    "snapshot_at": "2026-10-17 16:33:01",
+    "window": {
+      "since": "2026-10-17 08:31:04",
+      "until": "2026-10-17 08:31:19",
+      "bounds": "[since, until)"
+    }
+  },
+  "tables_compared": [
+    "retail_stats",
+    "alert_record",
+    "track_visit_paths"
+  ],
+  "tables_only_in_one": [],
+  "tables": {
+    "retail_stats": {
+      "baseline_rows": 3,
+      "candidate_rows": 3,
+      "matched": 3,
+      "missing_total": 0,
+      "extra_total": 0,
+      "field_mismatch_total": 0,
+      "missing": [],
+      "extra": [],
+      "field_mismatches": [],
+      "ok": true
+    },
+    "alert_record": {
+      "baseline_rows": 0,
+      "candidate_rows": 0,
+      "matched": 0,
+      "missing_total": 0,
+      "extra_total": 0,
+      "field_mismatch_total": 0,
+      "missing": [],
+      "extra": [],
+      "field_mismatches": [],
+      "ok": true
+    },
+    "track_visit_paths": {
+      "baseline_rows": 0,
+      "candidate_rows": 0,
+      "matched": 0,
+      "missing_total": 0,
+      "extra_total": 0,
+      "field_mismatch_total": 0,
+      "missing": [],
+      "extra": [],
+      "field_mismatches": [],
+      "ok": true
+    }
+  },
+  "ok": true
+}

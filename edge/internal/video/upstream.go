@@ -45,12 +45,28 @@ type ControlEvent struct {
 	Texts      []string `json:"texts"`
 }
 
+// IngestSink kind=4 事件的消费者（由 store.Store 实现）。
+//
+// **必须非阻塞**：它在读取上行流的 goroutine 里被调用，任何等待都会把
+// TCP 背压传回 Python，进而拖停视频帧流。store 的入口队列满时丢弃并记账。
+type IngestSink interface {
+	EnqueueIngest(gen, seq int64, meta []byte)
+}
+
+// ingestMeta kind=4 的最小解析：只有 gen/seq 是 Go 分发需要的，其余字段
+// 由 sink（store）按 `contracts/ingest_events.json` 解析。
+type ingestMeta struct {
+	Gen int64 `json:"gen"`
+	Seq int64 `json:"seq"`
+}
+
 // Upstream 常驻订阅 Python 的上行帧流（`/internal/vision/events`）：连接 → 读信封
 // → 分发 → 断了就退避重连。一条 goroutine，没有并发读者。
 type Upstream struct {
-	api   *API
-	hub   *Hub
-	stats *Stats
+	api    *API
+	hub    *Hub
+	stats  *Stats
+	ingest IngestSink // nil = 本进程不落库（GO_OWNS_INGEST_WRITES=0）
 
 	kick chan struct{} // 新观看者到来：提前结束退避等待（让"有人在等画面"时重连更快）
 	done chan struct{}
@@ -59,11 +75,13 @@ type Upstream struct {
 	cancel  context.CancelFunc
 	started bool
 	closed  bool
+
+	noSinkOnce sync.Once
 }
 
-func newUpstream(api *API, hub *Hub, stats *Stats) *Upstream {
+func newUpstream(api *API, hub *Hub, stats *Stats, ingest IngestSink) *Upstream {
 	return &Upstream{
-		api: api, hub: hub, stats: stats,
+		api: api, hub: hub, stats: stats, ingest: ingest,
 		kick: make(chan struct{}, 1),
 		done: make(chan struct{}),
 	}
@@ -215,6 +233,24 @@ func (u *Upstream) dispatch(env *envelope) {
 		u.hub.broadcastControl(ctl)
 	case envelopeKindHeartbeat:
 		u.stats.heartbeat()
+	case envelopeKindIngest:
+		var m ingestMeta
+		if err := json.Unmarshal(env.meta, &m); err != nil || m.Gen <= 0 || m.Seq <= 0 {
+			u.stats.decodeError()
+			slog.Warn("入库信封 meta 不合法，已丢弃该事件", "err", err)
+			return
+		}
+		u.stats.ingestEvent()
+		if u.ingest == nil {
+			// Python 侧开了 GO_OWNS_INGEST_WRITES 而 edge 没开：数据无人落库。
+			// 每条都打日志会刷屏，只响亮地提醒一次；计数在 /metrics 里持续可见。
+			u.stats.ingestDropped()
+			u.noSinkOnce.Do(func() {
+				slog.Error("收到入库事件但本进程未开启 GO_OWNS_INGEST_WRITES=1，数据不会落库")
+			})
+			return
+		}
+		u.ingest.EnqueueIngest(m.Gen, m.Seq, env.meta)
 	default:
 		u.stats.decodeError()
 		slog.Warn("未知信封类型，已忽略", "kind", env.kind)

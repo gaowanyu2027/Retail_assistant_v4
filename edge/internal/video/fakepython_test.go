@@ -295,6 +295,17 @@ func heartbeatEnvelope() []byte {
 	return envelopeBytes(envelopeKindHeartbeat, 0, "", nil)
 }
 
+// ingestEnvelope 组装 kind=4（入库）信封；extra 是除 gen/seq 外的 JSON 字段
+// （如 `"alerts":[...]`），传空串则只有 gen/seq。
+func ingestEnvelope(gen, seq int, extra string) []byte {
+	meta := `{"gen":` + strconv.Itoa(gen) + `,"seq":` + strconv.Itoa(seq)
+	if extra != "" {
+		meta += "," + extra
+	}
+	meta += "}"
+	return envelopeBytes(envelopeKindIngest, 0, meta, nil)
+}
+
 func boolStr(b bool) string {
 	if b {
 		return "true"

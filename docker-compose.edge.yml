@@ -43,6 +43,10 @@ services:
       # 内部端点共享密钥（edge 调 /internal/auth/verify 用）。**两侧必须是同一个值**，
       # 由 .env 注入；为空时内部端点一律 404，edge 的早拒也自动禁用（见下）。
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
+      # 三张视频派生表的写入权（S4）。**必须与 edge 容器同值**：
+      # 1 = Python 不再直写，只在上行流里发 kind=4 事件；0 = 保持原行为。
+      # 启用还要求 EDGE_VIDEO=1（否则没有上行流，事件无人消费、三张表不会写入）。
+      GO_OWNS_INGEST_WRITES: "${GO_OWNS_INGEST_WRITES:-0}"
 
   # ---------------- 边缘网关（Go，唯一对外进程） ----------------
   edge:
@@ -76,3 +80,15 @@ services:
       # INTERNAL_API_TOKEN 非空，任一不满足即静默回退（《部署流程》§3.16.2、坑 28）。
       EDGE_VIDEO: "${EDGE_VIDEO:-0}"
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
+      # 入库写者（S4）：1 = edge 从上行流接收 kind=4 事件并写三张视频派生表。
+      # 与 backend 的 GO_OWNS_INGEST_WRITES **必须同值**；还要求 EDGE_VIDEO=1
+      # 且鉴权开关齐备（edge 启动日志会在不满足时明确报错，/metrics 的 ingest 段
+      # 在未启用时为 null）。
+      GO_OWNS_INGEST_WRITES: "${GO_OWNS_INGEST_WRITES:-0}"
+      # MySQL 连接（仅入库写者使用）。与 backend 相同的变量名与取值来源；
+      # 口令优先读 mysql_root（与 mysql_db.py 一致），启动日志只报告是否已设置。
+      MYSQL_HOST: "mysql"
+      MYSQL_PORT: "3306"
+      MYSQL_USER: "root"
+      MYSQL_DB: "retail_assistant"
+      mysql_root: "${mysql_root:?请在 .env 或 shell 中设置 mysql_root}"

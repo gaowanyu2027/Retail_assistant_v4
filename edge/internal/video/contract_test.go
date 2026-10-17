@@ -103,6 +103,7 @@ func TestEnvelopeConstantsMatchFixture(t *testing.T) {
 	}
 	kinds := map[string]byte{
 		"frame": envelopeKindFrame, "control": envelopeKindControl, "heartbeat": envelopeKindHeartbeat,
+		"ingest": envelopeKindIngest,
 	}
 	for name, got := range kinds {
 		if want := f.UpstreamEnvelope.Kinds[name]; int(got) != want {

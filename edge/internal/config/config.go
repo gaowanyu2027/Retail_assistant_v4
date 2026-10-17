@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -36,6 +37,18 @@ type Config struct {
 	// edge 能拿到权威鉴权结论（`/api/ws/**` 未登录在 Python 侧是 accept 后
 	// close(1008)，没有结论就分不清"该拒"与"该接管"）。缺一即整套禁用并告警。
 	EdgeVideo bool
+	// GoOwnsIngest 三张视频派生表（retail_stats / alert_record /
+	// track_visit_paths）的写入权，环境变量 GO_OWNS_INGEST_WRITES（取值 "1"），默认关。
+	// 开 = edge 从上行流接收 kind=4 事件并落库；Python 侧不再直写。
+	// **必须与 EDGE_VIDEO=1 同时使用**：没有上行流就没有入库事件。
+	GoOwnsIngest bool
+	// MySQL 连接参数（仅 GoOwnsIngest=1 时使用）。与 Python 侧同名环境变量，
+	// 口令优先读 mysql_root（与 mysql_db.py 的既有约定一致）。
+	MySQLHost     string
+	MySQLPort     int
+	MySQLUser     string
+	MySQLPassword string
+	MySQLDatabase string
 }
 
 func Load() Config {
@@ -47,13 +60,36 @@ func Load() Config {
 		EdgeAuth:      envOr("EDGE_AUTH", "0") == "1",
 		InternalToken: strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN")),
 		EdgeVideo:     envOr("EDGE_VIDEO", "0") == "1",
+		GoOwnsIngest:  envOr("GO_OWNS_INGEST_WRITES", "0") == "1",
+		MySQLHost:     envOr("MYSQL_HOST", "mysql"),
+		MySQLPort:     envOrInt("MYSQL_PORT", 3306),
+		MySQLUser:     envOr("MYSQL_USER", "root"),
+		// 与 mysql_db.py 一致：优先 mysql_root，其次 MYSQL_PASSWORD
+		MySQLPassword: envOr("mysql_root", os.Getenv("MYSQL_PASSWORD")),
+		MySQLDatabase: envOr("MYSQL_DB", "retail_assistant"),
 	}
 }
 
-// String 供启动日志使用：**刻意不打印 InternalToken**（密钥不进日志）。
+// String 供启动日志使用：**刻意不打印 InternalToken 与 MySQL 口令**
+// （密钥不进日志），只报告口令是否已设置。
 func (c Config) String() string {
-	return fmt.Sprintf("listen=%s backend=%s dist=%s edge_auth=%t internal_token_set=%t edge_video=%t",
-		c.Listen, c.BackendURL, c.DistDir, c.EdgeAuth, c.InternalToken != "", c.EdgeVideo)
+	return fmt.Sprintf("listen=%s backend=%s dist=%s edge_auth=%t internal_token_set=%t "+
+		"edge_video=%t go_owns_ingest=%t mysql=%s:%d/%s mysql_password_set=%t",
+		c.Listen, c.BackendURL, c.DistDir, c.EdgeAuth, c.InternalToken != "",
+		c.EdgeVideo, c.GoOwnsIngest, c.MySQLHost, c.MySQLPort, c.MySQLDatabase,
+		c.MySQLPassword != "")
+}
+
+func envOrInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }
 
 func envOr(key, def string) string {

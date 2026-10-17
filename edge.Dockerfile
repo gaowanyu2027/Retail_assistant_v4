@@ -4,8 +4,9 @@
 # 设计说明：
 #   1. 前端在镜像内构建：与主 Dockerfile 用**同一个 node 基础镜像 digest
 #      和同一组构建步骤**，保证 edge 托管的前端产物与 Python 版本逐字一致。
-#   2. 纯 Go 静态二进制（CGO_ENABLED=0）：零第三方依赖（仅标准库），
-#      构建期不需要网络，运行时可放进 alpine 最小镜像。
+#   2. 纯 Go 静态二进制（CGO_ENABLED=0）：第三方依赖只有 MySQL 驱动
+#      （go-sql-driver/mysql），已 `go mod vendor` 入库并以 -mod=vendor 构建，
+#      构建期不需要网络（服务器访问不了 GitHub），运行时可放进 alpine 最小镜像。
 #   3. 运行镜像里的 dist 是**镜像内容**而非挂载：服务器无 GitHub、
 #      bind mount 有静默失效历史，产物进镜像最稳。
 # ============================================================
@@ -23,11 +24,12 @@ RUN npm run build
 # digest 取自本机实际拉取的那一个（docker pull golang:1.24-alpine）。
 FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS build
 WORKDIR /src
-# 先拷依赖清单（当前零第三方依赖、无 go.sum；保留此模式以便将来加依赖时
-# 源码变更不会使依赖解析层缓存失效）
-COPY edge/go.mod ./
+# 依赖清单与 vendor 单独成层：源码变更不会使依赖层缓存失效。
+# -mod=vendor 使构建完全不访问网络。
+COPY edge/go.mod edge/go.sum ./
+COPY edge/vendor ./vendor
 COPY edge/ ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/edge ./cmd/edge
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags="-s -w" -o /out/edge ./cmd/edge
 
 # ---------- 阶段 3：运行时（最小镜像） ----------
 # digest 同取自本机实际拉取（docker pull alpine:3.20）。

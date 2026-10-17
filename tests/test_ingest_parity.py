@@ -144,6 +144,8 @@ def test_snapshot_table_records_raw_and_collapsed_counts():
     assert entry["raw_row_count"] == 2
     assert entry["row_count"] == 1
     assert entry["rows"][0]["visit_count"] == 3
+    # 折叠字段是表名列表，不能把字符串 "zone_id" 拆成单字符列表
+    assert entry["collapsed_by"] == ["zone_id"]
 
 
 def test_compare_identical_snapshots_is_ok():

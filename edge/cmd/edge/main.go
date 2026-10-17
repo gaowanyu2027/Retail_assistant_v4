@@ -5,7 +5,9 @@
 //	静态托管（不经过 Python）· 匿名 liveness · 前端加载失败上报 ·
 //	内网 /metrics · 其余一切兜底反代（21 个兼容别名零枚举覆盖）。
 //
-// 不碰像素、不持数据库句柄——见 改进记录.md / 项目部分go语言重构.md 的边界约定。
+// 不碰像素；默认也不持数据库句柄。唯一的例外是 GO_OWNS_INGEST_WRITES=1 时，
+// 由 internal/store 持有三张视频派生表（retail_stats / alert_record /
+// track_visit_paths）的写句柄 —— 见 改进记录.md / 项目部分go语言重构.md。
 package main
 
 import (
@@ -25,6 +27,7 @@ import (
 	"retail-assistant/edge/internal/proxy"
 	"retail-assistant/edge/internal/routing"
 	"retail-assistant/edge/internal/static"
+	"retail-assistant/edge/internal/store"
 	"retail-assistant/edge/internal/video"
 )
 
@@ -144,12 +147,33 @@ func main() {
 	a := &app{m: m, st: static.New(cfg.DistDir), px: px,
 		gate: auth.NewGate(verifier, gateEnabled)}
 
+	// 入库写者（S4，可选，GO_OWNS_INGEST_WRITES=1）。前提是视频数据面已接管：
+	// 入库事件只走那条上行流；没有它，Python 侧也不会再直写这三张表。
+	var ingestStore *store.Store
+	var ingestSink video.IngestSink
+	if cfg.GoOwnsIngest {
+		if !cfg.EdgeVideo || !gateEnabled {
+			slog.Error("GO_OWNS_INGEST_WRITES=1 但视频数据面未启用" +
+				"（需 EDGE_VIDEO=1、EDGE_AUTH=1、INTERNAL_API_TOKEN 非空）：" +
+				"retail_stats / alert_record / track_visit_paths 将不会写入")
+		} else if st, err := store.Open(store.Config{
+			Host: cfg.MySQLHost, Port: cfg.MySQLPort, User: cfg.MySQLUser,
+			Password: cfg.MySQLPassword, Database: cfg.MySQLDatabase,
+		}); err != nil {
+			slog.Error("入库存储初始化失败，三张视频派生表将不会写入", "err", err)
+		} else {
+			ingestStore, ingestSink = st, st
+			go st.Run(context.Background())
+			m.SetIngestSource(st.MetricsSource())
+		}
+	}
+
 	// 视频数据面（S3，可选，EDGE_VIDEO=1）。与早拒共用同一个判定器：
 	// 同一份 TTL 缓存，"这条连接能不能算登录了"两侧答案一致。
 	vid := video.New(video.Options{
 		Video: cfg.EdgeVideo, AuthEnabled: cfg.EdgeAuth,
 		BackendURL: cfg.BackendURL, InternalToken: cfg.InternalToken,
-		Verifier: verifier,
+		Verifier: verifier, Ingest: ingestSink,
 	})
 	if vid.Enabled() {
 		a.vid = vid
@@ -187,6 +211,10 @@ func main() {
 	// 不在 http.Server 的管理范围内 —— Shutdown 既不等它们，也关不掉它们。
 	if a.vid != nil {
 		a.vid.Close()
+	}
+	// 上行流已停 → 不会再有入库事件；把已收到的批次刷完再退出。
+	if ingestStore != nil {
+		ingestStore.Close()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

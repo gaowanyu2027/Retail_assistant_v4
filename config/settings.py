@@ -151,6 +151,11 @@ FRAME_SKIP = 1
 FACE_EMOTION_INTERVAL = 5
 # 零售热度快照写入帧间隔
 RETAIL_STATS_SAVE_FRAME_INTERVAL = 75
+# 三张视频派生表（retail_stats / alert_record / track_visit_paths）的写入权：
+# 0=Python 进程直接写 MySQL（默认，与迁移前一致）；1=Python 只把同一批数据作为
+# 上行帧流的 kind=4 事件发给 Go edge，由 edge 落库。只有在 EDGE_VIDEO=1 时才有
+# 意义（否则没有上行流，事件只会留在本进程）；改动后需重建容器。
+GO_OWNS_INGEST_WRITES = os.environ.get("GO_OWNS_INGEST_WRITES", "0") == "1"
 # WebSocket 接收命令超时（秒）
 WS_RECEIVE_TIMEOUT_SECONDS = 0.005
 # WebSocket 每帧推送后休眠间隔（秒）

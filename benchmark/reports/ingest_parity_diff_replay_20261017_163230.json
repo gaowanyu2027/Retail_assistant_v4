@@ -1,0 +1,72 @@
+{
+  "tool": "ingest_parity",
+  "version": 1,
+  "kind": "diff",
+  "checked_at": "2026-10-17 16:33:06",
+  "tolerance": 0.0,
+  "ignore": [],
+  "max_samples": 20,
+  "baseline": {
+    "label": "replay_python",
+    "snapshot_at": "2026-10-17 16:33:03",
+    "window": {
+      "since": "2026-10-17 08:32:21",
+      "until": "2026-10-17 08:32:26",
+      "bounds": "[since, until)"
+    }
+  },
+  "candidate": {
+    "label": "replay_go",
+    "snapshot_at": "2026-10-17 16:33:05",
+    "window": {
+      "since": "2026-10-17 08:32:27",
+      "until": "2026-10-17 08:32:30",
+      "bounds": "[since, until)"
+    }
+  },
+  "tables_compared": [
+    "retail_stats",
+    "alert_record",
+    "track_visit_paths"
+  ],
+  "tables_only_in_one": [],
+  "tables": {
+    "retail_stats": {
+      "baseline_rows": 2,
+      "candidate_rows": 2,
+      "matched": 2,
+      "missing_total": 0,
+      "extra_total": 0,
+      "field_mismatch_total": 0,
+      "missing": [],
+      "extra": [],
+      "field_mismatches": [],
+      "ok": true
+    },
+    "alert_record": {
+      "baseline_rows": 1,
+      "candidate_rows": 1,
+      "matched": 1,
+      "missing_total": 0,
+      "extra_total": 0,
+      "field_mismatch_total": 0,
+      "missing": [],
+      "extra": [],
+      "field_mismatches": [],
+      "ok": true
+    },
+    "track_visit_paths": {
+      "baseline_rows": 1,
+      "candidate_rows": 1,
+      "matched": 1,
+      "missing_total": 0,
+      "extra_total": 0,
+      "field_mismatch_total": 0,
+      "missing": [],
+      "extra": [],
+      "field_mismatches": [],
+      "ok": true
+    }
+  },
+  "ok": true
+}

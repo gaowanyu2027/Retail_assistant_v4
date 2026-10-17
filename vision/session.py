@@ -64,6 +64,9 @@ from ws_protocol import (
 _FRAME_RING = 4
 # 控制事件环形容量：停止/错误这类消息不能丢，但也没有无限保留的必要
 _CONTROL_RING = 512
+# 入库事件环形容量（S4）：一条事件可能含几十条待写行，保留量比帧环大得多；
+# 上行流断开期间照常排队，超出容量才丢（丢的事件由 Go 侧按 (gen, seq) 记账）
+_INGEST_RING = 256
 
 # Go 边缘上行流断开后的宽限期：这段时间内重连视为同一次会话的读者（Go 重启/瞬断），
 # 超过则判定它登记过的观看者都已失联（见 SessionManager._monitor_loop）
@@ -151,6 +154,20 @@ class ControlEvent:
     except_viewer: str | None = None
 
 
+@dataclass
+class IngestEvent:
+    """一批待入库的视频派生数据（S4，仅 Python→Go 的内部上行流）。
+
+    `payload` 是 `vision.ingest` 整形后的字典：可含 `retail` / `alerts` / `paths`
+    中的一项或多项。**不下发浏览器**，`ws_protocol` 里没有它的任何定义。
+    事件本身带日志 `seq`（与帧/控制事件同一条序号空间），Go 按 `(gen, seq)`
+    去重；`gen` 用于区分会话代际。
+    """
+    seq: int
+    gen: int
+    payload: dict
+
+
 class EventLog:
     """会话事件的唯一发布点；每个读者一个游标，互不影响。
 
@@ -166,6 +183,9 @@ class EventLog:
         self._sealed_gen = -1
         self._frames: deque[FrameEvent] = deque(maxlen=_FRAME_RING)
         self._controls: deque[ControlEvent] = deque(maxlen=_CONTROL_RING)
+        # 入库事件不清代（见 publish_ingest）：停止/换代时尚未被读者取走的数据
+        # 仍然有效，必须让在场读者继续取到，否则会静默少写。
+        self._ingests: deque[IngestEvent] = deque(maxlen=_INGEST_RING)
         self._latest: FrameEvent | None = None
 
     # ---- 发布 ----
@@ -211,6 +231,23 @@ class EventLog:
                 self._latest = None
             self._cv.notify_all()
 
+    def publish_ingest(self, gen: int, payload: dict) -> None:
+        """发布一批待入库数据（Python→Go 的数据面对账通道）。
+
+        与帧的差别：**停止（clear/封代）之后仍接受本代事件** —— 处理线程可能正好
+        走完一轮，Python 直接写库时这条数据照样会落库，改用事件流后不能在同样的
+        时序下把它静默丢掉。换代（gen 变化）之后的旧代事件则丢弃：新会话的数据
+        不应再混进上一代的事件序号里。
+        """
+        if not payload:
+            return
+        with self._cv:
+            if gen != self._gen:
+                return
+            self._seq += 1
+            self._ingests.append(IngestEvent(self._seq, gen, dict(payload)))
+            self._cv.notify_all()
+
     # ---- 读取 ----
     def cursor(self) -> "EventCursor":
         """新读者的游标：从"当前最新帧"开始（新观看者要立刻看到画面）。
@@ -248,8 +285,11 @@ class EventCursor:
             # 上一代帧不得重放给新读者。
             self._frame_seq = (log._latest.seq - 1) if log._latest else log._seq
             self._ctrl_seq = log._seq
+            # 入库事件同样不补发：新读者（尤其是重连的 Go 上行流）从"现在"开始，
+            # 旧事件可能属于已经结束的会话，重放会把过期数据再写一遍。
+            self._ingest_seq = log._seq
 
-    def _pick(self) -> FrameEvent | ControlEvent | None:
+    def _pick(self) -> FrameEvent | ControlEvent | IngestEvent | None:
         """取下一个该发的事件（调用方持有日志锁）。
 
         帧环只留最近 `_FRAME_RING` 条，因此**积压上限就是这个环**：游标落后不超过
@@ -260,11 +300,11 @@ class EventCursor:
         """
         ctrl = next((e for e in self._log._controls if e.seq > self._ctrl_seq), None)
         frame = next((e for e in self._log._frames if e.seq > self._frame_seq), None)
-        if ctrl is None:
-            return frame
-        if frame is None:
-            return ctrl
-        return ctrl if ctrl.seq < frame.seq else frame
+        ingest = next((e for e in self._log._ingests if e.seq > self._ingest_seq), None)
+        candidates = [e for e in (ctrl, frame, ingest) if e is not None]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda e: e.seq)
 
     def next(self, timeout: float = 0.0):
         deadline = _time.monotonic() + timeout
@@ -274,6 +314,8 @@ class EventCursor:
                 if ev is not None:
                     if isinstance(ev, FrameEvent):
                         self._frame_seq = ev.seq
+                    elif isinstance(ev, IngestEvent):
+                        self._ingest_seq = ev.seq
                     else:
                         self._ctrl_seq = ev.seq
                     return ev
@@ -395,6 +437,13 @@ class VideoSession:
         self.first_frame_seen = True
         self.manager.log.publish_frame(self.gen, int(frame_id),
                                        dumps_message(meta), jpeg)
+
+    def publish_ingest(self, payload: dict) -> None:
+        """处理线程交出一批待入库数据（Go 拥有写入权时走这里）。
+
+        不检查 `running`：见 `EventLog.publish_ingest` 的时序说明。
+        """
+        self.manager.log.publish_ingest(self.gen, payload)
 
     def __repr__(self) -> str:
         return f"<VideoSession {self.id} gen={self.gen} {self.mode} {self.kind}>"

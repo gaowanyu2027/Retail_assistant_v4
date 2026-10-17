@@ -15,6 +15,9 @@
     kind=2 控制：meta = {"gen":G,"clear":bool,"except":"<viewer_id>|null",
                         "framed_tail":"<文本>|null","texts":["<WS 文本>", ...]}，jpeg 空
     kind=3 心跳：meta/jpeg 皆空（1s 无事件发一次，供 Go 判断"Python 还在"）
+    kind=4 入库：meta = {"gen":G,"seq":S,"retail"?:{...},"alerts"?:[...],"paths"?:[...]}，
+           jpeg 空。仅当 `GO_OWNS_INGEST_WRITES=1` 时出现；Go 落三张视频派生表。
+           字段契约见 `contracts/ingest_events.json`（两侧测试共同校验）。
 
 文本消息**一律由 Python 组装**（含中文与任意 JSON 键序），Go 只做转发与二进制封装
 （`[4B 大端 frame_id][JPEG]`），这样两侧不必各自复刻一套文案。
@@ -32,7 +35,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.routes.internal import require_internal_token
-from vision.session import MANAGER, ControlEvent, FrameEvent
+from vision.session import MANAGER, ControlEvent, FrameEvent, IngestEvent
 from ws_protocol import dumps_message
 
 router = APIRouter(tags=["internal"], include_in_schema=False)
@@ -43,6 +46,7 @@ _VERSION = 1
 _KIND_FRAME = 1
 _KIND_CONTROL = 2
 _KIND_HEARTBEAT = 3
+_KIND_INGEST = 4
 _HEARTBEAT_SECONDS = 1.0
 
 
@@ -93,6 +97,12 @@ def _stream_chunks() -> Iterator[bytes]:
                     "gen": ev.gen, "frame_id": ev.frame_id, "msg": ev.meta_text,
                 }).encode("utf-8")
                 yield _envelope(_KIND_FRAME, ev.frame_id, meta, ev.jpeg)
+            elif isinstance(ev, IngestEvent):
+                # gen/seq 在 meta 里（信封头的 frame_id 字段对入库事件无意义）；
+                # payload 的键由 vision.ingest 决定，契约见 contracts/ingest_events.json
+                meta = dumps_message({"gen": ev.gen, "seq": ev.seq, **ev.payload}
+                                     ).encode("utf-8")
+                yield _envelope(_KIND_INGEST, 0, meta, b"")
             else:
                 meta = dumps_message({
                     "gen": ev.gen, "clear": ev.clear,

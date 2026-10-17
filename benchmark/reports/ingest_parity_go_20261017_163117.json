@@ -1,0 +1,74 @@
+{
+  "tool": "ingest_parity",
+  "version": 1,
+  "kind": "snapshot",
+  "label": "go",
+  "snapshot_at": "2026-10-17 16:33:01",
+  "window": {
+    "since": "2026-10-17 08:31:04",
+    "until": "2026-10-17 08:31:19",
+    "bounds": "[since, until)"
+  },
+  "source": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "database": "retail_assistant",
+    "has_password": true
+  },
+  "tables": {
+    "retail_stats": {
+      "raw_row_count": 3,
+      "row_count": 3,
+      "collapsed_by": [
+        "zone_id"
+      ],
+      "rows": [
+        {
+          "zone_id": "shelf_C",
+          "zone_type": "shelf",
+          "zone_label": "3号货架 - 日用品区",
+          "visit_count": 2,
+          "deep_interest_count": 0,
+          "total_dwell_seconds": 9.9,
+          "heat_score": 33.4,
+          "source": "video"
+        },
+        {
+          "zone_id": "shelf_B",
+          "zone_type": "shelf",
+          "zone_label": "2号货架 - 饮料区",
+          "visit_count": 2,
+          "deep_interest_count": 0,
+          "total_dwell_seconds": 10.6,
+          "heat_score": 35.2,
+          "source": "video"
+        },
+        {
+          "zone_id": "shelf_A",
+          "zone_type": "shelf",
+          "zone_label": "1号货架 - 零食区",
+          "visit_count": 5,
+          "deep_interest_count": 0,
+          "total_dwell_seconds": 19.5,
+          "heat_score": 70.0,
+          "source": "video"
+        }
+      ],
+      "truncated": false
+    },
+    "alert_record": {
+      "raw_row_count": 0,
+      "row_count": 0,
+      "collapsed_by": [],
+      "rows": [],
+      "truncated": false
+    },
+    "track_visit_paths": {
+      "raw_row_count": 0,
+      "row_count": 0,
+      "collapsed_by": [],
+      "rows": [],
+      "truncated": false
+    }
+  }
+}

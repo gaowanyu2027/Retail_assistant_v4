@@ -167,7 +167,7 @@ def snapshot_table(table: str, rows) -> dict:
     return {
         "raw_row_count": len(rows),
         "row_count": len(normalized),
-        "collapsed_by": list(collapse["key"]) if collapse else [],
+        "collapsed_by": [collapse["key"]] if collapse else [],
         "rows": normalized,
     }
 

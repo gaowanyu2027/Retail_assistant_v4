@@ -40,10 +40,15 @@ type Metrics struct {
 
 	// 视频数据面快照（S3 接线；nil = 未接线，输出 null）
 	videoSource func() any
+	// 入库队列快照（S4；nil = Go 不持有写入权，输出 null）
+	ingestSource func() any
 }
 
 // SetVideoSource 挂上视频数据面的快照函数（main 启动时调用一次）。
 func (m *Metrics) SetVideoSource(fn func() any) { m.videoSource = fn }
+
+// SetIngestSource 挂上入库队列的快照函数（main 启动时调用一次）。
+func (m *Metrics) SetIngestSource(fn func() any) { m.ingestSource = fn }
 
 func New(backendURL string) *Metrics {
 	m := &Metrics{start: time.Now(), backendURL: backendURL,
@@ -106,6 +111,9 @@ type snapshot struct {
 	// Video 视频数据面（S3）的计数，由 video.Stats.Snapshot 提供；
 	// 未接线时为 null。字段是 any：metrics 包不该认识视频内部结构。
 	Video any `json:"video"`
+	// Ingest 入库队列（S4）的计数，由 store.Store.Snapshot 提供；
+	// Go 不持有写入权时为 null。
+	Ingest any `json:"ingest"`
 }
 
 // authStats 边缘鉴权早拒的计数（未启用时全 0）。
@@ -153,6 +161,9 @@ func (m *Metrics) Serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if m.videoSource != nil {
 		snap.Video = m.videoSource()
+	}
+	if m.ingestSource != nil {
+		snap.Ingest = m.ingestSource()
 	}
 	body, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {

@@ -17,7 +17,8 @@ import time as _time
 
 import cv2
 
-from config.settings import VIDEO_FPS, VIDEO_IDLE_SLEEP_SECONDS
+from config.settings import GO_OWNS_INGEST_WRITES, VIDEO_FPS, VIDEO_IDLE_SLEEP_SECONDS
+from vision import ingest
 from vision.session import file_analysis_plan, skip_source_frames
 from ws_protocol import frame_metadata_message
 
@@ -237,6 +238,26 @@ def _encode_display(frame, width: int, quality: int) -> bytes:
     return buffer.tobytes()
 
 
+def _deliver_ingest(session, payload: dict, error_label: str) -> None:
+    """把一批视频派生数据交给当前的写者（S4 的唯一切换点）。
+
+    - `GO_OWNS_INGEST_WRITES=0`：本进程直接写 MySQL（与迁移前同一批函数）；
+    - `=1`：作为 kind=4 事件推入上行流，由 Go edge 落库。
+    两条路径吃的是**同一份 payload**（`vision.ingest` 整形），所以字段口径不会分叉。
+    写失败只记日志、不中断处理线程 —— 与迁移前一致（数据重要，画面更重要）。
+    """
+    if not payload:
+        return
+    try:
+        if GO_OWNS_INGEST_WRITES:
+            session.publish_ingest(payload)
+        else:
+            import mysql_db
+            ingest.apply_local(payload, mysql_db)
+    except Exception as e:
+        print(f"[MySQL] {error_label}: {e}")
+
+
 # ==================== 零售模式 ====================
 
 def _retail_loop(session, cap) -> str:
@@ -317,56 +338,41 @@ def _retail_loop(session, cap) -> str:
         # 供购物动线分析（A→B 关联规则）使用。CV 层零 DB 依赖，由本层 drain 后写入。
         if result.frame_id % 30 == 0:  # 约每 1 秒 drain 一次（retired 为空时零开销）
             try:
-                import mysql_db
                 for track in processor.track_mgr.drain_retired():
-                    path, total_dwell = [], 0.0
-                    for zid, rec in (track.visited_zones or {}).items():
-                        label = processor.roi_manager.zone_label.get(zid, zid)
-                        dwell = 0.0
-                        if rec.get("enter_ts") is not None and rec.get("last_ts") is not None:
-                            dwell = max(rec["last_ts"] - rec["enter_ts"], 0.0)
-                        elif rec.get("dwell_frames"):
-                            dwell = rec["dwell_frames"] / max(processor.fps, 1.0)
-                        if dwell > 0.5:  # 过滤过短停留
-                            path.append({"zone_id": zid, "zone_label": label,
-                                         "dwell_seconds": round(dwell, 1)})
-                            total_dwell += dwell
-                    if len(path) >= 2:  # 至少访问 2 个区域才有动线价值
-                        mysql_db.save_track_visit_path(
-                            session_id=f"video_{int(_time.time())}",
-                            track_id=track.track_id,
-                            path=path, source="video",
-                            total_dwell_seconds=round(total_dwell, 1),
-                        )
+                    row = ingest.build_path_row(
+                        session_id=f"video_{int(_time.time())}",
+                        track_id=track.track_id,
+                        visited_zones=track.visited_zones or {},
+                        zone_labels=processor.roi_manager.zone_label,
+                        fps=processor.fps,
+                        now_text=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                    if row is not None:  # 至少访问 2 个区域才有动线价值
+                        _deliver_ingest(session, {"paths": [row]}, "动线持久化失败")
             except Exception as e:
                 print(f"[MySQL] 动线持久化失败: {e}")
 
         if result.frame_id % RETAIL_STATS_SAVE_FRAME_INTERVAL == 0:
             try:
-                import mysql_db
-                stats = pop_skill.get_stats()
-                mysql_db.save_retail_stats(
-                    datetime.now().strftime("%Y%m%d%H%M"),
-                    stats.get("zones", {}),
+                now = datetime.now()
+                payload = ingest.build_retail_payload(
+                    now.strftime("%Y%m%d%H%M"),
+                    now.strftime("%Y-%m-%d %H:%M:%S"),
+                    pop_skill.get_stats().get("zones", {}),
                 )
+                _deliver_ingest(session, payload, "零售热度快照写入失败")
             except Exception as e:
                 print(f"[MySQL] 零售热度快照写入失败: {e}")
 
-        for alert in anom_result.get("new_alerts", []):
-            try:
-                import mysql_db
-                mysql_db.save_alert_record(
-                    alert_type="anomaly",
-                    zone_id=(alert.get("zone_visited") or [""])[0],
-                    person_id=alert.get("person_id", 0),
-                    level=alert.get("level", "watch"),
-                    score=alert.get("score", 0),
-                    reason="；".join(alert.get("reasons", [])),
-                    frame_id=alert.get("frame_id", 0),
-                    created_at=alert.get("timestamp") or None,
-                )
-            except Exception as e:
-                print(f"[MySQL] 告警记录写入失败: {e}")
+        try:
+            alert_rows = ingest.build_alert_rows(
+                anom_result.get("new_alerts", []),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            if alert_rows:
+                _deliver_ingest(session, {"alerts": alert_rows}, "告警记录写入失败")
+        except Exception as e:
+            print(f"[MySQL] 告警记录写入失败: {e}")
 
         if (session.file_step <= 1
                 and result.frame_id % CAMERA_FRAME_DROP_INTERVAL == 0
