@@ -109,6 +109,37 @@ def test_flag_off_keeps_old_behaviour():
         settings.AGENT_REMEMBER_TEMPLATE_TURNS = old
 
 
+def test_env_switch_controls_setting():
+    """环境变量 `AGENT_REMEMBER_TEMPLATE_TURNS` 能真正控制全局开关。
+
+    配置项此前是硬编码 True，文档却把它描述成开关；压测需要按环境关闭
+    （省掉每次模板请求的一次 MySQL 检查点写入）。这里通过重载 settings
+    验证 0/1 两种取值，最后恢复原值，避免污染后续用例。
+    """
+    import importlib
+    import os
+
+    import config.settings as settings
+
+    key = "AGENT_REMEMBER_TEMPLATE_TURNS"
+    old_env = os.environ.get(key)
+    old_val = settings.AGENT_REMEMBER_TEMPLATE_TURNS
+    try:
+        os.environ[key] = "0"
+        importlib.reload(settings)
+        assert settings.AGENT_REMEMBER_TEMPLATE_TURNS is False
+        os.environ[key] = "1"
+        importlib.reload(settings)
+        assert settings.AGENT_REMEMBER_TEMPLATE_TURNS is True
+    finally:
+        if old_env is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old_env
+        importlib.reload(settings)
+        assert settings.AGENT_REMEMBER_TEMPLATE_TURNS == old_val
+
+
 def test_write_failure_never_breaks_the_answer():
     """记忆写入失败必须被吞掉：模板轮不能因为检查点故障而报错。"""
     g = _StubGraph(boom=True)

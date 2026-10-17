@@ -211,8 +211,10 @@ AGENT_LONG_TERM_KEYWORD_LIMIT = 10
 # 模板轮（零 LLM 的意图路由回答）是否也写进检查点线程。
 # 为什么需要：多轮上下文的唯一来源是检查点，模板轮不经过图 →
 # 下一轮的 LLM 看不到"上一轮问了什么"，追问/指代类问题会答"这是第一条消息"。
-# 关掉（False）可省掉每次模板请求的一次 MySQL 检查点写入。
-AGENT_REMEMBER_TEMPLATE_TURNS = True
+# 关掉（0）可省掉每次模板请求的一次 MySQL 检查点写入；压测实测该写入会让
+# c100 模板吞吐从 200 QPS 级降到 35 QPS 级（见《改进记录》模块 D 续10）。
+AGENT_REMEMBER_TEMPLATE_TURNS = os.environ.get(
+    "AGENT_REMEMBER_TEMPLATE_TURNS", "1") == "1"
 
 # ==================== Agent 存储清理策略 ====================
 # 每个会话(thread)保留的最新检查点数量（LangGraph 恢复只用最新，旧的可安全清理）
