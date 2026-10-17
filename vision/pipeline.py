@@ -18,6 +18,7 @@ import time as _time
 import cv2
 
 from config.settings import VIDEO_FPS, VIDEO_IDLE_SLEEP_SECONDS
+from vision.session import file_analysis_plan, skip_source_frames
 from ws_protocol import frame_metadata_message
 
 # 「打开失败」哨兵：与"本机摄像头（没有服务端要打开的源）"的 None 区分开
@@ -38,6 +39,7 @@ def run(session) -> None:
         session.cap = cap
         if not session.running:                 # 打开期间被停止：不进入循环
             return
+        _configure_file_pacing(session, cap)
         if session.mode == "emotion":
             # ⚠ 与迁移前同一优先级：先打开源，再看表情检测器在不在
             if session.face_emotion is None:
@@ -161,6 +163,37 @@ def _finished(session) -> None:
 
 # ==================== 帧循环公共部分 ====================
 
+def _configure_file_pacing(session, cap) -> None:
+    """文件/上传源按 FILE_ANALYSIS_FPS 抽帧；其它源与表情模式保持逐帧。
+
+    抽帧后帧序号的时间单位随之变化：`processor.fps` 与 `target_fps` 都改为
+    有效帧率，skill 的停留时长与播放节奏才与源时长一致。处理慢于有效帧率时
+    `_adaptive_fps_wait` 不再补睡（尽力而为），不会把播放拖得比处理速度更慢。
+    """
+    from config.settings import FILE_ANALYSIS_FPS
+
+    if session.mode != "retail" or session.kind not in ("file", "upload"):
+        return
+    if FILE_ANALYSIS_FPS <= 0 or cap is None:
+        return
+
+    try:
+        src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    except Exception:
+        src_fps = 0.0
+    step, effective = file_analysis_plan(src_fps, FILE_ANALYSIS_FPS)
+    session.file_step = step
+    session.file_analysis_fps = effective
+    if effective > 0:
+        session.target_fps = effective
+        if session.processor is not None:
+            session.processor.fps = effective
+        print(f"[WS] 文件源抽帧: 源 {src_fps:.1f}fps → 每 {step} 帧取 1 帧，"
+              f"分析 {effective:.1f}fps")
+    else:
+        print(f"[WS] 文件源抽帧: 源帧率未知，逐帧分析（FILE_ANALYSIS_FPS={FILE_ANALYSIS_FPS}）")
+
+
 def _adaptive_fps_wait(session, frame_start: float) -> None:
     """根据上一帧处理耗时自动调整目标帧率，并控制处理线程节奏。"""
     from config.settings import (
@@ -168,6 +201,16 @@ def _adaptive_fps_wait(session, frame_start: float) -> None:
         ADAPTIVE_FPS_UP_FACTOR, VIDEO_MAX_FPS, VIDEO_MIN_FPS,
     )
     elapsed = _time.time() - frame_start
+    if session.file_analysis_fps > 0:
+        # 文件抽帧会话：播放节奏固定为源的有效帧率。
+        # 不参与自适应上调 —— 抽帧后的 1 帧就代表 1/effective 秒，按 30fps
+        # 推送会让播放快于源；处理慢于该帧率时自然不补睡，播放尽力跟上。
+        target_fps = session.file_analysis_fps
+        session.target_fps = target_fps
+        sleep_time = (1.0 / max(target_fps, 0.1)) - elapsed
+        if sleep_time > 0:
+            _time.sleep(sleep_time)
+        return
     target_fps = session.target_fps or float(VIDEO_FPS)
     target_interval = 1.0 / max(target_fps, 0.1)
 
@@ -228,6 +271,10 @@ def _retail_loop(session, cap) -> str:
             ret, frame = cap.read()
             if not ret:
                 return "finished"
+            if session.file_step > 1:
+                # 文件源抽帧：丢弃本帧之后的 step-1 帧，下一轮 read 取到的是
+                # 源时间轴上 1/effective 秒之后的画面
+                skip_source_frames(cap, session.file_step)
             # 镜像模式：服务器摄像头整帧水平翻转（自拍视角，检测/ROI/标注随之一致）
             frame = cv2.flip(frame, 1)
 
@@ -321,7 +368,9 @@ def _retail_loop(session, cap) -> str:
             except Exception as e:
                 print(f"[MySQL] 告警记录写入失败: {e}")
 
-        if result.frame_id % CAMERA_FRAME_DROP_INTERVAL == 0 and isinstance(cap, cv2.VideoCapture):
+        if (session.file_step <= 1
+                and result.frame_id % CAMERA_FRAME_DROP_INTERVAL == 0
+                and isinstance(cap, cv2.VideoCapture)):
             for _ in range(CAMERA_FRAME_DROP_BATCH):
                 cap.grab()
 

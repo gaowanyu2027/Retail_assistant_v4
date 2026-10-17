@@ -683,3 +683,62 @@ def test_adapter_drain_keeps_controls_and_only_latest_frame():
     assert [type(e).__name__ for e in events] == ["ControlEvent", "FrameEvent"]
     assert events[0].texts == ["M"] and events[1].frame_id == 4
     assert _drain(cursor) == [], "取空之后没有新事件"
+
+
+# ==================== 文件源抽帧 ====================
+
+class _FakeCap:
+    """只实现 `grab()` 的源替身：记录被丢弃的源帧数。"""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.grabbed = 0
+
+    def grab(self) -> bool:
+        if self.grabbed >= self.total:
+            return False
+        self.grabbed += 1
+        return True
+
+
+def test_file_analysis_plan_step_and_effective_fps():
+    """源帧率 → (抽帧步长, 有效分析帧率)：播放节奏与停留时长按有效帧率计。"""
+    assert vs.file_analysis_plan(60, 12) == (5, 12.0)
+    assert vs.file_analysis_plan(30, 12) == (3, 10.0)
+    assert vs.file_analysis_plan(24, 12) == (2, 12.0)
+    # 除不尽时向上取整，有效帧率 = 源 / step（25fps → 每 3 帧 1 帧 ≈ 8.33fps）
+    step, eff = vs.file_analysis_plan(25, 12)
+    assert step == 3 and abs(eff - 25 / 3) < 1e-9
+    # 源本来就不快于目标：逐帧，且不改变原有帧率口径
+    assert vs.file_analysis_plan(12, 12) == (1, 12.0)
+    assert vs.file_analysis_plan(10, 12) == (1, 10.0)
+    # 关闭抽帧 / 源帧率未知或非法：逐帧，effective=0（调用方保持原口径）
+    assert vs.file_analysis_plan(60, 0) == (1, 0.0)
+    assert vs.file_analysis_plan(0, 12) == (1, 0.0)
+    assert vs.file_analysis_plan(-30, 12) == (1, 0.0)
+    assert vs.file_analysis_plan(float("nan"), 12) == (1, 0.0)
+    assert vs.file_analysis_plan(float("inf"), 12) == (1, 0.0)
+    assert vs.file_analysis_plan(None, 12) == (1, 0.0)
+
+
+def test_skip_source_frames_grabs_step_minus_one_and_stops_at_eof():
+    """每次成功 read 后丢弃 step-1 帧；源到头立即停，不空转。"""
+    cap = _FakeCap(total=10)
+    vs.skip_source_frames(cap, 3)
+    assert cap.grabbed == 2
+    # step<=1 不丢弃
+    vs.skip_source_frames(cap, 1)
+    vs.skip_source_frames(cap, 0)
+    assert cap.grabbed == 2
+    # 剩余不足 step-1 帧：抓到源尾就返回
+    vs.skip_source_frames(cap, 100)
+    assert cap.grabbed == 10
+
+
+def test_session_starts_with_file_sampling_disabled():
+    """抽帧关闭时字段保持原口径（逐帧、自适应节奏）。"""
+    mgr = _mk_manager()
+    sess = _mk_session(mgr)
+    assert sess.file_step == 1
+    assert sess.file_analysis_fps == 0.0
+    assert sess.target_fps == float(vs.VIDEO_FPS)

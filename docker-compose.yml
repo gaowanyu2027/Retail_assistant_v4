@@ -106,6 +106,13 @@ services:
       # 容器内没有摄像头 → 保持鉴权与销量投递目录默认开
       AUTH_ENABLED: "${AUTH_ENABLED:-1}"
       SALES_INBOX_ENABLED: "${SALES_INBOX_ENABLED:-1}"
+      # ---- 视频推理调优（缺省保持原行为；部署值见《部署流程》§3.17）----
+      # 推理输入尺寸：小尺寸提升帧率，代价是远处小目标检出率略降
+      YOLO_IMGSZ: "${YOLO_IMGSZ:-640}"
+      # CPU 推理线程数：0=Ultralytics 默认（2 核机器实际只用 1 线程）
+      YOLO_NUM_THREADS: "${YOLO_NUM_THREADS:-0}"
+      # 文件/上传源分析抽帧目标帧率：0=逐帧；12=60fps 源每 5 帧取 1 帧
+      FILE_ANALYSIS_FPS: "${FILE_ANALYSIS_FPS:-0}"
     volumes:
       # 运行时数据：SQLite 回退库、鉴权库 auth.db、销量投递目录、日志
       - ./data:/app/data

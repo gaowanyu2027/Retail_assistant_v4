@@ -32,6 +32,7 @@ Go 侧不必复刻任何业务文案（含中文字节与 JSON 键序）。
 from __future__ import annotations
 
 import base64
+import math
 import threading
 import time as _time
 from collections import deque
@@ -70,6 +71,39 @@ _EDGE_GRACE_SECONDS = 10.0
 
 # 服务关闭/主动停止时，处理线程的等待上限（迁移前分别为 1.0s / 2.0s，统一取大者）
 _THREAD_JOIN_TIMEOUT = 2.0
+
+
+# ==================== 文件源抽帧 ====================
+
+def file_analysis_plan(src_fps, target_fps: int) -> tuple[int, float]:
+    """按源帧率计算抽帧步长与有效分析帧率。
+
+    - `target_fps <= 0`、源帧率未知/非法、源本来就不快于目标 → 逐帧（step=1）；
+    - 否则 `step = ceil(src / target)`，有效帧率 = `src / step`。
+
+    返回 `(step, effective_fps)`。逐帧且源帧率未知时 `effective_fps=0.0`，
+    调用方保持原帧率口径。
+    """
+    try:
+        src = float(src_fps)
+    except (TypeError, ValueError):
+        return 1, 0.0
+    if target_fps <= 0 or not math.isfinite(src) or src <= 0:
+        return 1, 0.0
+    if src <= target_fps:
+        return 1, src
+    step = int(math.ceil(src / float(target_fps)))
+    return step, src / step
+
+
+def skip_source_frames(cap, step: int) -> None:
+    """在已成功 `read()` 一帧之后丢弃紧随其后的 `step-1` 帧。
+
+    只用 `grab()`（抓取但不解码取像素），比逐帧 `read()` 便宜得多。
+    """
+    for _ in range(max(0, int(step) - 1)):
+        if not cap.grab():
+            return
 
 
 def ws_alive(ws) -> bool:
@@ -295,6 +329,10 @@ class VideoSession:
         self.camera_id = 0
         self.current_frame = 0
         self.target_fps = float(VIDEO_FPS)
+        # 文件源抽帧（0=逐帧；>0 时每 file_step 帧取 1 帧，
+        # file_analysis_fps 为抽帧后的有效帧率，用于固定播放节奏）
+        self.file_step = 1
+        self.file_analysis_fps = 0.0
         self.run_token = object()
 
         # 打开/首帧：看门狗与"会话失败即释放归属"的依据
@@ -600,6 +638,9 @@ class SessionManager:
             pop_skill.reset()
             anom_skill.reset()
             comps["emo_skill"].reset()
+            # 上一个会话可能是抽帧文件源（processor.fps 被改成有效帧率）；
+            # 新会话一律先回到标称帧率，逐帧会话的停留时长口径才不会串
+            target_processor.fps = float(VIDEO_FPS)
             target_processor.reset()
         else:
             # 表情模式：表情检测器缺失属"启动失败"，由处理线程按既有优先级报错

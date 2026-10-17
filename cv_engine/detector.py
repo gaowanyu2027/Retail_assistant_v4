@@ -1,13 +1,34 @@
 """
 YOLO检测器封装 — YOLO26n + ByteTrack 内置跟踪
 """
+import os
 from dataclasses import dataclass
 import numpy as np
-from ultralytics import YOLO
+import torch
+
 from config.settings import (
     YOLO_MODEL_PATH, DEVICE, YOLO_CONF, YOLO_IOU,
-    YOLO_IMGSZ, PERSON_CLASS_ID, USE_FP16, YOLO_TRACKER
+    YOLO_IMGSZ, PERSON_CLASS_ID, USE_FP16, YOLO_TRACKER,
+    YOLO_NUM_THREADS,
 )
+
+# Ultralytics 的两处默认值会让 2 vCPU 机器上的 CPU 推理只跑 1 个线程：
+#   1) ultralytics/__init__.py 在 OMP_NUM_THREADS 未设置时强制设为 1；
+#   2) select_device('cpu') 调用 torch.set_num_threads(NUM_THREADS)，而
+#      NUM_THREADS = min(8, max(1, os.cpu_count() - 1)) —— 2 核时正好是 1。
+# YOLO_NUM_THREADS > 0 时，在导入 ultralytics 前设好 OMP，再覆盖其
+# torch_utils.NUM_THREADS，让后续每次 select_device 都使用配置值。
+# 默认 0 = 不改动，保持原行为。
+if YOLO_NUM_THREADS > 0:
+    os.environ["OMP_NUM_THREADS"] = str(YOLO_NUM_THREADS)
+    os.environ["MKL_NUM_THREADS"] = str(YOLO_NUM_THREADS)
+
+from ultralytics import YOLO  # noqa: E402  (必须先设置 OMP_NUM_THREADS)
+from ultralytics.utils import torch_utils as _yolo_torch_utils  # noqa: E402
+
+if YOLO_NUM_THREADS > 0:
+    _yolo_torch_utils.NUM_THREADS = YOLO_NUM_THREADS
+    torch.set_num_threads(YOLO_NUM_THREADS)
 
 
 @dataclass

@@ -96,8 +96,10 @@ FEAT_BANK_MAX = 150
 YOLO_CONF = 0.25
 # NMS IOU 阈值
 YOLO_IOU = 0.45
-# 推理输入尺寸
-YOLO_IMGSZ = 640
+# 推理输入尺寸（环境变量可覆盖；默认 640 保持原行为）
+YOLO_IMGSZ = int(os.environ.get("YOLO_IMGSZ", "640") or 640)
+# CPU 推理线程数（0=保持 Ultralytics 默认；2 vCPU 机器默认只会给推理 1 个线程）
+YOLO_NUM_THREADS = int(os.environ.get("YOLO_NUM_THREADS", "0") or 0)
 # 行人类别 ID
 PERSON_CLASS_ID = 0
 # YOLO 跟踪器配置
@@ -121,6 +123,10 @@ VIDEO_FPS = int(os.environ.get("VIDEO_FPS", "30"))
 VIDEO_MIN_FPS = 5
 # 自适应帧率上限
 VIDEO_MAX_FPS = 30
+# 文件/上传源分析抽帧目标帧率：0=逐帧（原行为）；>0 时按源帧率抽帧
+# （如源 60fps + 12 → 每 5 帧取 1 帧，播放时长接近源时长，分析密度随之下降）。
+# 只影响 kind=file 的零售会话；RTSP/摄像头/本机摄像头不受影响。
+FILE_ANALYSIS_FPS = int(os.environ.get("FILE_ANALYSIS_FPS", "0") or 0)
 # 摄像头请求帧率
 VIDEO_CAMERA_FPS = 30
 # 推送画面宽度（高度按原始宽高比计算）
