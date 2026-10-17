@@ -25,6 +25,7 @@ import (
 	"retail-assistant/edge/internal/httpx"
 	"retail-assistant/edge/internal/metrics"
 	"retail-assistant/edge/internal/proxy"
+	"retail-assistant/edge/internal/report"
 	"retail-assistant/edge/internal/routing"
 	"retail-assistant/edge/internal/static"
 	"retail-assistant/edge/internal/store"
@@ -36,7 +37,8 @@ type app struct {
 	st   *static.Handler
 	px   *proxy.Proxy
 	gate *auth.Gate
-	vid  *video.Handler // nil = 视频数据面未启用（WS 照旧反代）
+	vid  *video.Handler  // nil = 视频数据面未启用（WS 照旧反代）
+	rep  *report.Handler // nil = 汇报扇出未启用（WS 照旧反代）
 }
 
 // ServeHTTP 是唯一的请求入口：先归类（决定本地处理还是反代），
@@ -59,6 +61,23 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"ip", httpx.ClientIP(r.RemoteAddr),
 		)
 	}()
+
+	// 汇报广播入口（Python → edge）：只在本进程启用时处理，其余 /internal/**
+	// 仍落到下面的 switch 返回本地 404。
+	if a.rep != nil {
+		if a.rep.HandleInternal(rw, r) {
+			return // kind 已是 Internal（routing.Classify 的归类）
+		}
+	}
+
+	// 汇报订阅 WS（/api/ws/reports 与兼容别名）：归类之前先问扇出层。
+	// 与视频一样只认真正的升级请求；不接管就落回 switch 走兜底反代。
+	if a.rep != nil {
+		if k, handled := a.rep.Handle(rw, r); handled {
+			kind = k
+			return
+		}
+	}
 
 	// 视频 WS（/api/ws/stream、/api/ws/client）：归类之前先问数据面。
 	// 它只认真正的升级请求；不接管（没开、拿不准结论、正在关闭）就返回 false，
@@ -147,6 +166,19 @@ func main() {
 	a := &app{m: m, st: static.New(cfg.DistDir), px: px,
 		gate: auth.NewGate(verifier, gateEnabled)}
 
+	// 主动汇报 WS 扇出（S4，可选，EDGE_REPORT=1）。汇报消息由 Python 生成，
+	// edge 只负责连接与扇出；Python 经 /internal/report/broadcast 投递。
+	rep := report.New(report.Options{
+		Enabled: cfg.EdgeReport, InternalToken: cfg.InternalToken,
+	})
+	if rep.Enabled() {
+		a.rep = rep
+	} else if cfg.EdgeReport {
+		slog.Warn("EDGE_REPORT=1 但 INTERNAL_API_TOKEN 为空：" +
+			"汇报扇出未接管，/api/ws/reports 照旧反代给 Python")
+	}
+	m.SetReportSource(rep.MetricsSource()) // 未启用也挂上：/metrics 能看出"没在接管"
+
 	// 入库写者（S4，可选，GO_OWNS_INGEST_WRITES=1）。前提是视频数据面已接管：
 	// 入库事件只走那条上行流；没有它，Python 侧也不会再直写这三张表。
 	var ingestStore *store.Store
@@ -207,8 +239,11 @@ func main() {
 		slog.Info("收到退出信号，开始优雅关闭", "signal", sig.String())
 	}
 
-	// 视频连接**必须在 Shutdown 之前**收掉：WS 握手时连接已被 Hijack，
+	// 汇报与视频连接**必须在 Shutdown 之前**收掉：WS 握手时连接已被 Hijack，
 	// 不在 http.Server 的管理范围内 —— Shutdown 既不等它们，也关不掉它们。
+	if a.rep != nil {
+		a.rep.Close()
+	}
 	if a.vid != nil {
 		a.vid.Close()
 	}

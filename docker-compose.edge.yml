@@ -47,6 +47,12 @@ services:
       # 1 = Python 不再直写，只在上行流里发 kind=4 事件；0 = 保持原行为。
       # 启用还要求 EDGE_VIDEO=1（否则没有上行流，事件无人消费、三张表不会写入）。
       GO_OWNS_INGEST_WRITES: "${GO_OWNS_INGEST_WRITES:-0}"
+      # 主动汇报 WS 扇出（S4）。**必须与 edge 容器同值**：1 = Python 不再
+      # 依赖本地订阅集合，把汇报 POST 给 edge 的 `/internal/report/broadcast`；
+      # 0 = 保持原行为（本地扇出，edge 整条反代）。地址由同一覆盖层注入，
+      # 本机双进程验证时可用 EDGE_REPORT_URL 指向 edge 的实际端口。
+      EDGE_REPORT: "${EDGE_REPORT:-0}"
+      EDGE_REPORT_URL: "${EDGE_REPORT_URL:-http://edge:8000}"
 
   # ---------------- 边缘网关（Go，唯一对外进程） ----------------
   edge:
@@ -85,6 +91,10 @@ services:
       # 且鉴权开关齐备（edge 启动日志会在不满足时明确报错，/metrics 的 ingest 段
       # 在未启用时为 null）。
       GO_OWNS_INGEST_WRITES: "${GO_OWNS_INGEST_WRITES:-0}"
+      # 主动汇报 WS 扇出（S4）：1 = 接管 /api/ws/reports 与兼容别名，并开放
+      # Python → edge 的 `/internal/report/broadcast`。要求 INTERNAL_API_TOKEN
+      # 非空，否则静默回退为整条反代（edge 启动日志会告警）。
+      EDGE_REPORT: "${EDGE_REPORT:-0}"
       # MySQL 连接（仅入库写者使用）。与 backend 相同的变量名与取值来源；
       # 口令优先读 mysql_root（与 mysql_db.py 一致），启动日志只报告是否已设置。
       MYSQL_HOST: "mysql"

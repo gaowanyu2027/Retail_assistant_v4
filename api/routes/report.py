@@ -14,13 +14,33 @@ from api.schemas import (
     PopularityReportResponse, AnomalyReportResponse, DashboardSnapshot,
     ZoneStatsResponse,
 )
+from config.settings import EDGE_REPORT, EDGE_REPORT_URL, INTERNAL_API_TOKEN
 
 router = APIRouter(tags=["report"])
 
 # ==================== 主动汇报 WebSocket 推送 ====================
 
+# EDGE_REPORT=1 时订阅连接由 Go edge 持有，这里只保留本地回退：
+# 直连 Python 的调试连接、以及 edge 未接管（反代）时的原有拓扑。
+# 生产拓扑下这两个模块级单例是空集 / 仅用于本地投递。
 _report_clients: set[WebSocket] = set()
 _report_loop: asyncio.AbstractEventLoop | None = None
+
+# 内网调用**不经过环境变量里的 HTTP 代理**（汇报必须直达 edge；代理通常
+# 只对公网配置，把内网地址也丢进去只会多一跳或直接失败）。
+# 懒加载：启动阶段其它线程正在导入 LLM/HTTP 依赖栈，这里若在模块导入时
+# 拉入 `urllib.request`，Python 3.13 的模块锁可能撞上报
+# `deadlock detected by _ModuleLock('urllib3.util')`（实测会让定时汇报
+# 整个启动失败）。汇报是低频调用，第一次投递时再建 opener 没有代价。
+_EDGE_OPENER = None
+
+
+def _edge_opener():
+    global _EDGE_OPENER
+    if _EDGE_OPENER is None:
+        import urllib.request
+        _EDGE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _EDGE_OPENER
 
 
 def set_report_loop(loop: asyncio.AbstractEventLoop | None):
@@ -59,7 +79,18 @@ async def report_ws_legacy(websocket: WebSocket):
 
 
 def broadcast_report(payload: dict):
-    """向所有订阅者推送汇报（可从后台线程调用）。"""
+    """向所有订阅者推送汇报（可从后台线程调用）。
+
+    EDGE_REPORT=1 时订阅连接由 Go edge 持有：先本地投递（直连 Python 的调试
+    连接 / 回退拓扑），再把同一条消息交给 edge 扇出。远程失败只记日志——
+    汇报是低频的尽力而为消息，不能反过来影响定时任务。
+    """
+    _broadcast_local(payload)
+    _broadcast_edge(payload)
+
+
+def _broadcast_local(payload: dict):
+    """原有拓扑：向 Python 进程内的订阅集合投递。"""
     if not _report_clients or _report_loop is None:
         return
 
@@ -74,6 +105,38 @@ def broadcast_report(payload: dict):
         asyncio.run_coroutine_threadsafe(_send(), _report_loop)
     except Exception as e:
         print(f"[ReportWS] 广播失败: {e}")
+
+
+def _broadcast_edge(payload: dict) -> bool:
+    """把一条汇报交给 edge 的内网广播入口（EDGE_REPORT=1 时启用）。
+
+    与 Python 内部端点的门禁一致：`X-Internal-Token` 共享密钥；edge 侧还会
+    校验对端必须是环回/私网/链路本地地址，公网打不到这个端点。
+    """
+    if not EDGE_REPORT or not EDGE_REPORT_URL or not INTERNAL_API_TOKEN:
+        return False
+    import json
+    import urllib.request
+
+    # 与 Starlette 的 send_json 一样用紧凑分隔符；ensure_ascii=False 让中文
+    # 原样走 UTF-8（WS 文本帧本就是 UTF-8，JSON.parse 对两种写法等价）。
+    body = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(
+        EDGE_REPORT_URL + "/internal/report/broadcast",
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Internal-Token": INTERNAL_API_TOKEN,
+        },
+    )
+    try:
+        with _edge_opener().open(req, timeout=3) as resp:
+            return 200 <= resp.status < 300
+    except Exception as e:
+        print(f"[ReportWS] edge 广播失败: {e}")
+        return False
 
 
 # ==================== 报表资源 ====================

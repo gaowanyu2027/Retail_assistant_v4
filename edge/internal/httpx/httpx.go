@@ -18,6 +18,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 )
 
@@ -151,4 +152,17 @@ func ClientIP(remoteAddr string) string {
 		return remoteAddr
 	}
 	return host
+}
+
+// IsPrivateRemote 判定直连对端是否为环回 / 私网 / 链路本地地址。
+// 解析失败（含空地址）一律拒绝——安全默认值。
+//
+// 用于所有"只允许内网同伴进程访问"的本地端点（/metrics、/internal/report/**）：
+// edge 是最外层，RemoteAddr 就是真实对端，不存在需要信任的转发头。
+func IsPrivateRemote(remoteAddr string) bool {
+	ip, err := netip.ParseAddr(ClientIP(remoteAddr))
+	if err != nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }

@@ -44,12 +44,15 @@ const (
 	// video.Handler.Handle 判定后指派**，Classify 不会返回它 —— 同一个路径上的
 	// 普通 HTTP 请求与"未接管（交回反代）"的 WS 请求都还是 Proxy。
 	Video
+	// Report 主动汇报 WS：由 edge 的 report.Handler 接管（EDGE_REPORT=1）。
+	// 同样只能由 Handler 指派 —— 未接管时仍是 Proxy。
+	Report
 )
 
 // AllKinds 全部处理方式（配置遍历 / 指标初始化用，顺序稳定）。
-var AllKinds = [...]Kind{Proxy, Index, Static, Health, Fallback, Metrics, Internal, Video}
+var AllKinds = [...]Kind{Proxy, Index, Static, Health, Fallback, Metrics, Internal, Video, Report}
 
-var kindNames = [...]string{"proxy", "index", "static", "health", "fallback", "metrics", "internal", "video"}
+var kindNames = [...]string{"proxy", "index", "static", "health", "fallback", "metrics", "internal", "video", "report"}
 
 func (k Kind) String() string {
 	if int(k) < 0 || int(k) >= len(kindNames) {

@@ -588,6 +588,16 @@ AUTH_TRUST_FORWARDED_FOR = os.environ.get("AUTH_TRUST_FORWARDED_FOR", "0") == "1
 # 默认空 = 内部端点一律 404（当作路径不存在，避免误暴露）；edge 拓扑下由覆盖文件
 # 把同一个值注入两侧。轮换方式：改 .env 后 `docker compose up -d`（容器创建时才读环境）。
 INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "")
+# 主动汇报 WS 的扇出归属（S4）。
+# EDGE_REPORT=1 时 edge 接管 /api/ws/reports（含兼容别名 /api/report/ws/reports），
+# Python 的 broadcast_report 除本地投递外，还会把同一条消息 POST 给 edge 的
+# `/internal/report/broadcast`，由 edge 扇出给订阅者。默认 0 = 行为与之前完全一致
+# （edge 整条反代这些路径，Python 的订阅集合负责广播）。
+# 启用前提：INTERNAL_API_TOKEN 非空且与 edge 同值，否则不发远程广播（本地仍投递）。
+EDGE_REPORT = os.environ.get("EDGE_REPORT", "0") == "1"
+# edge 的内网地址，只在 EDGE_REPORT=1 时使用。覆盖层默认注入
+# http://edge:8000；本机双进程验证时可指向 edge 的实际端口。
+EDGE_REPORT_URL = os.environ.get("EDGE_REPORT_URL", "").rstrip("/")
 # 首次启动自动创建的 root 账号名
 AUTH_ROOT_USERNAME = os.environ.get("AUTH_ROOT_USERNAME", "root")
 # 初始 root 密码；不设则随机生成并在终端打印一次

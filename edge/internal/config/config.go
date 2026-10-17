@@ -42,6 +42,10 @@ type Config struct {
 	// 开 = edge 从上行流接收 kind=4 事件并落库；Python 侧不再直写。
 	// **必须与 EDGE_VIDEO=1 同时使用**：没有上行流就没有入库事件。
 	GoOwnsIngest bool
+	// EdgeReport 主动汇报 WS（/api/ws/reports）的订阅与扇出是否由 edge 接管，
+	// 环境变量 EDGE_REPORT（取值 "1"），默认关。关 = 整条反代给 Python。
+	// **启用前提**：INTERNAL_API_TOKEN 非空（Python → edge 的广播入口要校验密钥）。
+	EdgeReport bool
 	// MySQL 连接参数（仅 GoOwnsIngest=1 时使用）。与 Python 侧同名环境变量，
 	// 口令优先读 mysql_root（与 mysql_db.py 的既有约定一致）。
 	MySQLHost     string
@@ -61,6 +65,7 @@ func Load() Config {
 		InternalToken: strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN")),
 		EdgeVideo:     envOr("EDGE_VIDEO", "0") == "1",
 		GoOwnsIngest:  envOr("GO_OWNS_INGEST_WRITES", "0") == "1",
+		EdgeReport:    envOr("EDGE_REPORT", "0") == "1",
 		MySQLHost:     envOr("MYSQL_HOST", "mysql"),
 		MySQLPort:     envOrInt("MYSQL_PORT", 3306),
 		MySQLUser:     envOr("MYSQL_USER", "root"),
@@ -74,9 +79,9 @@ func Load() Config {
 // （密钥不进日志），只报告口令是否已设置。
 func (c Config) String() string {
 	return fmt.Sprintf("listen=%s backend=%s dist=%s edge_auth=%t internal_token_set=%t "+
-		"edge_video=%t go_owns_ingest=%t mysql=%s:%d/%s mysql_password_set=%t",
+		"edge_video=%t go_owns_ingest=%t edge_report=%t mysql=%s:%d/%s mysql_password_set=%t",
 		c.Listen, c.BackendURL, c.DistDir, c.EdgeAuth, c.InternalToken != "",
-		c.EdgeVideo, c.GoOwnsIngest, c.MySQLHost, c.MySQLPort, c.MySQLDatabase,
+		c.EdgeVideo, c.GoOwnsIngest, c.EdgeReport, c.MySQLHost, c.MySQLPort, c.MySQLDatabase,
 		c.MySQLPassword != "")
 }
 
