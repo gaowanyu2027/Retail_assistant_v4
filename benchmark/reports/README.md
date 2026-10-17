@@ -1,6 +1,7 @@
 # 压测与路由等价报告索引
 
-本目录保存 `benchmark/loadtest.py` 与 `benchmark/route_parity.py` 的原始输出。
+本目录保存 `benchmark/loadtest.py`、`benchmark/route_parity.py` 与
+`benchmark/ingest_parity.py` 的原始输出。
 除早期 v3 基线外，均为**本机环回环境**（`127.0.0.1`）的测量；QPS/延迟绝对值受开发机
 当时负载影响，只用于同一时段内的相对对照。文件名中的时间戳为报告生成时间。
 
@@ -14,6 +15,17 @@
 | `route_parity_20261016_193419.json` | S2：8013 直连 vs 8014 edge（`EDGE_AUTH=1`） | 118 × 2 = 236 | 0 |
 | `route_parity_20261017_111727.json` | S3：8013 直连 vs 8014 edge（视频接管验收） | 122 × 2 = 244 | 0 |
 | `route_parity_20261017_115328.json` | S3：同上（复跑） | 122 × 2 = 244 | 0 |
+
+## 入库等价（ingest_parity）
+
+`ingest_parity_<label>_<时间戳>.json` 是一轮运行的快照（三张视频派生表的归一化行），
+`ingest_parity_diff_<时间戳>.json` 是两份快照的对账报告。对比口径见
+`benchmark/ingest_parity.py` 的模块说明：剔除运行相关字段、`retail_stats` 按 zone
+折叠到最新分钟桶、数值走显式容差。
+
+| 报告 | 写者 | 差异 |
+|---|---|---|
+| （尚无） | — | S4 的 Go 写者实现后补录 |
 
 ## 并发压测（loadtest）
 
