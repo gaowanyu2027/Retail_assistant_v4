@@ -305,7 +305,7 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 | 架构 | 单进程 FastAPI 直接对外 | **Go edge 对外 + Python 后端内网**（S0–S3 已上线；S4 开关默认关闭） |
 | 鉴权 | 完全开放 | 账号密码登录 + 三档角色（root/platform/viewer）+ 限流 + 一次性票据 |
 | 端 | 仅网页 | 网页 + **微信小程序**（各自适配鉴权） |
-| Agent | 8 个工具、函数式汇报 | **15 个工具** + **LangGraph StateGraph** 汇报工作流 |
+| Agent | 8 个工具、函数式汇报 | **16 个工具**（15 个基础工具 + 表情统计）+ **LangGraph StateGraph** 汇报工作流 |
 | 数据可信 | 无 | **可信度门禁** + **来源显式标注**（pos/simulated/test） |
 | 业务能力 | 仅当前统计 | **同期对比**（昨天/上周）+ 销量接入与**目录自动同步** |
 | CV | 单路 | **多摄像头模块化**（按标签加载、数据隔离、多路真并行） |
