@@ -4,9 +4,11 @@
   <a href="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml">
     <img src="https://github.com/gaowanyu2027/Retail_assistant_v4/actions/workflows/eval-gate.yml/badge.svg?branch=main" alt="CI（单测门禁 + 评测门禁）">
   </a>
-  <img src="https://img.shields.io/badge/unit%20tests-205%20passed-2ea44f" alt="205 个单测用例">
+  <img src="https://img.shields.io/badge/unit%20tests-307%20passed-2ea44f" alt="307 个单测用例">
   <img src="https://img.shields.io/badge/eval%20cases-85-1f6feb" alt="85 条评测集">
   <img src="https://img.shields.io/badge/python-3.13-3776AB" alt="Python 3.13">
+  <img src="https://img.shields.io/badge/Go-1.24-00ADD8" alt="Go 1.24">
+  <img src="https://img.shields.io/badge/route%20parity-0%20diff-2ea44f" alt="路由等价差异 0">
   <img src="https://img.shields.io/badge/docker-compose-2496ED" alt="Docker Compose">
   <a href="http://182.92.31.32:8000">
     <img src="https://img.shields.io/badge/Live%20Demo-182.92.31.32%3A8000-2ea44f" alt="在线演示">
@@ -16,6 +18,7 @@
 > **在线演示（阿里云 ECS · Docker Compose 部署）**：<http://182.92.31.32:8000>
 > 演示账号请在 issue 里留言索取，或自行按 [快速开始](#快速开始三步) 本地跑起来（**不要用真实数据**）。
 > 说明：大陆节点 + 非标端口访问，**无需 ICP 备案**；因服务器为 2 vCPU，实时视频分析帧率会明显低于本地。
+> 线上拓扑为 **Go edge 对外 + Python 后端内网**（S0–S3 已上线；S4 开关默认关闭），见下文「Go + Python 混合架构」。
 
 面向线下门店的 **AI Agent 落地系统**：Agent 通过**工具调用**消费结构化经营数据，
 完成自然语言问答与运营归因，最终通过**网页与微信小程序双端**交付。
@@ -23,6 +26,8 @@
 > **这是 Agent 项目，不是 CV 项目。** 摄像头只是**感知层**（数据来源）——
 > 真正的工程重心在：**Agent 编排与工具调用**、**断言式评测与 CI 门禁**、
 > **数据可信度门禁（防 Agent 编结论）**、**外部依赖的熔断/舱壁**、**LLM 用量与成本可观测**。
+>
+> 2026-10 起在保持 Agent 主线不变的前提下，把**公网连接、鉴权前置、视频会话与扇出、汇报推送、三张视频派生表入库**增量迁到 Go edge；Python 仍负责采集/推理/Agent。迁移按 S0–S4 分阶段进行，每阶段可回退：S0–S3 已上线，S4 代码完成、开关默认关闭。
 
 核心主张是**先保证数据可信、再给出结论**——设备故障与"真实零客流"被明确区分，
 数据来源（真实接入 / 演示 / 测试）显式标注，避免 Agent 用不可信数据给出自信的错误结论。
@@ -43,7 +48,10 @@
 
 ```mermaid
 flowchart TB
-    U["用户<br/>网页 / 微信小程序"] --> API["FastAPI · 约 105 个接口<br/>/api/chat · /api/reports · /api/analytics"]
+    U["用户<br/>网页 / 微信小程序"] --> EDGE["Go edge · 唯一对外进程<br/>静态 / 健康 / 鉴权早拒 / 兜底反代"]
+    EDGE -->|"HTTP 反代"| API["FastAPI · 106 个 API 路径<br/>/api/chat · /api/reports · /api/analytics"]
+    EDGE -->|"会话控制"| VIS["Python 视觉会话<br/>采集 / YOLO / 编码（S3）"]
+    VIS -->|"内网帧流"| EDGE
 
     subgraph AGENT["Agent 层（本项目的重心）"]
         IR["intent_router<br/>规则 + 语义路由"]
@@ -71,12 +79,15 @@ flowchart TB
 
     subgraph OPS["质量门禁与交付"]
         O1["评测门禁<br/>85 条断言式用例<br/>意图 / 工具选择 / 防幻觉"]
-        O2["单测门禁<br/>161 个用例 + Node 行为断言"]
-        O3["Docker Compose 四服务<br/>非 root · 镜像钉 digest · 依赖锁"]
+        O2["单测门禁<br/>307 个 Python 用例 + 12 个 Go 测试包"]
+        O3["Docker Compose 基础四服务<br/>+ 可选 edge 覆盖层（第五个服务）"]
         O4["健康检查 + LLM 指标<br/>liveness / readiness / 成本"]
+        O5["路由等价 / 入库对账<br/>115→122 路径 · 差异 0"]
     end
 ```
 
+> 线上拓扑（`docker-compose.edge.yml`）：浏览器/小程序只连 Go edge（对外 8000），edge 负责静态、健康、鉴权早拒与未迁路由反代；`EDGE_VIDEO=1` 时视频 WS 的会话/扇出也在 edge，Python 只产帧。S0–S3 已上线，S4 的汇报 WS 与入库写者默认关闭。
+>
 > 想先看**感知层（CV）怎么接进来的**？见文末「感知层」一节 —— 它在本项目里的定位是
 > **数据来源**：`open_source` 统一入口 → CV 管线 → skills → 落库，之后就交给 Agent 了。
 
@@ -85,14 +96,58 @@ flowchart TB
 | 维度 | 现状 |
 |---|---|
 | **Agent** | **21 个模块**：意图路由 → LangGraph StateGraph 编排 → DeepSeek；工具含 SQL 查询、业务分析、地图 MCP、向量记忆；**LLM 用量/延迟/成本可观测**（按用途归因） |
-| **评测与质量** | **85 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **205** 个单测用例（`python tests/run_tests.py`，秒级跑完）+ Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
-| **可靠性** | 向量层熔断 + 舱壁、外部依赖降级、**静默失败治理**（错误通道、看门狗）、健康检查 liveness/readiness 分离 |
+| **评测与质量** | **85 条断言式评测集**（意图 / **工具选择** / 关键词 / **防幻觉负面断言** / 多轮）+ **307** 个 Python 单测用例（`python tests/run_tests.py`，秒级跑完）+ **12 个 Go 测试包**（`cd edge && go test ./...`）+ Node 行为断言；**CI 双门禁**，不依赖 LLM 自评 |
+| **可靠性** | 向量层熔断 + 舱壁、外部依赖降级、**静默失败治理**（错误通道、看门狗）、健康检查 liveness/readiness 分离；**Go edge 与 Python 分容器**，Python 停机时静态页与 liveness 仍可用 |
 | **数据可信度** | 断流与真实零值分离、来源显式标注（`pos`/`simulated`/`test`/`video`）、问答链路带可信度门禁 |
-| **接口** | 约 **105** 个（13 个路由模块：问答 / 分析 / 报告 / 视频流 / 鉴权 / 地图 / 语音 / TTS） |
-| **数据层** | MySQL（业务）+ SQLite（鉴权 / 降级回退）+ Qdrant（向量，熔断 + 舱壁）+ Redis（常驻） |
-| **安全** | 登录鉴权 + **三档权限矩阵**（`root` / `platform` / `viewer`；`require_perm` 30 处调用，写路由 22 条挂权限 + 17 条有意白名单、由守卫测试固化）、会话滑动续期、**工具调用的入参校验与 SSRF 守卫**、上传四道约束、安全响应头 |
+| **接口** | **106** 个 `/api` 路径（13 个路由模块：问答 / 分析 / 报告 / 视频流 / 鉴权 / 地图 / 语音 / TTS；另有 7 个内网端点不对外） |
+| **数据层** | MySQL（业务）+ SQLite（鉴权 / 降级回退）+ Qdrant（向量，熔断 + 舱壁）+ Redis（常驻）；三张视频派生表支持 Go 批量写入（`GO_OWNS_INGEST_WRITES=1`，默认关闭） |
+| **安全** | 登录鉴权 + **三档权限矩阵**（`root` / `platform` / `viewer`；`require_perm` 30 处调用，写路由 22 条挂权限 + 17 条有意白名单、由守卫测试固化）、会话滑动续期、**工具调用的入参校验与 SSRF 守卫**、上传四道约束、安全响应头；Go edge **鉴权早拒**（5s 正缓存 / 2s 负缓存、失败 fail-open），内部端点做密钥 + 内网对端门禁 |
 | **感知层（CV）** | YOLO 行人检测 + 跟踪 + ROI 热度、异常行为告警、人脸表情识别；按机位类型加载模块 |
-| **交付** | Docker Compose 四服务、**非 root** 容器、镜像 `tag@digest`、`requirements.lock.txt` 精确重建 |
+| **交付** | Docker Compose **基础四服务 + 可选 Go edge 覆盖层**（第五个服务）、**非 root** 容器、镜像 `tag@digest`、Go 依赖 `vendor` 零外网、`requirements.lock.txt` 精确重建 |
+
+## Go + Python 混合架构（S0–S4）
+
+线上拓扑从"FastAPI 单进程直接对外"改为"**Go edge 对外 + Python 后端只监听内网**"，按语言优势分工：
+
+- **Go 负责**：静态托管、健康检查、鉴权早拒（5s 正缓存 / 2s 负缓存，校验失败 fail-open）、未迁路由兜底反代；`EDGE_VIDEO=1` 时视频 WS 的会话仲裁 / 扇出 / 背压；`EDGE_REPORT=1` 时汇报 WS 扇出；`GO_OWNS_INGEST_WRITES=1` 时三张视频派生表入库。
+- **Python 负责**：采集/解码/YOLO/ByteTrack/ROI/skills/标注/JPEG、LangGraph Agent、MySQL/Qdrant/Ollama；**`auth.db` 唯一写者仍是 Python**。
+- **三条边界**：Go 不碰像素；Python 不碰公网连接；一表一个写者，安全关键代码不复制。
+
+分阶段上线，每阶段都有独立开关：
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| S0 | 协议契约冻结（`contracts/` golden）+ 去除帧 base64 往返 | 已上线 |
+| S1 | Go edge 静态 / 健康 / 兜底反代 + 登录限流 IP 口径 | 已上线 |
+| S2 | 鉴权判定前移到 edge + Python 内网端点 | 已上线 |
+| S3 | 视频数据面：per-connection 会话 / 扇出 / 丢帧在 Go | 已上线 |
+| S4 | 三张视频派生表 Go 写者 + 汇报 WS 扇出 | 代码完成，开关默认关闭 |
+
+实测结果（本机 A/B 与服务端验收，非估算）：
+
+| 指标 | 结果 |
+|---|---|
+| 静态资源吞吐 | 214.7 → **320.4 QPS（+49%）**，P95 595 → 372ms（1.26MB JS，c100×2000） |
+| 问答链路 | 直连/经 edge 交替 A/B：32.3/37.8、38.4/39.0 QPS（c100×1000 模板轮），**无退化** |
+| 路由等价 | 115/118/122 条路径 × 匿名/登录（S1/S2/S3），状态码 / 响应头 / 响应体**差异 0** |
+| 鉴权回源 | 有效会话 **5s 一次**、无效凭据 **2s 负缓存**、匿名 **0 回源** |
+| 慢客户端隔离 | 慢客户端丢 5 帧时快客户端 **0 丢帧**；控制消息优先于后续视频帧 |
+| 连接泄漏 | 200 次连接/断开，goroutine 13 → 峰值 55 → 收敛 9 |
+| 视频会话中压测 | 35.8 → **43.7 QPS**，0% 错误（c50×400） |
+| 入库对账 | 真实 MySQL 同视频双跑 3 vs 3 **差异 0**；三表回放**差异 0**（150 帧 `demo_loop.mp4`） |
+| 测试 | Python **205 → 307**；Go **12 个测试包** |
+| 进程占用 | edge 工作集约 **19MB**（同机 Python 后端约 2.1GB） |
+
+回退开关（改 `.env` 后需 `docker compose ... up -d` 重建容器才生效）：
+
+| 开关 | 默认 | 作用 |
+|---|---|---|
+| `EDGE_AUTH=0` | 1 | 关闭 edge 鉴权早拒，全部反代 |
+| `EDGE_VIDEO=0` | 0 | 视频 WS 整条反代回 Python |
+| `EDGE_REPORT=0` | 0 | 汇报 WS 整条反代回 Python |
+| `GO_OWNS_INGEST_WRITES=0` | 0 | Python 继续直写三张视频派生表 |
+
+> **诚实边界**：S4 尚未部署（开关默认关闭）；Go 不加速 YOLO/LLM，收益来自连接模型、故障隔离与可回退的渐进迁移；Python 后端仍是单进程。逐项验收与坑位见 [`改进记录.md`](改进记录.md) 模块 D 与 [`部署流程.md`](部署流程.md) §3.16。
 
 ## Agent 侧证据
 
@@ -157,11 +212,31 @@ docker compose up -d --build  # 起 backend + MySQL + Qdrant + Redis
 
 > 不想用容器？`python run.py` 直接跑宿主（此时**能用本机物理摄像头**；容器模式下 WSL2 看不到设备）。
 
+线上同款拓扑（Go edge 对外、backend 转内网，可选）：
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d --build
+```
+
+回退命令见下方「Go edge 覆盖层」。
+
 ## 如何复现上面那些数字
 
 ```powershell
-python tests/run_tests.py                          # 161 个单元用例（零依赖，CI 用的就是它）
+python tests/run_tests.py                          # 307 个 Python 单元用例（零依赖，CI 用的就是它）
 python evals/run_evals.py                          # 85 条断言式评测（意图/工具选择/防幻觉，需 MySQL + LLM Key）
+
+# Go 边缘网关（12 个测试包；纯标准库，不需要 MySQL）
+cd edge
+go test ./...
+go vet ./...
+cd ..
+
+# 路由等价：直连 Python 与经 Go edge 逐个比对（需两个服务已启动；启动方式见脚本头部注释）
+python benchmark/route_parity.py --direct http://127.0.0.1:8001 --gate http://127.0.0.1:8000
+
+# 三张视频派生表对账（需 MySQL；子命令见 --help）
+python benchmark/ingest_parity.py --help
 
 # LLM 用量与成本（Agent 侧指标；按用途归因 answer / report / summary / title）
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/metrics/llm
@@ -173,6 +248,7 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 ```
 
 - 逐条修复的**原始数字与 A/B 对照**： [`改进记录.md`](改进记录.md)（按模块归档 + 附四台账）
+- Go 混合架构的逐阶段验收（S0–S4）： [`改进记录.md`](改进记录.md) 模块 D；上线/回退见 [`部署流程.md`](部署流程.md) §3.16
 - 云服务器 Docker 部署（阿里云 ECS 实战）： [`docs/DEPLOY.md`](docs/DEPLOY.md)（镜像加速 / swap / 精简挂载 / uid 1000 权限 / 安全清单 / 回滚）
 - 压测报告： `benchmark/reports/`
 - 排障记录（真实故障复盘）： 容器化后摄像头打不开、`auth.db` 打不开、构建不可复现等
@@ -199,6 +275,7 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 
 | 维度 | v3 | v4 |
 |---|---|---|
+| 架构 | 单进程 FastAPI 直接对外 | **Go edge 对外 + Python 后端内网**（S0–S3 已上线；S4 开关默认关闭） |
 | 鉴权 | 完全开放 | 账号密码登录 + 三档角色（root/platform/viewer）+ 限流 + 一次性票据 |
 | 端 | 仅网页 | 网页 + **微信小程序**（各自适配鉴权） |
 | Agent | 8 个工具、函数式汇报 | **15 个工具** + **LangGraph StateGraph** 汇报工作流 |
@@ -221,36 +298,46 @@ python tools/observe_tracks.py --mint-session --seconds 30     # 旁观统计 tr
 - 会话记录：新建、保存、切换、重命名、删除会话
 - MySQL 持久化：表情、问答历史、会话、语音日志、TTS 缓存、视频记录、ROI 配置
 - 向量召回：Qdrant 本地模式 + Ollama bge-small-zh-v1.5
+- Go edge 网关：静态托管、鉴权早拒、视频会话/扇出、汇报推送、三张视频派生表入库（增量迁移，可回退）
 
 ## 技术栈
 
 - Python 3.13
-- FastAPI + Uvicorn + WebSocket
+- FastAPI + Uvicorn + WebSocket/SSE
+- **Go 1.24**：标准库边缘网关（静态 / 反代 / 鉴权早拒 / WS 扇出 / 入库写者），唯一第三方依赖 MySQL 驱动（vendor 入库）
+- LangChain + LangGraph + DeepSeek：Agent 编排与问答
 - Ultralytics YOLO26n + ByteTrack
 - PyTorch + OpenCV
 - sherpa-onnx：KWS 唤醒 + 流式中文 ASR
 - edge-tts：服务端中文语音合成
-- LangChain + DeepSeek：Agent 问答
 - MySQL：业务数据持久化
 - Qdrant + Ollama：查询历史向量召回
-- HTML/CSS/JS：前端界面
+- Vue 3 + Vite：浏览器前端
+- Docker Compose + GitHub Actions：容器化与 CI/CD
 
 ## 目录结构
 
 ```text
 .
 ├── agents/                  # LangChain Agent + 模块注册表 + 百度地图工具 + 数据可信度/同期对比
-├── api/                     # FastAPI 路由 + 鉴权（security.py / routes/auth.py）
+├── api/                     # FastAPI 路由 + 鉴权（security.py / routes/auth.py / internal.py）
+├── vision/                  # Python 视觉会话（per-connection session / pipeline / ingest）
+├── edge/                    # Go 边缘网关（静态/健康/鉴权早拒/反代/视频扇出/汇报/入库）
+├── contracts/               # 跨语言契约 golden（WS 消息/权限矩阵/鉴权策略/入库事件）
 ├── config/                  # 全局配置 + ROI + cameras.yaml
 ├── cv_engine/               # YOLO、跟踪、表情、ROI、多路视频引擎
 ├── skills/                  # 热度、告警、表情 + 客流/空货架模块
 ├── frontend-vue/            # 浏览器前端（Vue3 + Vite，唯一前端）
 ├── miniprogram/             # 微信小程序端（问答/看板/监控/摄像头管理/语音）
 ├── evals/                   # 自动化评测集（85 条）+ CI 门禁
-├── benchmark/               # 并发压测脚本与报告
+├── benchmark/               # 压测 / 路由等价 / 入库对账脚本与报告
 ├── docs/                    # 截图素材（界面预览）与部署手册 DEPLOY.md
 ├── data/                    # 运行时数据：SQLite、鉴权库、销量投递目录、日志
+├── docker-compose.yml       # 基础四服务
+├── docker-compose.edge.yml  # Go edge 覆盖层（第五个服务，线上形态）
+├── edge.Dockerfile          # Go edge 多阶段镜像
 ├── 改进记录.md               # v3 → v4 改进记录（问题/做法/验证/收益）
+├── 部署流程.md               # 实际部署与回退台账（含 Go edge 覆盖层）
 ├── all_models/              # sherpa-onnx 语音模型
 ├── sherpa-onnx-kws-*        # KWS 唤醒词模型
 ├── yolo26n.pt               # YOLO 小模型
@@ -560,6 +647,33 @@ docker compose logs -f backend     # 观察启动日志（root 口令只在鉴�
 > **端口**：`backend` 发布 `8000`；`mysql` 为了用 Navicat 等 GUI 连库，按需发布为
 > **`127.0.0.1:3306`（只绑本机、不对局域网开放）**，不想要就把 `docker-compose.yml` 里那段 `ports` 注释掉；
 > `qdrant` / `redis` 的 `ports` 默认注释、仅在 compose 网络内通过服务名访问，要用 `redis-cli` 等调试时再取消注释。
+>
+> 上表是**基础拓扑**（`docker-compose.yml`）。线上/演示形态叠加 `docker-compose.edge.yml`：
+> 新增 `edge` 服务（Go，唯一对外 `8000`），`backend` 不再发布宿主机端口，只经 compose 内网被 edge 访问。
+
+### Go edge 覆盖层（可选，线上形态）
+
+```powershell
+# 启动：基础拓扑 + edge（对外 8000 换到 edge，backend 转内网）
+docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d --build
+
+# 回退：必须连 overlay 一起 down，再按基础拓扑起
+docker compose -f docker-compose.yml -f docker-compose.edge.yml down
+docker compose -f docker-compose.yml up -d --build
+```
+
+覆盖层的关键开关（默认值即"不接管"）：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `EDGE_AUTH` | 1 | edge 鉴权早拒；设为 0 全部反代 |
+| `EDGE_VIDEO` | 0 | 视频 WS 会话/扇出在 edge；设 1 启用 |
+| `EDGE_REPORT` | 0 | 汇报 WS 扇出在 edge；设 1 启用 |
+| `GO_OWNS_INGEST_WRITES` | 0 | 三张视频派生表由 edge 写；设 1 启用 |
+
+> `EDGE_VIDEO=1` 还要求 `EDGE_AUTH=1` 且 `INTERNAL_API_TOKEN` 非空，否则静默回退为整条反代；
+> `GO_OWNS_INGEST_WRITES=1` 还要求 `EDGE_VIDEO=1`。改 `.env` 后必须重新 `up -d`（容器创建时才读入），
+> 必要时加 `--force-recreate`。完整验收/回退见 [`部署流程.md`](部署流程.md) §3.16。
 
 ### 健康检查：liveness 与 readiness 分开
 
@@ -587,6 +701,9 @@ curl http://localhost:8000/api/health/ready
 > **为什么必须两个都有**：本项目实际发生过"MySQL 口令没传进容器 → 后端静默回退 SQLite
 > → `/api/health` 依然 200 healthy → 编排与看板全以为正常，但业务数据一条都读不到"。
 > liveness 探针**天然发现不了**这类问题。修好后该场景会立刻变 `unavailable`。
+>
+> 叠加 edge 覆盖层后，edge 自身用 `/api/health` 做 liveness（后端不可用时不判死），
+> `/api/health/ready` 仍由 backend 判定并经 edge 反代——这就是"Python 挂了，静态页与存活探针还在"的故障隔离。
 
 ### 镜像与依赖版本（可复现性）
 
@@ -632,7 +749,7 @@ docker buildx du --verbose | Select-String -Pattern 'pulled from .*(python|node)
 
 ### 日志轮转（避免吃满磁盘）
 
-四个服务都配了 `json-file` 驱动的轮转（`max-size: 50m` / `max-file: 5`，单服务约 250MB 封顶）。
+所有服务都配了 `json-file` 驱动的轮转（`max-size: 50m` / `max-file: 5`，单服务约 250MB 封顶；edge 覆盖层复用同一组配置）。
 项目里有约 240 处 `print()` 全走 stdout（实测口径：排除 vendored 与测试脚本），而 Docker 默认**无大小上限**——叠加每 10 分钟一轮的
 LLM 汇报与每 60 秒的销量目录扫描，长期运行会把宿主机磁盘逐步吃满，
 而磁盘满又会连带 MySQL 写入失败，属于"平时无感、出事很惨"。
@@ -643,14 +760,14 @@ LLM 汇报与每 60 秒的销量目录扫描，长期运行会把宿主机磁盘
 
 | 项 | 何时需要 | 说明 |
 |---|---|---|
-| Nginx 反向代理 | 公网访问 | 统一入口 + HTTPS 终止 + 静态资源缓存。当前 backend 自己提供前端产物且只发布 8000，单机够用 |
-| Prometheus + Grafana | 多实例/多店 | 当前用 readiness 探针 + 容器健康状态已够；指标端点尚无，需要时再加 |
+| Nginx 反向代理 | 公网访问 | 统一入口 + HTTPS 终止 + 静态资源缓存。当前 Go edge 已承担统一入口、静态托管与反代，单机够用；需要 HTTPS 时可在 edge 前加 Nginx |
+| Prometheus + Grafana | 多实例/多店 | edge 已提供 `/metrics`（连接/鉴权/视频/汇报/入库计数），但未接采集与告警；当前用 readiness + 容器健康状态够用 |
 | 日志聚合（Loki/ELK） | 多实例 | 当前单机 `docker compose logs` 足够 |
 | 消息队列（RabbitMQ/Celery） | 出现真正的异步重任务 | 现在视频处理、定时汇报、销量扫描**已有后台线程**；真正该先修的是"处理线程异常静默死亡"（见 `改进记录.md` 审计待办），而不是引入 MQ |
 
 ### 统一入口：一条命令管起全部环境
 
-本项目只依赖 compose 编排的四个服务；但**可观测平台 Langfuse 是独立的一套 compose 栈**
+本项目基础拓扑是 compose 编排的四个服务（启用 edge 覆盖层后为五个服务）；但**可观测平台 Langfuse 是独立的一套 compose 栈**
 （在 `D:\langfuse\`，有自己的 `.env` 与 postgres 卷）。为此提供一个包装脚本：
 
 ```powershell
@@ -662,6 +779,8 @@ LLM 汇报与每 60 秒的销量目录扫描，长期运行会把宿主机磁盘
 ```
 
 只想操作本项目时，照旧直接用 `docker compose`（行为与以前完全一致）。
+> `stack.ps1` 管理的是基础拓扑；启用 edge 覆盖层时直接用
+> `docker compose -f docker-compose.yml -f docker-compose.edge.yml ...`，或把第二组 `-f` 加进脚本。
 
 > ⚠ **为什么用脚本而不是 compose 的 `include:` 把两个文件合并**
 >
@@ -695,24 +814,25 @@ Redis 已作为**常驻服务**纳入 compose（`--maxmemory 256mb --maxmemory-p
 - **实时视频帧 / `_active_camera`**：高频且体积大，进程内比走网络快
 
 
-### 四个设计说明
+### 五个设计说明
 
 **① 前端在镜像内构建（多阶段）**
-`frontend-vue/dist` 被 `.gitignore` 忽略，别人 clone 后没有前端产物。因此 Dockerfile 用
-node 阶段执行 `npm ci && npm run build`，再 COPY 进 Python 运行阶段——
-**使用者在宿主机无需安装 Node**，`docker build` 一步到位。
+`frontend-vue/dist` 被 `.gitignore` 忽略，别人 clone 后没有前端产物。因此 `Dockerfile` 与 `edge.Dockerfile`
+都用同一个 node 基础镜像 digest 和同一组 `npm ci && npm run build` 步骤，再 COPY 进运行阶段——
+**两者托管的前端产物逐字一致，使用者在宿主机无需安装 Node**，`docker build` 一步到位。
 
 **② 模型与数据用挂载，不打进镜像**
 `yolo26n.pt` / `best.pt` / `mobilenetv3_fer_best.pth` / `all_models/` / KWS 模型
 以只读卷挂载，`data/`（含鉴权库、销量投递目录）为可写挂载。这样镜像更小，也符合
 "模型权重不进镜像"的做法。
 
-**③ 摄像头与 GPU 留在边缘（本地）**
+**③ 摄像头与 GPU 留在本地（店内）**
 本编排覆盖的是"**云端/业务侧**"——业务 API、Agent 问答、数据存储。
-容器内直通摄像头/GPU 在 Windows 上尤其别扭，且原始视频流不该走公网，因此建议：
+容器内直通摄像头/GPU 在 Windows 上尤其别扭，且原始视频流不该走公网，因此建议
+（这里说的"边缘"是**店内设备**，不是上文的 Go edge 网关）：
 
 ```
-边缘（本地/店内）:  摄像头 → YOLO 推理 → 结构化结果
+店内（本地）:      摄像头 → YOLO 推理 → 结构化结果
                                     ↓（只传几 KB 的 JSON）
 云端（本编排）:    业务 API + Agent + MySQL/Qdrant + 多端展示
 ```
@@ -727,6 +847,11 @@ Dockerfile 有 `COPY . .`，会把它能看到的**一切**烤进镜像层。若
 因此 `.dockerignore` 显式排除 `.env` / `.env.*` / `*.pem` / `*.key`——
 环境变量一律由 `env_file` 在**运行时**注入。这与 `.gitignore` 的规则是两套独立机制，
 **只加 `.gitignore` 并不防 Docker**，容易漏。
+
+**⑤ 一表一个写者，安全关键代码不复制**
+`data/auth.db` 的唯一写者始终是 Python（SQLite journal 用 DELETE，WAL 在 bind mount 上会 I/O error）；
+Go edge 只通过 Python 内网端点做校验，不持有 `auth.db` 句柄。视频源守卫、带 `seq_no` 的读改写事务也留在 Python。
+S4 的三张视频派生表写者由 `GO_OWNS_INGEST_WRITES` 切换，切换前先跑 `benchmark/ingest_parity.py` 对账。
 
 ### 从 `docker run` 迁移过来（重要）
 
@@ -833,6 +958,15 @@ docker exec mysql-main mysqldump -uroot -p retail_assistant > backup.sql
 
 如果显示“回退到 SQLite”，说明 MySQL 环境变量没有生效。
 
+### Go edge 没有接管
+
+先在 edge 上看 `/metrics`（内网访问）的 `edge_auth`、`video`、`report.enabled`、`ingest` 段——`ingest` 为 `null` 说明入库写者未启用；`video` 的 `upstream_connected` / `endpoints` 和 `report.enabled` 能看出是否接管。再核对：
+
+- 视频：`EDGE_VIDEO=1` 还要求 `EDGE_AUTH=1` 且 `INTERNAL_API_TOKEN` 非空；否则启动日志会提示并静默回退（《部署流程》坑 28）。
+- 汇报：`EDGE_REPORT=1` 要求两侧 `INTERNAL_API_TOKEN` 同值；否则 Python 仍本地扇出、edge 只做反代（坑 35）。
+- 入库：`GO_OWNS_INGEST_WRITES=1` 还要求 `EDGE_VIDEO=1`；否则没有 `kind=4` 上行事件，三张表不会写入（坑 33）。
+- 改完 `.env` 必须 `docker compose ... up -d`（必要时 `--force-recreate`），容器创建时才读环境变量。
+
 ### 语音没有回复
 
 - 手机端必须使用 HTTPS
@@ -852,7 +986,7 @@ ollama pull qllama/bge-small-zh-v1.5
 
 ## 备注
 
-本项目默认使用单进程运行。本地 Qdrant 模式不支持多个 Python 进程同时打开同一个向量库目录；如果后续使用多进程或多机部署，需要切换为 Qdrant Server 模式。
+Python 后端默认单进程运行；Go edge 是独立进程/容器（线上拓扑下唯一对外 8000）。本地 Qdrant 模式不支持多个 Python 进程同时打开同一个向量库目录；如果后续使用多进程或多机部署，需要切换为 Qdrant Server 模式。
 
 ## 感知层（CV：数据来源）
 
@@ -866,6 +1000,7 @@ ollama pull qllama/bge-small-zh-v1.5
 |---|---|
 | 视频源 | 统一入口 `open_source({kind: camera｜device｜file｜upload｜client｜rtsp})`；协议白名单 + 目录白名单 + **SSRF 守卫**（环回/云元数据永久封禁、公网默认拒、私网放行）+ 凭据脱敏 |
 | 采集路径 | **服务端侧**（文件 / RTSP / 服务端物理设备）与**浏览器侧**（`getUserMedia` 采帧经 `/api/ws/client` 上行）两条，按"谁持有设备"分工 |
+| 连接与扇出 | `EDGE_VIDEO=1` 时，观看端 WS 连接、会话仲裁、扇出与丢帧在 Go edge；Python 只保留采集/推理/编码，经内网帧流送给 edge。`EDGE_VIDEO=0` 时整条反代回 Python（兼容路径） |
 | 分析 | 按机位类型加载模块（`indoor_shelf` / `entrance` / `checkout` 三类候选池），每摄像头独立实例（数据隔离） |
 | 与 Agent 的接口 | `data_quality` 可信度门禁（断流 0 与真实零值分开）+ 来源显式标注（`video`/`pos`/`simulated`/`test`） |
 
