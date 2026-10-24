@@ -188,23 +188,53 @@ async def _ensure_session_writable(session_id: str) -> None:
 # 响应立即返回；持久化失败仅打印告警，不影响主链路。
 _persist_sem = asyncio.Semaphore(16)
 
+# 模板轮检查点写入**单独一条后台通道**：不能和 `_persist_query_history` 共用
+# `_persist_sem` 排队。实测（c100 × 1000，向量层舱壁打满时）共用队列会让检查点
+# 写入排在 embedding 后面：一次跑完仅落库 235/1000 行；拆开后同一场景 1010 行
+# 在约 10 秒内全部落库（再快也快不过检查点的进程级单锁，约 100 行/秒）。
+# 行已按 AGENT_TEMPLATE_MEMORY_MAX_TURNS 裁剪（6.6–7.4KB），8 并发足够。
+_memory_sem = asyncio.Semaphore(8)
+
+
+def _remember_template_turn(session_id: str, question: str, answer: str) -> None:
+    """后台线程里补写模板轮检查点（Agent 走缓存，取不到就建）。"""
+    agent = _agent_cache.get(session_id)
+    if agent is None:
+        agent = _get_agent(session_id)
+    agent.remember_template_turn(question, answer, session_id)
+
 
 def fire_persist(session_id: str, question: str, answer: str, intent: str = "general",
-                 owner: str = ""):
+                 owner: str = "", *, remember_turn: bool = False):
     """后台异步持久化：不阻塞响应。限流 16 并发，超出排队。
 
     `owner`（B3）在**调用点**取好再传进来（不依赖后台任务去读上下文）：
     归属写错等于把数据记到别人名下，显式传参更不容易出错。
+
+    `remember_turn=True`：模板轮，把检查点记忆补写也放到后台——**独立任务、独立
+    限流**，不排在 MySQL/向量持久化后面（见 `_memory_sem` 注释）。
+    调用方必须以 `quick_answer(..., remember=False)` 调用，否则会重复写一次。
     """
     async def _do():
         try:
             async with _persist_sem:
                 await asyncio.to_thread(
-                    _persist_query_history, session_id, question, answer, intent, owner
+                    _persist_query_history, session_id, question, answer, intent, owner,
                 )
         except Exception as e:
             print(f"[Persist] 后台持久化失败: {e}")
 
+    async def _do_memory():
+        try:
+            async with _memory_sem:
+                await asyncio.to_thread(
+                    _remember_template_turn, session_id, question, answer,
+                )
+        except Exception as e:
+            print(f"[TemplateMemory] 后台写入模板轮失败(不影响回答): {e}")
+
+    if remember_turn:
+        asyncio.create_task(_do_memory())
     asyncio.create_task(_do())
 
 
@@ -223,12 +253,14 @@ async def create_query(request: QueryRequest):
         # 意图路由：数据类问题直接模板回答（零 LLM）
         intent = route_intent(request.question)
         quick = await asyncio.to_thread(
-            agent.quick_answer, intent, request.question, request.session_id
+            agent.quick_answer, intent, request.question, request.session_id,
+            remember=False,
         )
         if quick is not None:
             fire_persist(
                 request.session_id, request.question,
                 quick.get("answer", ""), quick.get("intent", "general"), owner,
+                remember_turn=True,
             )
             return QueryResponse(**quick)
 
@@ -265,7 +297,8 @@ async def create_query_stream(request: QueryRequest):
         # 意图路由：数据类问题直接模板回答（零 LLM）
         intent = route_intent(request.question)
         quick = await asyncio.to_thread(
-            agent.quick_answer, intent, request.question, request.session_id
+            agent.quick_answer, intent, request.question, request.session_id,
+            remember=False,
         )
         if quick is not None:
             async def quick_generator():
@@ -274,6 +307,7 @@ async def create_query_stream(request: QueryRequest):
                 fire_persist(
                     request.session_id, request.question,
                     quick.get("answer", ""), quick.get("intent", "general"), owner,
+                    remember_turn=True,
                 )
 
             return StreamingResponse(

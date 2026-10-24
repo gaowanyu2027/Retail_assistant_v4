@@ -741,18 +741,28 @@ class MasterAgent:
 
     # ==================== 意图路由快速回答（零 LLM 调用） ====================
 
-    def quick_answer(self, intent: str, query: str, session_id: str = "default") -> dict | None:
+    def quick_answer(self, intent: str, query: str, session_id: str = "default",
+                     *, remember: bool = True) -> dict | None:
         """意图路由器命中的数据类/闲聊类问题：直接调 skill 或模板回答（毫秒级）。
 
         返回 None 表示不适用（应走完整 Agent）。返回结构与 handle_query 一致。
         外层包装：模板回答也打 Langfuse trace（无 Key 时 no-op 降级）。
+
+        `remember=False`：由调用方把检查点写入挪到后台。HTTP 请求路径用它
+        （见 `api/routes/query.py` 的 `fire_persist(remember_turn=True)`）——
+        同步写会让每个模板请求多付一次 11–32ms 的 MySQL 检查点写入，
+        而全部写入被检查点的进程级单锁串行化（实测 c100 325 → 42 QPS）。
         """
         result = self._quick_answer_inner(intent, query, session_id)
-        if result is not None:
+        if result is not None and remember:
             # 模板轮也要进检查点线程，否则下一轮的 LLM 看不到"上一轮问了什么"（见该方法注释）
             self._remember_template_turn(query, result.get("answer", ""), session_id)
         self._lf_quick_finish(query, intent, session_id, result)
         return result
+
+    def remember_template_turn(self, query: str, answer: str, session_id: str) -> None:
+        """公开入口：后台持久化路径复用它把模板轮写进检查点线程。"""
+        self._remember_template_turn(query, answer, session_id)
 
     def _remember_template_turn(self, query: str, answer: str, session_id: str) -> None:
         """把模板轮（零 LLM）的一问一答追加进该会话的检查点线程。

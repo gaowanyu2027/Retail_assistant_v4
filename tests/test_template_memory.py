@@ -19,9 +19,11 @@ CI 首次真跑就挂了 10 个文件（见 改进记录"CI 首跑"一节）。
   1. 写入内容与结构正确（config 走 configurable / Human 在前 AI 在后）；
   2. 开关关闭 → 完全不写（可退回旧行为，省一次 MySQL 写入）；
   3. 写入异常 → **不抛出**（模板路径的意义是毫秒级可用）；
-  4. 空回答不写垃圾进线程。
+  4. 空回答不写垃圾进线程；
+  5. 超过 `max_turns` 的旧消息被裁剪（检查点每轮整行重写，行会随会话线性变大）。
 """
 import sys
+import types
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,8 +36,9 @@ from agents.memory_append import append_template_turn  # noqa: E402
 class _Msg:
     """桩消息类（替代 langchain_core 的 HumanMessage / AIMessage）。"""
 
-    def __init__(self, content=""):
+    def __init__(self, content="", id=None):
         self.content = content
+        self.id = id
 
     def __repr__(self):
         return f"{type(self).__name__}({self.content!r})"
@@ -49,12 +52,29 @@ class _AI(_Msg):
     pass
 
 
+class _Remove:
+    """桩 RemoveMessage。"""
+
+    def __init__(self, id):
+        self.id = id
+
+    def __repr__(self):
+        return f"RemoveMessage({self.id!r})"
+
+
 class _StubGraph:
     """记录 update_state 调用的桩图（不连任何数据库）。"""
 
-    def __init__(self, boom: bool = False):
+    def __init__(self, boom: bool = False, history=None, get_state_boom: bool = False):
         self.calls: list[tuple] = []
         self.boom = boom
+        self.history = list(history or [])
+        self.get_state_boom = get_state_boom
+
+    def get_state(self, config):
+        if self.get_state_boom:
+            raise RuntimeError("state unavailable")
+        return types.SimpleNamespace(values={"messages": list(self.history)})
 
     def update_state(self, config, values):
         if self.boom:
@@ -150,3 +170,86 @@ def test_empty_answer_is_not_written():
     g = _StubGraph()
     assert _call(g, a="") is False
     assert g.calls == [], g.calls
+
+
+def test_old_turns_are_trimmed_to_cap():
+    """max_turns=3：12 条历史 → 只留最近 2 轮（4 条），再加本次一问一答。"""
+    history = []
+    for i in range(6):
+        history.append(_Human("问题%d" % i, id="h%d" % i))
+        history.append(_AI("回答%d" % i, id="a%d" % i))
+    g = _StubGraph(history=history)
+    ok = append_template_turn(g, "s1", "新问题", "新回答", human_cls=_Human, ai_cls=_AI,
+                              remove_cls=_Remove, max_turns=3)
+    assert ok is True
+    _, values = g.calls[0]
+    msgs = values["messages"]
+    # 前 4 轮（8 条）删掉，留最近 2 轮 + 本次一问一答
+    assert [m.id for m in msgs[:8]] == ["h0", "a0", "h1", "a1", "h2", "a2", "h3", "a3"], msgs
+    assert all(isinstance(m, _Remove) for m in msgs[:8]), msgs
+    assert isinstance(msgs[-2], _Human) and isinstance(msgs[-1], _AI), msgs
+
+
+def test_no_trim_when_under_cap():
+    history = [_Human("q", id="h0"), _AI("a", id="a0")]
+    g = _StubGraph(history=history)
+    append_template_turn(g, "s1", "q", "a", human_cls=_Human, ai_cls=_AI,
+                         remove_cls=_Remove, max_turns=3)
+    msgs = g.calls[0][1]["messages"]
+    assert len(msgs) == 2, msgs
+    assert all(isinstance(m, _Msg) for m in msgs), msgs
+
+
+def test_get_state_failure_falls_back_to_append_only():
+    """读状态失败 → 只追加、不裁剪，写入本身照常成功。"""
+    g = _StubGraph(get_state_boom=True)
+    assert _call(g) is True
+    assert len(g.calls[0][1]["messages"]) == 2, g.calls
+
+
+def test_max_turns_zero_disables_trimming():
+    history = [_Human("q%d" % i, id="h%d" % i) for i in range(10)]
+    g = _StubGraph(history=history)
+    append_template_turn(g, "s1", "q", "a", human_cls=_Human, ai_cls=_AI,
+                         remove_cls=_Remove, max_turns=0)
+    assert len(g.calls[0][1]["messages"]) == 2, g.calls
+
+
+def test_messages_without_ids_skip_trimming():
+    """历史消息没有 id 时无从删除 → 放弃裁剪，绝不写坏线程。"""
+    history = [_Human("q%d" % i) for i in range(10)]
+    g = _StubGraph(history=history)
+    append_template_turn(g, "s1", "q", "a", human_cls=_Human, ai_cls=_AI,
+                         remove_cls=_Remove, max_turns=3)
+    assert len(g.calls[0][1]["messages"]) == 2, g.calls
+
+
+class _FlakyGraph(_StubGraph):
+    """第一次带删除的写入失败（模拟并发删同一个 id），之后正常。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.delete_seen = False
+
+    def update_state(self, config, values):
+        has_remove = any(isinstance(v, _Remove) for v in values["messages"])
+        if has_remove and not self.delete_seen:
+            self.delete_seen = True
+            raise RuntimeError(
+                "Attempting to delete a message with an ID that doesn't exist ('x')"
+            )
+        super().update_state(config, values)
+
+
+def test_delete_failure_falls_back_to_append_only():
+    """删旧失败不能丢这一轮：退回只追加，写入仍算成功。"""
+    history = []
+    for i in range(6):
+        history.append(_Human("问题%d" % i, id="h%d" % i))
+        history.append(_AI("回答%d" % i, id="a%d" % i))
+    g = _FlakyGraph(history=history)
+    ok = append_template_turn(g, "s1", "新问题", "新回答", human_cls=_Human, ai_cls=_AI,
+                              remove_cls=_Remove, max_turns=3)
+    assert ok is True
+    assert len(g.calls) == 1, g.calls
+    assert len(g.calls[0][1]["messages"]) == 2, g.calls

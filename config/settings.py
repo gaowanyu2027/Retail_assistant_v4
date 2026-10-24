@@ -215,6 +215,11 @@ AGENT_LONG_TERM_KEYWORD_LIMIT = 10
 # c100 模板吞吐从 200 QPS 级降到 35 QPS 级（见《改进记录》模块 D 续10）。
 AGENT_REMEMBER_TEMPLATE_TURNS = os.environ.get(
     "AGENT_REMEMBER_TEMPLATE_TURNS", "1") == "1"
+# 模板轮记忆保留的轮数上限（0 = 不裁剪）。检查点每轮整行重写、行内含整段会话，
+# 实测 74 轮时行 108KB、单次写入 32.4ms，且全部写入被进程级单锁串行化
+# （见《改进记录》模块 D 续13）→ 只保留最近 N 轮，行大小稳定在 ~N×1.3KB。
+AGENT_TEMPLATE_MEMORY_MAX_TURNS = int(
+    os.environ.get("AGENT_TEMPLATE_MEMORY_MAX_TURNS", "10"))
 
 # ==================== Agent 存储清理策略 ====================
 # 每个会话(thread)保留的最新检查点数量（LangGraph 恢复只用最新，旧的可安全清理）
